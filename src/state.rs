@@ -1173,7 +1173,7 @@ impl VimState {
         self.lenient_actions
     }
 
-    /// Apply a parsed user config (`~/.gpui-vimrc` style): options via the
+    /// Apply a parsed user config (`~/.vimcorerc` style): options via the
     /// `:set` machinery, mappings into the per-mode mapping tables.
     pub fn apply_config(&mut self, config: &crate::config::Config) -> crate::config::ConfigStats {
         let mut stats = crate::config::ConfigStats::default();
