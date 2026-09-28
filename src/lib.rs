@@ -1,4 +1,4 @@
-//! vim-core: a host-agnostic Vim engine.
+//! vimcore: a host-agnostic Vim engine.
 //!
 //! The engine knows nothing about gpui, windows, fonts or the system
 //! clipboard. It operates on a buffer through the [`buffer::VimBufferMut`]
@@ -15,7 +15,7 @@
 //! │ gpui-vim (integration crate)                 │  keystroke interception,
 //! │  · VimSession entity + key interception      │  mode indicator helpers
 //! ├──────────────────────────────────────────────┤
-//! │ vim-core (this crate)                        │  pure engine:
+//! │ vimcore (this crate)                        │  pure engine:
 //! │  · mode machine, key pipeline, tries         │  testable without a GUI
 //! │  · motions, operators, objects, registers,   │
 //! │    search, marks, undo semantics             │

@@ -9,7 +9,7 @@
 mod common;
 
 use common::{edit, Fixture};
-use gpui_vim_core::key::Key;
+use vimcore::key::Key;
 
 // ---- gq format operator ------------------------------------------------------
 
@@ -183,7 +183,7 @@ fn space_leader_from_vimrc_space_notation() {
     // notation was substituted back into the raw string and re-parsed.
     let text = "let mapleader = \"<Space>\"\nmap <Leader>q :action T.Q<CR>\n";
     let mut f = Fixture::at("foo\n", 0, 0);
-    let config = gpui_vim_core::config::parse(text);
+    let config = vimcore::config::parse(text);
     f.vim.apply_config(&config);
     f.feed_raw(Key::named("space"));
     f.feed(["q"]);
@@ -198,7 +198,7 @@ fn space_key_matches_char_space_mappings() {
     let mut f = Fixture::at("foo\n", 0, 0);
     f.vim
         .keymaps_mut()
-        .map_str_noremap(gpui_vim_core::keymap::ModeClass::Normal, "<Space>x", "x", true);
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "<Space>x", "x", true);
     f.feed_raw(Key::named("space"));
     f.feed(["x"]);
     assert_eq!(f.text(), "oo\n");
@@ -269,26 +269,26 @@ fn bs_moves_left_in_normal_and_operator_pending() {
 fn bs_in_visual_shrinks_selection() {
     let f = edit("abcdef", 0, 3, &["v", "<BS>"]);
     assert_eq!(f.cursor(), 2, "选区活动端左移");
-    assert!(matches!(f.vim.mode(), gpui_vim_core::Mode::Visual { .. }));
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
 }
 
 #[test]
 fn ctrl_c_cancels_cmdline_like_esc() {
     let mut f = Fixture::at("foo\n", 0, 0);
     f.feed([":", "x"]);
-    assert!(matches!(f.vim.mode(), gpui_vim_core::Mode::CommandLine { .. }));
+    assert!(matches!(f.vim.mode(), vimcore::Mode::CommandLine { .. }));
     f.feed_raw(Key::parse("<C-c>"));
-    assert!(matches!(f.vim.mode(), gpui_vim_core::Mode::Normal));
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Normal));
     assert_eq!(f.vim.cmdline.buffer, "");
 
     // search prompts behave the same, including an empty prompt
     f.feed(["/", "a"]);
     f.feed_raw(Key::parse("<C-c>"));
-    assert!(matches!(f.vim.mode(), gpui_vim_core::Mode::Normal));
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Normal));
 }
 
 #[test]
 fn ctrl_c_exits_visual() {
     let f = edit("abcdef", 0, 1, &["v", "l", "l", "<C-c>"]);
-    assert!(matches!(f.vim.mode(), gpui_vim_core::Mode::Normal));
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Normal));
 }

@@ -3,10 +3,10 @@
 //! builtin chords — mappings go through the Waiting path; builtins share one
 //! trie and never conflict).
 
-use gpui_vim_core::buffer::{VimBuffer, VimBufferMut};
-use gpui_vim_core::host::{ScrollAnchor, VimHost};
-use gpui_vim_core::key::Key;
-use gpui_vim_core::state::{Ctx, VimState};
+use vimcore::buffer::{VimBuffer, VimBufferMut};
+use vimcore::host::{ScrollAnchor, VimHost};
+use vimcore::key::Key;
+use vimcore::state::{Ctx, VimState};
 
 struct B(String);
 impl VimBuffer for B {
@@ -90,8 +90,8 @@ fn feed(vim: &mut VimState, buf: &mut B, host: &mut H, keys: &[&str]) {
             vim.handle_key(&mut ctx, key.clone())
         };
         // host-side placement for insert-mode printables (dispatch_text's job)
-        if result == gpui_vim_core::state::KeyResult::Unknown
-            && matches!(vim.mode(), gpui_vim_core::mode::Mode::Insert)
+        if result == vimcore::state::KeyResult::Unknown
+            && matches!(vim.mode(), vimcore::mode::Mode::Insert)
         {
             if let Some(c) = key.printable_char() {
                 let mut ctx = Ctx { buf, host };
@@ -132,7 +132,7 @@ fn gi_inserts_at_last_insert_exit() {
     assert_eq!(vim.cursor.offset, 0);
     feed(&mut vim, &mut buf, &mut host, &["g", "i"]);
     assert!(
-        matches!(vim.mode(), gpui_vim_core::mode::Mode::Insert),
+        matches!(vim.mode(), vimcore::mode::Mode::Insert),
         "gi enters insert"
     );
     // vim `^` semantics: leaving insert backs onto the last typed char
