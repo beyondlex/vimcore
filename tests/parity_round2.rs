@@ -12,8 +12,8 @@
 mod common;
 
 use common::{edit, Fixture};
-use gpui_vim_core::key::{Key, parse_key_sequence};
-use gpui_vim_core::registers::{RegisterKind, CLIPBOARD, UNNAMED, YANK};
+use vimcore::key::{Key, parse_key_sequence};
+use vimcore::registers::{RegisterKind, CLIPBOARD, UNNAMED, YANK};
 
 fn feed(edit: &mut Fixture, keys: &str) {
     for k in parse_key_sequence(keys) {
@@ -309,7 +309,7 @@ fn gq_wraps_by_display_width_for_cjk() {
     f.vim.options_mut().textwidth = 10;
     f.feed(["g", "q", "q"]);
     for line in f.text().lines() {
-        let w: usize = line.chars().map(gpui_vim_core::buffer::char_display_width).sum();
+        let w: usize = line.chars().map(vimcore::buffer::char_display_width).sum();
         assert!(w <= 10, "折行后每行显示宽度不得超过 textwidth: {line}");
     }
     assert_eq!(f.text().lines().count(), 3, "5 个词应折成 2+2+1 三行");
