@@ -6,6 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Lex"]
 repository = "https://github.com/beyondlex/vimcore"
+readme = "README.md"
 keywords = ["vim", "editor", "engine", "modal", "tui"]
 categories = ["text-processing", "command-line-interface"]
 
