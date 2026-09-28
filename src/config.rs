@@ -1,4 +1,4 @@
-//! Parser for `~/.gpui-vimrc` style configuration — the IdeaVim-compatible
+//! Parser for `~/.vimcorerc` style configuration — the IdeaVim-compatible
 //! subset: `set` options, `:map`-family mappings (with `<Leader>`), `"`
 //! comments and `source`. Anything else (Lua, functions, autocmds, plugin
 //! managers) is collected into `Config::ignored` and skipped, like IdeaVim.
