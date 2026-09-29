@@ -22,7 +22,7 @@ fn visual_indent_applies_the_count() {
     );
     // in NORMAL mode the count means LINES, not shiftwidths (vim `3<<`
     // outdents three lines by one shiftwidth each)
-    let mut f = edit("        l1\n        l2\n        l3\n", 0, 0, &["3", "<", "<"]);
+    let f = edit("        l1\n        l2\n        l3\n", 0, 0, &["3", "<", "<"]);
     assert_eq!(
         f.text(),
         "    l1\n    l2\n    l3\n",
@@ -184,10 +184,10 @@ fn mapping_prefix_with_children_still_falls_through() {
 /// offset 1 used to panic the copied impl).
 #[test]
 fn tck_reference_impl_reads_non_boundaries_as_none() {
-    use vimcore::buffer::{floor_to_char_boundary, VimBuffer};
+    use vimcore::buffer::floor_to_char_boundary;
     use vimcore::tck::buffer_read_contract;
 
-    let mut buf = vimcore::tck::TckStrBuf::from_text("中文mix\n行2");
+    let buf = vimcore::tck::TckStrBuf::from_text("中文mix\n行2");
     buffer_read_contract(&buf).unwrap();
     // "中文" occupies bytes 0..6; boundaries are 0, 3, 6
     assert_eq!(floor_to_char_boundary(&buf, 1), 0, "floors onto a boundary");
