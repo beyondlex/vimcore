@@ -106,7 +106,7 @@ pub trait VimBufferMut: VimBuffer {
     }
 }
 
-/// Clamp helpers: engine offsets are always char boundaries that stay inside
+// Clamp helpers: engine offsets are always char boundaries that stay inside
 // their line — every offset arriving from OUTSIDE the engine (a host click,
 // a stored mark after a length-preserving replace, a stale jumplist entry)
 // passes through these before the cursor or `offset_to_line` sees it.

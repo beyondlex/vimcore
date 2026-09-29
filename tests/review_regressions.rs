@@ -233,6 +233,7 @@ fn dollar_delete_span_covers_wide_last_char() {
 }
 
 #[test]
+#[allow(non_snake_case)]
 fn g__skips_trailing_blanks_and_lands_on_char_start() {
     // g_ goes to the last NON-BLANK char; it also used to return `end - 1`,
     // i.e. the trailing blank itself (and mid-char after a wide char).
@@ -458,8 +459,8 @@ fn angle_keys_accept_lowercase_modifier_prefixes() {
     assert_eq!(Key::parse("<c-a>"), Key::parse("<C-a>"));
     assert_eq!(Key::parse("<C-a>").kind, KeyKind::Char('a'));
     assert!(Key::parse("<c-a>").modifiers.control);
-    assert_eq!(Key::parse("<C-S-a>").modifiers.control, true);
-    assert_eq!(Key::parse("<C-S-a>").modifiers.shift, true);
+    assert!(Key::parse("<C-S-a>").modifiers.control);
+    assert!(Key::parse("<C-S-a>").modifiers.shift);
     // a plain <s-x> keeps the shift flag on the char
     assert!(Key::parse("<s-x>").modifiers.shift);
     assert_eq!(Key::parse("<s-x>").kind, KeyKind::Char('x'));
@@ -646,7 +647,7 @@ fn fuzz_random_key_sequences_hold_invariants() {
             // exercise the IME text path too: while in insert/replace, type
             // some text the way a host delivers composed input
             if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
-                && fuzz_xorshift(&mut state) % 4 == 0
+                && fuzz_xorshift(&mut state).is_multiple_of(4)
             {
                 f.type_text("tx中");
             }
