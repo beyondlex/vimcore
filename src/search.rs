@@ -132,9 +132,19 @@ pub fn jump_to_match(
             .rposition(|m| m.start < cursor)
             .unwrap_or(matches.len() - 1)
     };
-    // u64 arithmetic is deliberate: a huge typed count must wrap through
-    // the `% matches.len()` below instead of overflowing usize in debug
-    let index = (start_index as u64 + (count as u64 - 1)) as usize;
+    // `count` steps in the search DIRECTION from the cursor's neighbor
+    // match, wrapping around the list — `2N` is two matches BACKWARD (vim
+    // 9.1: from the last of five matches, 1N→4th, 2N→3rd, 3N→2nd; the old
+    // code walked +count-1 and went FORWARD). u64 math keeps a huge typed
+    // count from overflowing usize in debug builds.
+    let len = matches.len() as u64;
+    let count = count.max(1) as u64;
+    let index = if forward {
+        (start_index as u64 + (count - 1)) as usize
+    } else {
+        let back = (count - 1) % len;
+        (start_index as u64 + len - back) as usize % len as usize
+    };
     Some(matches.get(index % matches.len())?.start)
 }
 

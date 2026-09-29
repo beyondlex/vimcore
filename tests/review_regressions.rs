@@ -345,3 +345,25 @@ fn cw_on_trailing_blanks_keeps_newline_and_indent() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "abX\n  cd");
 }
+
+// ---- n/N with counts (verified against vim 9.1) --------------------------------
+
+/// `/two<CR>` jumps to line 1's match; counts then walk from there, like
+/// probing vim with `let @/ = "two"` + an explicit cursor position.
+#[test]
+fn count_n_steps_forward_wrapping() {
+    let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "2", "n"]);
+    assert_eq!(f.line(), 2, "2n from the first match lands on line 3");
+}
+
+#[test]
+fn count_n_steps_backward() {
+    let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "2", "N"]);
+    assert_eq!(f.line(), 2, "2N wraps past the first match: line 4 is one step back, line 3 is two");
+}
+
+#[test]
+fn plain_n_backward_wraps_to_last_match() {
+    let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "N"]);
+    assert_eq!(f.line(), 3, "N from the first match wraps to the last");
+}
