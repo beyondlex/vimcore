@@ -188,7 +188,9 @@ fn noop_then_undo_reverts_the_real_change_once() {
     f.feed(["x"]); // real change: "ne\n\ntwo\n"
     f.feed(["j", "x"]); // x on the empty line: a no-op
     f.feed(["u"]);
-    assert_eq!(f.text(), "ne\n\ntwo\n", "one u reverts the deletion");
+    // with a phantom group the first u would restore identical text and the
+    // deletion would need a second press
+    assert_eq!(f.text(), "one\n\ntwo\n", "one u reverts the deletion");
 }
 
 /// A cancelled char-argument (`r<Esc>`) opens no group either.
