@@ -74,6 +74,9 @@ cargo test            # 无头测试：引擎全量 + TCK 契约 + 随机 fuzz
 cargo run --release --example bench_probe   # 宿主实现的性能探针
 ```
 
+`NOTES.md` 记录审查结论：已修复的 bug（vim 9.1 探针实证）、与 vim 的
+已知分歧、性能与体验备注——接入前值得通读。
+
 ## 名字沿革
 
 `vim-core` → `gpui-vim-core`（2026-09-20，随 gpui_vim 上 crates.io）→

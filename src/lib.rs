@@ -10,10 +10,10 @@
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────┐
-//! │ your gpui app / editor widget                │
+//! │ your app (gpui / ratatui / crossterm / …)    │
 //! ├──────────────────────────────────────────────┤
-//! │ gpui-vim (integration crate)                 │  keystroke interception,
-//! │  · VimSession entity + key interception      │  mode indicator helpers
+//! │ integration crate (one per frontend)         │  keystroke conversion,
+//! │  · key interception + mode indicator helpers │  text-input bridging
 //! ├──────────────────────────────────────────────┤
 //! │ vimcore (this crate)                        │  pure engine:
 //! │  · mode machine, key pipeline, tries         │  testable without a GUI
