@@ -922,6 +922,23 @@ impl VimState {
 
     // ---- buffer edits (the ONLY mutation paths; keep marks in sync) -------
 
+    /// After the host swapped the text underneath the engine (undo/redo),
+    /// every stored byte offset can be stale: past the end, or inside a
+    /// multi-byte char of the NEW text. Floor them onto the nearest surviving
+    /// boundary so later reads (`gv`, `'>`, `g;`, `C-o`) stay addressable —
+    /// consumers floor individually, but a bounded mark is worth more than a
+    /// clamped read.
+    fn sanitize_stored_offsets(&mut self, buf: &dyn VimBuffer) {
+        let floor = |off: usize| crate::buffer::floor_to_char_boundary(buf, off);
+        self.marks.floor_all(&floor);
+        for pos in self.changes.iter_mut() {
+            *pos = floor(*pos);
+        }
+        for pos in self.jumps.iter_mut() {
+            *pos = floor(*pos);
+        }
+    }
+
     /// Apply a mark-style offset adjustment to the changelist / jumplist.
     /// Both lists store raw byte offsets like the marks do, so they need the
     /// same shifting when the text moves under them (vim adjusts its
@@ -1078,7 +1095,7 @@ impl VimState {
                 // the exclusive end is one CHAR past the cursor — `c + 1`
                 // bytes would land inside a multi-byte cursor char and blow
                 // up `'<`/`'>` range resolution later
-                let end = crate::buffer::next_grapheme_offset(ctx.buf, c).unwrap_or(c + 1);
+                let end = crate::buffer::next_grapheme_offset(ctx.buf, c).unwrap_or(c);
                 self.marks.active_visual = Some((a, end));
             }
         }
@@ -1430,13 +1447,8 @@ impl VimState {
         // selection start, and re-reading the selection after that collapse
         // forward selections (cursor right of anchor) to a single char,
         // breaking `gv`
-        if let Some((anchor, cursor, kind)) = self.visual_selection() {
-            let (lo, hi) = if anchor <= cursor {
-                (anchor, cursor)
-            } else {
-                (cursor, anchor)
-            };
-            let end = ctx.buf.next_char_offset(hi).unwrap_or(hi + 1);
+        if let Some((lo, hi, kind)) = self.clamped_visual_bounds(ctx.buf) {
+            let end = ctx.buf.next_char_offset(hi).unwrap_or(hi);
             self.marks.last_visual = Some((lo, end));
             self.last_visual = Some((lo, end, kind));
             self.cursor.offset = lo;
@@ -1623,14 +1635,26 @@ impl VimState {
         self.recording_blocked = true;
     }
 
+    /// The `(lo, hi, kind)` bounds of the live selection, lo/hi CLAMPED onto
+    /// the current text. An operator may have just deleted the selection's
+    /// bytes: the raw anchor/cursor then point past the new end (or mid-char),
+    /// and storing them un-clamped left `gv`/`'>` reading out-of-bounds
+    /// offsets.
+    fn clamped_visual_bounds(&self, buf: &dyn VimBuffer) -> Option<(usize, usize, VisualKind)> {
+        let (anchor, cursor, kind) = self.visual_selection()?;
+        let (lo, hi) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        let lo = crate::buffer::floor_to_char_boundary(buf, lo);
+        let hi = crate::buffer::floor_to_char_boundary(buf, hi);
+        Some((lo.min(hi), hi.max(lo), kind))
+    }
+
     pub(crate) fn finish_visual_op(&mut self, ctx: &mut Ctx) {
-        if let Some((anchor, cursor, kind)) = self.visual_selection() {
-            let (lo, hi) = if anchor <= cursor {
-                (anchor, cursor)
-            } else {
-                (cursor, anchor)
-            };
-            let end = ctx.buf.next_char_offset(hi).unwrap_or(hi + 1);
+        if let Some((lo, hi, kind)) = self.clamped_visual_bounds(ctx.buf) {
+            let end = ctx.buf.next_char_offset(hi).unwrap_or(hi);
             self.marks.last_visual = Some((lo, end));
             self.last_visual = Some((lo, end, kind));
         }
@@ -2524,6 +2548,7 @@ impl VimState {
                         // and the restored cursor may now sit inside a
                         // multi-byte char — floor before cursor math
                         self.edit_generation += 1;
+                        self.sanitize_stored_offsets(ctx.buf);
                         self.cursor.offset = clamp_to_line_end(
                             ctx.buf,
                             crate::buffer::floor_to_char_boundary(ctx.buf, offset),
@@ -2542,6 +2567,7 @@ impl VimState {
                 for _ in 0..count {
                     if let Some(offset) = ctx.host.redo() {
                         self.edit_generation += 1;
+                        self.sanitize_stored_offsets(ctx.buf);
                         self.cursor.offset = clamp_to_line_end(
                             ctx.buf,
                             crate::buffer::floor_to_char_boundary(ctx.buf, offset),

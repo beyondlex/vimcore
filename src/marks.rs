@@ -129,4 +129,14 @@ impl Marks {
             f(p);
         }
     }
+
+    /// Floor every stored offset onto the text AFTER a host-driven swap
+    /// (undo/redo), where relative adjustment is impossible — the engine
+    /// only sees the new text, so the best it can do is the nearest
+    /// surviving char boundary.
+    pub(crate) fn floor_all(&mut self, floor: &impl Fn(usize) -> usize) {
+        self.for_each_pos(|pos| {
+            *pos = floor(*pos);
+        });
+    }
 }
