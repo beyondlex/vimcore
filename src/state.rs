@@ -1277,20 +1277,20 @@ impl VimState {
     }
 
     pub(crate) fn exit_visual(&mut self, ctx: &mut Ctx) {
-        if let Some((anchor, cursor, _)) = self.visual_selection() {
+        // capture the span BEFORE moving the cursor: the cursor lands on the
+        // selection start, and re-reading the selection after that collapse
+        // forward selections (cursor right of anchor) to a single char,
+        // breaking `gv`
+        if let Some((anchor, cursor, kind)) = self.visual_selection() {
             let (lo, hi) = if anchor <= cursor {
                 (anchor, cursor)
             } else {
                 (cursor, anchor)
             };
             self.marks.last_visual = Some((lo, hi + 1));
-            self.marks.set('<', lo);
-            self.marks.set('>', hi);
+            self.last_visual = Some((lo, hi + 1, kind));
             self.cursor.offset = lo;
         }
-        self.last_visual = self
-            .visual_selection()
-            .map(|(a, c, k)| (a.min(c), c.max(a), k));
         self.visual_anchor = None;
         self.marks.active_visual = None;
         self.mode = Mode::Normal;
