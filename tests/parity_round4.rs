@@ -150,3 +150,51 @@ fn undo_cursor_restore_stays_off_the_newline() {
         "undo lands on a character, not the newline"
     );
 }
+
+// ---- no phantom undo groups --------------------------------------------------
+
+/// No-op commands must not open a host undo group: vim's `u` skips them (vim
+/// 9.1 probe — `x` on an empty line / `J` at EOF / `i<Esc>` leave the undo
+/// count untouched). The engine used to announce a group speculatively at
+/// command start, so a wasted snapshot ate one real `u` press.
+#[test]
+fn noop_commands_open_no_undo_group() {
+    // x on an empty line
+    let mut f = Fixture::new("aaa\n\nbbb\n");
+    f.feed(["j", "x"]);
+    assert_eq!(f.host.group_count, 0, "x on an empty line opens no group");
+
+    // J at the last line
+    let mut f = Fixture::new("aaa\nbbb\n");
+    f.feed(["G", "J"]);
+    assert_eq!(f.host.group_count, 0, "J at EOF opens no group");
+
+    // an empty insert session
+    let mut f = Fixture::new("abc\n");
+    f.feed(["i", "<Esc>"]);
+    assert_eq!(f.host.group_count, 0, "i<Esc> opens no group");
+
+    // p with an empty register
+    let mut f = Fixture::new("abc\n");
+    f.feed(["p"]);
+    assert_eq!(f.host.group_count, 0, "p with an empty register opens no group");
+}
+
+/// The wasted-undo symptom: after a no-op, ONE `u` must revert the previous
+/// real change (not just consume a phantom snapshot of identical text).
+#[test]
+fn noop_then_undo_reverts_the_real_change_once() {
+    let mut f = Fixture::new("one\n\ntwo\n");
+    f.feed(["x"]); // real change: "ne\n\ntwo\n"
+    f.feed(["j", "x"]); // x on the empty line: a no-op
+    f.feed(["u"]);
+    assert_eq!(f.text(), "ne\n\ntwo\n", "one u reverts the deletion");
+}
+
+/// A cancelled char-argument (`r<Esc>`) opens no group either.
+#[test]
+fn cancelled_replace_opens_no_undo_group() {
+    let mut f = Fixture::new("abc\n");
+    f.feed(["r", "<Esc>"]);
+    assert_eq!(f.host.group_count, 0);
+}
