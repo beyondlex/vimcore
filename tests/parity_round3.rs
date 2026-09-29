@@ -238,6 +238,71 @@ fn put_huge_count_is_bounded() {
     assert!(text.len() < 100_000_000, "pasted {} bytes", text.len());
 }
 
+// ---- count-repeat insert ------------------------------------------------------
+
+/// vim's count-repeat insert: `3ifoo<Esc>` types foo three times, `3ofoo<Esc>`
+/// opens three lines, `2a!` doubles the `!`. One undo step; the cursor ends
+/// one left of the LAST copy.
+#[test]
+fn count_repeat_insert() {
+    let mut f = edit("hello\n", 0, 0, &["3", "i"]);
+    f.type_text("ab");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "abababhello\n");
+    assert_eq!(f.cursor(), "ababab".len() - 1);
+    f.feed(["u"]);
+    assert_eq!(f.text(), "hello\n", "one undo step restores everything");
+
+    let mut f = edit("hello\n", 0, 0, &["3", "o"]);
+    f.type_text("ab");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "hello\nab\nab\nab\n");
+    assert_eq!(f.line(), 3);
+
+    let mut f = edit("hello\n", 0, 0, &["2", "a"]);
+    f.type_text("!");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "h!!ello\n");
+
+    // tab-indented o copies keep the indent
+    let mut f = edit("\thello\n", 0, 0, &["2", "o"]);
+    f.type_text("x");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "\thello\n\tx\n\tx\n");
+}
+
+/// Sessions that navigated (cursor left the typed-text end) or typed a
+/// newline don't replicate — vim repeats literal input, we approximate by
+/// only repeating plain type-then-escape.
+#[test]
+fn count_repeat_insert_skips_navigated_sessions() {
+    // cursor moved off the typed-text end: no replication
+    let mut f = edit("hello\n", 0, 0, &["3", "i"]);
+    f.type_text("a");
+    f.feed(["<Left>"]);
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "ahello\n");
+
+    // newline inside the session: no replication
+    let mut f = edit("x\n", 0, 0, &["3", "i"]);
+    f.type_text("a");
+    f.feed(["<Enter>"]);
+    f.type_text("b");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "a\nbx\n");
+
+    // count with c belongs to the motion (2cw changes two words), and the
+    // cw trim still keeps trailing whitespace out
+    let mut f = edit("word rest\n", 0, 0, &["2", "c", "w"]);
+    f.type_text("Z");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "Z\n");
+    let mut f = edit("word rest\n", 0, 0, &["c", "w"]);
+    f.type_text("Z");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "Z rest\n");
+}
+
 // ---- visual r{char} -------------------------------------------------------------
 
 /// vim 9.1 probes: charwise `vll r 0` replaces the covered chars; linewise
