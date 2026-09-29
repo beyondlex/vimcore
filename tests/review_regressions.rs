@@ -367,3 +367,31 @@ fn plain_n_backward_wraps_to_last_match() {
     let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "N"]);
     assert_eq!(f.line(), 3, "N from the first match wraps to the last");
 }
+
+// ---- :s cursor placement (verified against vim 9.1) ----------------------------
+
+#[test]
+fn substitute_cursor_lands_on_last_substituted_line_first_non_blank() {
+    // line 2 has no match, so the last substituted line is line 1;
+    // vim puts the cursor at its first non-blank (col 3), regardless of
+    // where the match sits in the line
+    let f = edit("  hello world\n  foo x\n  bar", 0, 0, &[
+        ":", "%", "s", "/", "o", "/", "0", "/", "<CR>",
+    ]);
+    assert_eq!(f.text(), "  hell0 world\n  f0o x\n  bar");
+    assert_eq!(f.line(), 1);
+    assert_eq!(f.cursor(), 16, "first non-blank of line 2 ('  f0o x') is byte 16");
+}
+
+#[test]
+fn substitute_cursor_survives_length_changing_earlier_lines() {
+    // line 1 grows by one byte per substitution, shifting line 2; the old
+    // code computed the cursor from stale pre-edit offsets and could land
+    // mid-line (or mid-character on CJK)
+    let f = edit("ooo\noz\n", 0, 0, &[
+        ":", "%", "s", "/", "o", "/", "0", "0", "/", "g", "<CR>",
+    ]);
+    assert_eq!(f.text(), "000000\n00z\n");
+    assert_eq!(f.line(), 1);
+    assert_eq!(f.cursor(), 7, "first non-blank of line 2");
+}

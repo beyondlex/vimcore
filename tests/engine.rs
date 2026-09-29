@@ -881,9 +881,11 @@ fn ex_substitute_whole_file_and_marks() {
         ":", "%", "s", "/", "f", "o", "o", "/", "q", "u", "x", "/", "g", "<CR>",
     ]);
     assert_eq!(f.text(), "qux\nbar qux\nplain\n");
-    // cursor lands on the last substituted match (the qux on line 1)
+    // vim 9.1: the cursor lands on the last SUBSTITUTED line, at its first
+    // non-blank (not at the in-line match offset, which is stale once an
+    // earlier line's substitution changes byte lengths)
     assert_eq!(f.line(), 1);
-    assert_eq!(f.cursor(), 8);
+    assert_eq!(f.cursor(), 4);
     // mark on line 1 survived the (same-line-length? no — length changed)
     // edit by shifting correctly: 'foo'->'qux' keeps byte length
     assert_eq!(f.vim.marks.get('a'), Some(4));
