@@ -137,17 +137,18 @@ pub fn floor_to_char_boundary(buf: &dyn VimBuffer, offset: usize) -> usize {
 }
 
 /// Clamp for CURSOR placement (normal/visual): like [`clamp_to_line_end`],
-/// but when the result sits exactly ON a line's `\n` it steps back onto the
-/// line's last character. Host clicks, undo-restored insert-era positions and
-/// stale mark offsets can all name the `\n` byte; a cursor parked there makes
-/// later `dw`/`diw` swallow the line break. Empty lines keep their start
-/// (there is no character to sit on — the start IS the `\n` position), and a
-/// final line without a trailing newline has no `\n` to step off.
+/// but when the result sits past the line's last character it steps back ONTO
+/// that character. Vim's normal-mode cursor never rests past the last char —
+/// neither on the `\n` of a non-empty line (where later `dw`/`diw` would
+/// swallow the line break) nor on a final line's phantom end (`w` at the
+/// buffer end must leave the cursor ON the last character, vim probe: `wx`
+/// after a single-word line deletes it). Empty lines keep their start — there
+/// is no character to sit on, the start IS the newline position.
 pub fn clamp_cursor(buf: &dyn VimBuffer, offset: usize) -> usize {
     let offset = clamp_to_line_end(buf, offset);
     let line = buf.offset_to_line(offset);
     let end = buf.line_end(line);
-    if offset == end && end > buf.line_start(line) && buf.char_at(end) == Some('\n') {
+    if offset >= end && end > buf.line_start(line) {
         return buf.prev_char_offset(end).unwrap_or(end);
     }
     offset

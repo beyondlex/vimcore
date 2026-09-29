@@ -855,8 +855,14 @@ impl VimState {
     }
 
     /// `C-a`/`C-x`: find the number at or after the cursor on this line and
-    /// add `delta` to it, preserving leading zeros count (roughly) and
-    /// cursor on the last digit. Returns false when no number is found.
+    /// add `delta` to it, cursor on the last digit of the result. Returns
+    /// false when no number is found.
+    ///
+    /// Radix handling follows vim's default `nrformats=bin,octal,hex`:
+    /// `0b101`+2 → `0b111`, `077`+3 → `0102` (octal), `0x1f`+2 → `0x21`,
+    /// `0XAB`+1 → `0XAC` (prefix and digit case preserved). Decimal literals
+    /// with leading zeros are NOT zero-padded (`0099`+2 → `101`, vim same);
+    /// a `0`-prefixed run containing 8/9 is decimal, not octal.
     fn increment_number_at_cursor(&mut self, ctx: &mut Ctx, delta: i64) -> bool {
         let line = ctx.buf.offset_to_line(self.cursor.offset);
         let start = ctx.buf.line_start(line);
@@ -875,7 +881,7 @@ impl VimState {
         // cursor are ignored (vim reports E18 instead).
         let on_digit = bytes.get(cur).is_some_and(|b| b.is_ascii_digit())
             || (cur >= text.len() && text.ends_with(|c: char| c.is_ascii_digit()));
-        let num_start = if on_digit {
+        let run_start = if on_digit {
             let mut i = cur.min(text.len().saturating_sub(1));
             while i > 0 && bytes[i - 1].is_ascii_digit() {
                 i -= 1;
@@ -887,32 +893,163 @@ impl VimState {
                 None => return false,
             }
         };
-
-        // include a preceding minus as sign when it is directly attached
-        let signed_start = if num_start > 0 && bytes[num_start - 1] == b'-' {
-            num_start - 1
-        } else {
-            num_start
-        };
-
-        // the number ends at the first non-digit
-        let mut num_end = num_start;
-        while num_end < text.len() && bytes[num_end].is_ascii_digit() {
-            num_end += 1;
+        let mut run_end = run_start;
+        while run_end < text.len() && bytes[run_end].is_ascii_digit() {
+            run_end += 1;
         }
+        let run = &text[run_start..run_end];
 
-        let old_text = &text[signed_start..num_end];
-        let negative = old_text.starts_with('-');
-        let digits = if negative { &old_text[1..] } else { old_text };
-        // unrepresentable literals saturate at i64::MAX (vim errors instead;
-        // saturation at least keeps the sign from flipping through wrap)
-        let value: i64 = digits.parse().unwrap_or(i64::MAX);
-        let new_value = if negative { -value } else { value }.saturating_add(delta);
-        let new_text = new_value.to_string();
+        // radix detection (see the doc comment): digits may sit AFTER a
+        // 0x/0X/0b/0B prefix, or the cursor may be ON the prefix's own `0`
+        fn is_hex(b: u8) -> bool {
+            b.is_ascii_hexdigit()
+        }
+        fn is_bin(b: u8) -> bool {
+            b == b'0' || b == b'1'
+        }
+        fn is_oct(b: u8) -> bool {
+            (b'0'..=b'7').contains(&b)
+        }
+        let (radix, prefix_start, digits_start, num_end) = if run_start >= 2 && run_end > run_start
+        {
+            let prefix = &bytes[run_start - 2..run_start];
+            let (r, valid): (u32, fn(u8) -> bool) = match prefix {
+                [b'0', b'x' | b'X'] => (16, is_hex),
+                [b'0', b'b' | b'B'] => (2, is_bin),
+                _ => (10, is_oct),
+            };
+            if r != 10 && run.bytes().all(valid) {
+                (r, run_start - 2, run_start, run_end)
+            } else {
+                (10, run_start, run_start, run_end)
+            }
+        } else {
+            (10, run_start, run_start, run_end)
+        };
+        if radix == 10 && run == "0" {
+            if let Some(&p) = bytes.get(run_start + 1) {
+                let (r, valid): (u32, fn(u8) -> bool) = match p {
+                    b'x' | b'X' => (16, is_hex),
+                    b'b' | b'B' => (2, is_bin),
+                    _ => (10, is_oct),
+                };
+                let mut e = run_start + 2;
+                while e < text.len() && valid(bytes[e]) {
+                    e += 1;
+                }
+                if r != 10 && e > run_start + 2 {
+                    return self.replace_number(
+                        ctx,
+                        start,
+                        text,
+                        run_start,
+                        run_start,
+                        run_start + 2,
+                        e,
+                        r,
+                        delta,
+                    );
+                }
+            }
+        }
+        // decimal (possibly octal): a leading 0 with only 0-7 digits is octal
+        let radix = if radix == 10
+            && run.len() > 1
+            && run.starts_with('0')
+            && run.bytes().all(is_oct)
+        {
+            8
+        } else {
+            radix
+        };
+        // a directly attached minus is part of the number (vim: `-99` + 1
+        // turns into `-98`, `ab-99` with the cursor before it increments to
+        // `-98` as well)
+        let tok_start = if prefix_start > 0 && bytes[prefix_start - 1] == b'-' {
+            prefix_start - 1
+        } else {
+            prefix_start
+        };
+        self.replace_number(
+            ctx,
+            start,
+            text,
+            tok_start,
+            prefix_start,
+            digits_start,
+            num_end,
+            radix,
+            delta,
+        )
+    }
+
+    /// Rewrite the number token `[tok_start, num_end)` (line-relative) with
+    /// `digits[digits_start..num_end]` parsed in `radix`, plus `delta`.
+    /// Formats bin/octal/hex with the original prefix and digit case.
+    #[allow(clippy::too_many_arguments)]
+    fn replace_number(
+        &mut self,
+        ctx: &mut Ctx,
+        line_start: usize,
+        text: String,
+        tok_start: usize,
+        prefix_start: usize,
+        digits_start: usize,
+        num_end: usize,
+        radix: u32,
+        delta: i64,
+    ) -> bool {
+        let negative = text[tok_start..].starts_with('-');
+        let digits = &text[digits_start..num_end];
+        // unrepresentable literals saturate (vim errors instead; saturation
+        // at least keeps the sign from flipping through wrap)
+        let magnitude = i128::from_str_radix(digits, radix)
+            .ok()
+            .and_then(|v| i64::try_from(v).ok())
+            .unwrap_or(i64::MAX);
+        let new_value = if negative {
+            (-magnitude).saturating_add(delta)
+        } else {
+            magnitude.saturating_add(delta)
+        };
+        let (sign, magnitude) = if new_value < 0 {
+            ("-", new_value.unsigned_abs())
+        } else {
+            ("", new_value.unsigned_abs())
+        };
+        // bin/octal/hex results keep the ORIGINAL digit width by zero-padding
+        // (`0x10`-1 → `0x0f`, vim probe); decimal never pads (`0099`+2 → `101`)
+        let width = num_end - digits_start;
+        let pad = |body: String, width: usize| format!("{body:0>width$}");
+        let body = match radix {
+            16 => {
+                let lower = !text[digits_start..num_end]
+                    .bytes()
+                    .any(|b| b.is_ascii_uppercase());
+                let prefix = &text[prefix_start..prefix_start + 2]; // "0x"/"0X"
+                let mut body = prefix.to_owned();
+                let digits = pad(format!("{magnitude:x}"), width);
+                if lower {
+                    body.push_str(&digits);
+                } else {
+                    body.push_str(&digits.to_uppercase());
+                }
+                body
+            }
+            // octal re-adds its marker `0`, padding covers the digits after
+            // it (`077`+3 → `0102`, `010`-1 → `007` — vim probes)
+            8 => format!("0{}", pad(format!("{magnitude:o}"), width - 1)),
+            2 => {
+                let prefix = &text[prefix_start..prefix_start + 2]; // "0b"/"0B"
+                format!("{prefix}{}", pad(format!("{magnitude:b}"), width))
+            }
+            _ => magnitude.to_string(),
+        };
+        let new_text = format!("{sign}{body}");
 
         self.begin_edit();
-        let abs = start + signed_start;
-        self.edit_replace(ctx, abs..start + num_end, &new_text);
+        let abs = line_start + tok_start;
+        self.edit_replace(ctx, abs..line_start + num_end, &new_text);
         self.bump(ctx);
         // cursor on the last digit of the new number
         self.cursor.offset = (abs + new_text.len() - 1).max(abs);

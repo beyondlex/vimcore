@@ -5,7 +5,6 @@
 mod common;
 
 use common::{edit, Fixture};
-use vimcore::buffer::VimBuffer as _;
 
 // ---- dw/cw on whitespace-only lines ----------------------------------------
 
@@ -280,4 +279,55 @@ fn ex_delete_supports_count_argument() {
     let mut f = Fixture::new("one\ntwo\nthree\nfour\n");
     f.feed([":", "2", "d", " ", "2", "<CR>"]);
     assert_eq!(f.text(), "one\nfour\n", ":2d 2 deletes lines 2-3");
+}
+
+// ---- C-a/C-x radix handling (vim nrformats=bin,octal,hex) ---------------------
+
+/// All expected values are vim 9.1 probe outputs: `007`+2 → `011` (octal),
+/// `0099`+2 → `101` (8/9 force decimal), `0x1f`+2 → `0x21`, `0XAB`+1 →
+/// `0XAC`, `0b101`+2 → `0b111`, `077`+3 → `0102`. The old engine treated
+/// everything as decimal and REWROTE `0x1f` into `2x1f` (the digit run `1`
+/// incremented, the prefix mangled).
+#[test]
+fn increment_decrement_radix_formats() {
+    for (line, keys, want) in [
+        ("x007", "2<C-a>", "x011"),      // octal
+        ("x0099", "2<C-a>", "x101"),     // 9 forces decimal, zeros dropped
+        ("v0x1f", "2<C-a>", "v0x21"),    // hex, cursor before the prefix
+        ("0XAB", "<C-a>", "0XAC"),       // uppercase preserved
+        ("v0b101", "2<C-a>", "v0b111"),  // binary
+        ("n 077", "3<C-a>", "n 0102"),   // octal carry
+        ("-5", "<C-a>", "-4"),
+        ("-5", "<C-x>", "-6"),
+        ("x-5y", "<C-x>", "x-6y"),       // cursor on the minus
+        ("0x10", "<C-x>", "0x0f"),       // hex underflow zero-pads to width
+        ("010", "<C-x>", "007"),         // octal keeps the marker and width
+        ("a1b2", "<C-a>", "a2b2"),       // first number after the cursor
+    ] {
+        let mut f = Fixture::new(line);
+        for key in vimcore::key::parse_key_sequence(keys) {
+            f.feed_raw(key);
+        }
+        assert_eq!(f.text(), want, "{keys} on {line:?}");
+    }
+}
+
+/// The cursor ends on the last digit of the rewritten number.
+#[test]
+fn increment_cursor_lands_on_last_digit() {
+    let mut f = Fixture::at("ab99cd", 0, 2); // on the first '9'
+    f.feed_raw(vimcore::key::Key::ctrl_char('a'));
+    assert_eq!(f.text(), "ab100cd");
+    assert_eq!(f.vim.cursor_offset(), 4, "on the last digit of 100");
+}
+
+/// A single-word line: `w` leaves the cursor ON the last character (never on
+/// the phantom end), so a following `x` deletes it — vim probe: `wx` on
+/// "abc" leaves "ab".
+#[test]
+fn word_motion_lands_on_last_char_at_buffer_end() {
+    let f = edit("abc", 0, 0, &["w"]);
+    assert_eq!(f.vim.cursor_offset(), 2, "w parks on 'c'");
+    let f = edit("abc", 0, 0, &["w", "x"]);
+    assert_eq!(f.text(), "ab", "x deletes the char under the cursor");
 }
