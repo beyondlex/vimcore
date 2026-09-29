@@ -464,3 +464,38 @@ fn huge_counts_saturate_instead_of_overflowing() {
     // negative (the exact rendering is unspecified; must not panic)
     assert!(f.text().starts_with('x'));
 }
+
+// ---- visual-block A pads short rows (verified against vim 9.1) ------------------
+
+#[test]
+fn block_append_pads_short_rows_to_block_edge() {
+    // block cols 3-5; row "ab" is short: vim pads it with 3 spaces then
+    // appends — old code just appended at the line end ("abX")
+    let mut f = Fixture::at("long1\nab\nlong2\n", 0, 2);
+    f.feed(["<C-v>", "j", "e", "A"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "long1X\nab   X\nlong2X\n");
+}
+
+#[test]
+fn block_insert_on_short_row_lands_at_line_end_without_padding() {
+    // `I` on a short row: vim does NOT pad, it inserts at the line end
+    let mut f = Fixture::at("long1\nab\nlong2\n", 0, 2);
+    f.feed(["<C-v>", "j", "e", "I"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    // X lands at the block's LEFT edge (col 3), short rows at their end
+    assert_eq!(f.text(), "loXng1\nabX\nloXng2\n");
+}
+
+// ---- o/O copies the indent verbatim (tabs stay tabs) ----------------------------
+
+#[test]
+fn open_line_preserves_tab_indent() {
+    let mut f = Fixture::at("\tfoo\n", 0, 1);
+    f.feed(["o"]);
+    f.type_text("bar");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "\tfoo\n\tbar\n");
+}
