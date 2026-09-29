@@ -229,7 +229,12 @@ impl Key {
         };
         if modifiers.control {
             if let KeyKind::Char(c) = key.kind {
-                return Key::ctrl_char(c);
+                // keep the full modifier set (M-<C-a>, <C-S-a> …) instead of
+                // re-wrapping with ctrl_char, which would drop the others
+                return Key {
+                    modifiers,
+                    kind: KeyKind::Char(c),
+                };
             }
         }
         key
