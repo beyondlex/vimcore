@@ -521,7 +521,13 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
     if data.text.is_empty() {
         return;
     }
-    let repeated = data.text.repeat(count.max(1));
+    let count = count.max(1);
+
+    if data.kind == RegisterKind::Blockwise {
+        put_blockwise(vim, ctx, &data.text, count, after);
+        return;
+    }
+    let repeated = data.text.repeat(count);
 
     if data.kind == RegisterKind::Linewise {
         let line = ctx.buf.offset_to_line(vim.cursor.offset);
@@ -574,6 +580,59 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         let end = at + repeated.len();
         vim.cursor.offset = clamp_to_line_end(ctx.buf, ctx.buf.prev_char_offset(end).unwrap_or(at));
     }
+    vim.cursor.desired_col = None;
+}
+
+/// Blockwise `p`/`P` from a block register (normal mode). Semantics probed
+/// against vim 9.1: the FIRST row lands at the target column on the cursor
+/// line (`p`: one column right of the cursor char; `P`: at it, short lines
+/// padded with spaces), and every following row becomes a NEW line inserted
+/// below the cursor line, padded out to the same column — existing lines are
+/// pushed down, never merged into. The cursor sits on the first pasted
+/// character. `count` repeats each row horizontally (vim's blockwise count).
+fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, after: bool) {
+    let rows: Vec<String> = text
+        .trim_end_matches('\n')
+        .split('\n')
+        .map(|row| row.repeat(count))
+        .collect();
+    let cur_col = crate::buffer::display_column(ctx.buf, vim.cursor.offset);
+    let col = if after { cur_col + 1 } else { cur_col };
+
+    let line = ctx.buf.offset_to_line(vim.cursor.offset);
+    let line_start = ctx.buf.line_start(line);
+    let line_end = ctx.buf.line_end(line);
+    // rows 2.. become new lines after the cursor line's content (before its
+    // newline), each padded out to the column
+    let mut suffix = String::new();
+    for row in &rows[1..] {
+        suffix.push('\n');
+        for _ in 0..col {
+            suffix.push(' ');
+        }
+        suffix.push_str(row);
+    }
+    if !suffix.is_empty() {
+        vim.edit_insert(ctx, line_end, &suffix);
+    }
+    // first row: byte boundary at display column `col` on the cursor line;
+    // short lines get padded with spaces up to the column first
+    let mut at = line_start;
+    let mut covered = 0usize;
+    while covered < col && at < line_end {
+        let Some(c) = ctx.buf.char_at(at) else { break };
+        covered += crate::buffer::char_display_width(c);
+        at += c.len_utf8();
+    }
+    let pad = col.saturating_sub(covered);
+    if pad > 0 {
+        vim.edit_insert(ctx, at, &" ".repeat(pad));
+        at += pad;
+    }
+    vim.edit_insert(ctx, at, &rows[0]);
+    // block cursor on the first pasted char (vim 9.1: `p` of a 2-row block
+    // leaves the cursor at the insert column of the cursor line)
+    vim.cursor.offset = clamp_to_line_end(ctx.buf, at);
     vim.cursor.desired_col = None;
 }
 
