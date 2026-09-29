@@ -281,8 +281,15 @@ fn replace_char_with_wide_char() {
 #[test]
 fn visual_delete_records_clamped_last_visual() {
     let mut f = common::Fixture::new("你好, world 123 -45\n#tag\"\n");
+    // a drag to the very end clamps ONTO the last character (vim never parks
+    // the cursor past it), so the charwise delete leaves the final newline
     f.vim.set_visual_range(&f.buf, 0, f.buf.len());
     f.feed(["d"]);
+    assert_eq!(f.text(), "\n", "charwise wipe up to the last char");
+    // the LINEWISE whole-buffer wipe does remove everything
+    let mut f = common::Fixture::new("你好, world 123 -45\n#tag\"\n");
+    f.vim.set_visual_range(&f.buf, 0, 0);
+    f.feed(["V", "G", "d"]);
     assert_eq!(f.text(), "", "whole-buffer linewise selection wiped");
     let (lo, hi) = f.vim.marks.last_visual.expect("last_visual recorded");
     assert!(hi <= f.buf.len(), "last_visual {lo}..{hi} past the new end");

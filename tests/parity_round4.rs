@@ -106,3 +106,47 @@ fn insert_first_non_blank_on_blank_line_appends_at_end() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "  Z \nfoo\n", "i after ^ inserts before the last space");
 }
+
+// ---- cursor placement never parks on the newline ----------------------------
+
+/// A host click past the end of a line must land ON the last character (vim
+/// never places the normal-mode cursor on the `\n`). The old clamp kept the
+/// offset at the newline, where `dw`/`diw` would swallow the line break.
+#[test]
+fn host_click_at_line_end_lands_on_last_char() {
+    let mut f = Fixture::new("foo bar\nbaz\n");
+    f.vim.set_cursor_offset(&f.buf, 7); // the '\n' of line 0
+    assert_eq!(f.vim.cursor_offset(), 6, "click past EOL sits on 'r'");
+    f.feed(["d", "w"]);
+    assert_eq!(f.text(), "foo ba\nbaz\n", "dw from there deletes only 'r'");
+
+    // an empty line has no char to sit on — the start stays
+    let mut f = Fixture::new("foo\n\nbaz\n");
+    f.vim.set_cursor_offset(&f.buf, 4); // the empty line's newline
+    assert_eq!(f.vim.cursor_offset(), 4);
+}
+
+/// Same rule for the drag endpoint (the selection cursor, not the anchor).
+#[test]
+fn visual_drag_endpoint_clamps_off_the_newline() {
+    let mut f = Fixture::new("foo bar\nbaz\n");
+    f.vim.set_visual_range(&f.buf, 0, 7);
+    let (_, cursor, _) = f.vim.visual_selection().unwrap();
+    assert_eq!(cursor, 6, "drag endpoint sits on the last char");
+}
+
+/// Undo restoring an insert-era cursor position (which may legitimately be a
+/// line end) must not park the block cursor on the `\n`.
+#[test]
+fn undo_cursor_restore_stays_off_the_newline() {
+    let mut f = Fixture::at("abc\n", 0, 3);
+    f.feed(["A"]); // insert session at the line end
+    f.type_text("d");
+    f.feed(["<Esc>"]); // "abcd" — undo group captured cursor at 4 (the \n)
+    f.feed(["u"]);
+    assert_eq!(
+        f.vim.cursor_offset(),
+        2,
+        "undo lands on a character, not the newline"
+    );
+}

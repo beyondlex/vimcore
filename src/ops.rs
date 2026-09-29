@@ -7,7 +7,8 @@
 //!   the previous line (`d}` keeps the following blank line).
 //! - Column 1 + start at/before first non-blank becomes linewise.
 
-use crate::buffer::{clamp_to_line_end, VimBuffer};
+use crate::buffer::{clamp_cursor, clamp_to_line_end, VimBuffer};
+use crate::mode::Mode;
 use crate::motions::{Motion, MotionKind, MotionResult};
 use crate::objects::{self, ObjectRange};
 use crate::registers::RegisterKind;
@@ -230,7 +231,7 @@ pub fn delete_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: O
             .min(ctx.buf.line_count() - 1);
         ctx.buf.first_non_blank(line)
     } else {
-        clamp_to_line_end(ctx.buf, span.start)
+        clamp_cursor(ctx.buf, span.start)
     };
     vim.cursor.desired_col = None;
 }
@@ -357,11 +358,17 @@ pub fn apply(
                 *span
             };
             delete_span(vim, ctx, &effective, register);
+            // the TYPING position is the span start (plus restored indent) —
+            // it may legitimately sit on the line end (`cw` after the last
+            // word), where insert-mode offsets are allowed to be; only the
+            // block cursor gets pulled off the `\n`
+            let mut typing_at = effective.start;
             if !indent_text.is_empty() {
-                let at = vim.cursor.offset;
+                let at = vim.cursor.offset.min(typing_at);
                 vim.edit_insert(ctx, at, &indent_text);
-                vim.cursor.offset = at + indent_text.len();
+                typing_at = at + indent_text.len();
             }
+            vim.cursor.offset = typing_at;
             vim.begin_insert(ctx, InsertKind::Change);
         }
         Operator::IndentLeft | Operator::IndentRight => {
@@ -391,11 +398,16 @@ pub fn apply(
                 })
                 .collect();
             vim.edit_replace(ctx, span.start..span.end, &mapped);
-            vim.cursor.offset = clamp_to_line_end(ctx.buf, span.start);
+            vim.cursor.offset = clamp_cursor(ctx.buf, span.start);
             vim.cursor.desired_col = None;
         }
     }
-    vim.cursor.offset = clamp_to_line_end(ctx.buf, vim.cursor.offset);
+    // The final off-the-newline clamp is for BLOCK cursors only: an operator
+    // that entered insert mode (`cw`/`cc`/…) leaves the cursor at the typing
+    // position, where a line-end offset is legal (typing continues there).
+    if !matches!(vim.mode, Mode::Insert | Mode::Replace) {
+        vim.cursor.offset = clamp_cursor(ctx.buf, vim.cursor.offset);
+    }
 }
 
 /// The `~` per-char case swap. Multi-char case mappings exist (ß ↔ SS), so
@@ -454,7 +466,7 @@ pub fn format_lines(vim: &mut VimState, ctx: &mut Ctx, start: usize, last_line: 
     let width = vim.options.textwidth.max(1);
     let span_end = ctx.buf.line_end(last_line);
     if start >= span_end {
-        vim.cursor.offset = clamp_to_line_end(ctx.buf, start);
+        vim.cursor.offset = clamp_cursor(ctx.buf, start);
         return;
     }
     // `start` is a byte offset, but the loop below walks LINE indices: the
@@ -605,7 +617,7 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         // START of the last char — `end - 1` is byte arithmetic and would
         // park the cursor inside a multi-byte character
         let end = at + repeated.len();
-        vim.cursor.offset = clamp_to_line_end(ctx.buf, ctx.buf.prev_char_offset(end).unwrap_or(at));
+        vim.cursor.offset = clamp_cursor(ctx.buf, ctx.buf.prev_char_offset(end).unwrap_or(at));
     }
     vim.cursor.desired_col = None;
 }
@@ -666,7 +678,7 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
     vim.edit_insert(ctx, at, &rows[0]);
     // block cursor on the first pasted char (vim 9.1: `p` of a 2-row block
     // leaves the cursor at the insert column of the cursor line)
-    vim.cursor.offset = clamp_to_line_end(ctx.buf, at);
+    vim.cursor.offset = clamp_cursor(ctx.buf, at);
     vim.cursor.desired_col = None;
 }
 
@@ -788,7 +800,7 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
         o = next;
     }
     vim.edit_replace(ctx, start..o, &replacements);
-    vim.cursor.offset = clamp_to_line_end(ctx.buf, start + replacements.len() - ch.len_utf8());
+    vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len() - ch.len_utf8());
     vim.cursor.desired_col = None;
 }
 
@@ -818,7 +830,7 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
                 vim.edit_replace(ctx, range.clone(), &replacement.repeat(n));
             }
             vim.cursor.offset =
-                clamp_to_line_end(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
+                clamp_cursor(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
         }
         VisualKind::Line => {
             let Some(span) = span_from_visual(vim, ctx.buf) else {
@@ -840,7 +852,7 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
             };
             let n = ctx.buf.slice(span.start..span.end).chars().count();
             vim.edit_replace(ctx, span.start..span.end, &replacement.repeat(n));
-            vim.cursor.offset = clamp_to_line_end(ctx.buf, span.start);
+            vim.cursor.offset = clamp_cursor(ctx.buf, span.start);
         }
     }
     vim.cursor.desired_col = None;
@@ -876,6 +888,6 @@ pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) {
     // vim's `~` moves right past the last toggled char (staying on it only
     // at line end); byte arithmetic uses the consumed span so multi-byte
     // chars don't park the cursor mid-character
-    vim.cursor.offset = clamp_to_line_end(ctx.buf, start + mapped.len());
+    vim.cursor.offset = clamp_cursor(ctx.buf, start + mapped.len());
     vim.cursor.desired_col = None;
 }
