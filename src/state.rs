@@ -11,7 +11,7 @@
 //! `KeyResult::Unknown` is the contract with the host: an unknown key is fed
 //! back to gpui's normal key handling (keymap bindings, IME, ...).
 
-use crate::buffer::{clamp_to_line_end, VimBuffer, VimBufferMut};
+use crate::buffer::{clamp_cursor, clamp_to_line_end, VimBuffer, VimBufferMut};
 use crate::cmdline::Cmdline;
 use crate::host::{ScrollAnchor, VimHost};
 use crate::key::{Key, KeyKind, Modifiers};
@@ -1070,7 +1070,7 @@ impl VimState {
         } else {
             None
         };
-        self.cursor.offset = clamp_to_line_end(ctx.buf, result.offset);
+        self.cursor.offset = clamp_cursor(ctx.buf, result.offset);
         if result.kind == crate::motions::MotionKind::Linewise {
             if preserves_column {
                 let desired = desired.unwrap();
@@ -1412,7 +1412,7 @@ impl VimState {
     /// a mid-char offset onward would panic in `offset_to_line`.
     pub fn set_cursor_offset(&mut self, buf: &dyn VimBuffer, offset: usize) {
         let offset = crate::buffer::floor_to_char_boundary(buf, offset);
-        let offset = clamp_to_line_end(buf, offset);
+        let offset = clamp_cursor(buf, offset);
         self.cursor.offset = offset;
         self.cursor.desired_col = None;
         if matches!(self.mode, Mode::Visual { .. }) {
@@ -1425,8 +1425,8 @@ impl VimState {
     pub fn set_visual_range(&mut self, buf: &dyn VimBuffer, anchor: usize, cursor: usize) {
         let anchor = crate::buffer::floor_to_char_boundary(buf, anchor);
         let cursor = crate::buffer::floor_to_char_boundary(buf, cursor);
-        self.visual_anchor = Some(clamp_to_line_end(buf, anchor));
-        self.cursor.offset = clamp_to_line_end(buf, cursor);
+        self.visual_anchor = Some(clamp_cursor(buf, anchor));
+        self.cursor.offset = clamp_cursor(buf, cursor);
         if !matches!(self.mode, Mode::Visual { .. }) {
             self.mode = Mode::Visual {
                 kind: VisualKind::Char,
@@ -1476,7 +1476,7 @@ impl VimState {
                 self.bump(ctx);
                 self.reset_pending();
                 self.cursor.offset =
-                    clamp_to_line_end(ctx.buf, adjusted.first().copied().unwrap_or(0));
+                    clamp_cursor(ctx.buf, adjusted.first().copied().unwrap_or(0));
                 self.cursor.desired_col = None;
                 self.finish_visual_op(ctx);
             }
@@ -1500,7 +1500,7 @@ impl VimState {
                     crate::registers::RegisterKind::Blockwise,
                 );
                 self.cursor.offset =
-                    clamp_to_line_end(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
+                    clamp_cursor(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
                 self.cursor.desired_col = None;
                 self.finish_visual_op(ctx);
             }
@@ -1509,7 +1509,7 @@ impl VimState {
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
                 self.bump(ctx);
                 self.reset_pending();
-                self.cursor.offset = clamp_to_line_end(ctx.buf, adjusted[0]);
+                self.cursor.offset = clamp_cursor(ctx.buf, adjusted[0]);
                 self.block_insert = Some(BlockInsert {
                     rows: adjusted[1..]
                         .iter()
@@ -1668,7 +1668,7 @@ impl VimState {
         // cursor. Committed AFTER the mode drop: `commit_change_record` keeps
         // accumulating while the mode is still Visual.
         self.commit_change_record();
-        self.cursor.offset = clamp_to_line_end(ctx.buf, self.cursor.offset);
+        self.cursor.offset = clamp_cursor(ctx.buf, self.cursor.offset);
         ctx.host.changed();
     }
 }
@@ -2549,7 +2549,7 @@ impl VimState {
                         // multi-byte char — floor before cursor math
                         self.edit_generation += 1;
                         self.sanitize_stored_offsets(ctx.buf);
-                        self.cursor.offset = clamp_to_line_end(
+                        self.cursor.offset = clamp_cursor(
                             ctx.buf,
                             crate::buffer::floor_to_char_boundary(ctx.buf, offset),
                         );
@@ -2568,7 +2568,7 @@ impl VimState {
                     if let Some(offset) = ctx.host.redo() {
                         self.edit_generation += 1;
                         self.sanitize_stored_offsets(ctx.buf);
-                        self.cursor.offset = clamp_to_line_end(
+                        self.cursor.offset = clamp_cursor(
                             ctx.buf,
                             crate::buffer::floor_to_char_boundary(ctx.buf, offset),
                         );
@@ -2671,7 +2671,7 @@ impl VimState {
                 }
                 let offset =
                     crate::buffer::floor_to_char_boundary(ctx.buf, self.changes[self.change_pos]);
-                self.cursor.offset = clamp_to_line_end(ctx.buf, offset);
+                self.cursor.offset = clamp_cursor(ctx.buf, offset);
                 self.cursor.desired_col = None;
                 ctx.host
                     .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
@@ -2714,7 +2714,7 @@ impl VimState {
                         ctx.host.bell();
                         break;
                     }
-                    self.cursor.offset = clamp_to_line_end(
+                    self.cursor.offset = clamp_cursor(
                         ctx.buf,
                         crate::buffer::floor_to_char_boundary(ctx.buf, self.jumps[self.jump_pos]),
                     );
@@ -2796,7 +2796,7 @@ impl VimState {
                 }
             }
         }
-        self.cursor.offset = clamp_to_line_end(ctx.buf, cursor_to);
+        self.cursor.offset = clamp_cursor(ctx.buf, cursor_to);
         self.cursor.desired_col = None;
         self.end_edit();
         self.bump(ctx);
