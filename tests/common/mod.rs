@@ -112,6 +112,8 @@ pub struct HostView {
     pub statuses: Vec<String>,
     /// dispatch_host_action ids (config bridge tests).
     pub actions: Vec<String>,
+    /// bell() counter (operator/parity tests assert the engine stays quiet).
+    pub bells: usize,
     undo_stack: Vec<(String, usize)>,
     redo_stack: Vec<(String, usize)>,
     open_group: Option<u64>,
@@ -135,6 +137,10 @@ impl VimHost for HostView {
         self.current_highlight = current;
     }
     fn changed(&mut self) {}
+
+    fn bell(&mut self) {
+        self.bells += 1;
+    }
 
     fn save(&mut self) {
         self.saved += 1;
@@ -211,6 +217,7 @@ impl Fixture {
                 close_forced: false,
                 statuses: Vec::new(),
                 actions: Vec::new(),
+                bells: 0,
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
                 open_group: None,
@@ -239,6 +246,9 @@ impl Fixture {
         self
     }
 
+    /// Feed one pre-built `Key` (control chars the notation parser can't
+    /// spell). Not every test crate uses it.
+    #[allow(dead_code)]
     pub fn feed_raw(&mut self, key: Key) -> KeyResult {
         let mut ctx = Ctx {
             buf: &mut self.buf,

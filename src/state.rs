@@ -120,6 +120,8 @@ pub enum CharArgCmd {
     MacroRecord,
     /// `@{reg}` / `@@`.
     MacroPlay,
+    /// Visual `r{char}`: replace the whole selection with one char.
+    VisualReplace,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -220,6 +222,10 @@ pub struct VimState {
 
     pub(crate) insert_session: Option<InsertSession>,
     pub(crate) insert_register_pending: bool,
+    /// First buffer position typed into during the current insert session.
+    /// Plain `i`-sessions run no command `bump`, so this is what puts them
+    /// on the changelist (vim's `g;` lands on the first inserted char).
+    insert_change_pos: Option<usize>,
 
     pub options: Options,
     pub registers: Registers,
@@ -297,6 +303,7 @@ impl VimState {
             jump_pos: 0,
             insert_session: None,
             insert_register_pending: false,
+            insert_change_pos: None,
             options: Options::default(),
             registers: Registers::default(),
             marks: Marks::default(),
@@ -695,8 +702,15 @@ impl VimState {
     /// Queue `steps` for replay, `count` times. Plain keys re-enter the key
     /// pipeline; recorded text is applied inline via the synthetic
     /// [`DOT_TEXT_MARKER`] key.
+    ///
+    /// The queue is built EAGERLY, so `count` is clamped to the pipeline
+    /// guard's budget (`count × steps` keys would otherwise be pre-allocated
+    /// up front — `99999999.` meant gigabytes of queue before the guard ever
+    /// saw a step). Beyond the budget the replay stops early instead of
+    /// tripping the lose-everything guard.
     fn enqueue_replay(&mut self, steps: &[RecordedStep], count: usize) {
-        for _ in 0..count {
+        let rounds = (MAX_PIPELINE_STEPS / steps.len().max(1)).max(1);
+        for _ in 0..count.min(rounds) {
             for step in steps {
                 match step {
                     RecordedStep::Key(key) => self.pending_keys.push_back(key.clone()),
@@ -830,18 +844,23 @@ impl VimState {
     }
 
     pub(crate) fn bump(&mut self, ctx: &mut Ctx) {
-        self.marks.last_change = Some(self.cursor.offset);
-        // changelist: dedupe repeats, cap the list
-        if self.changes.last() != Some(&self.cursor.offset) {
+        self.record_change_position(self.cursor.offset);
+        self.republish_search(ctx);
+        ctx.host.changed();
+    }
+
+    /// Record `offset` as the latest change position: the `.` mark and the
+    /// changelist entry (`g;`/`g,`), deduping consecutive repeats.
+    fn record_change_position(&mut self, offset: usize) {
+        self.marks.last_change = Some(offset);
+        if self.changes.last() != Some(&offset) {
             self.changes.truncate(self.change_pos + 1);
-            self.changes.push(self.cursor.offset);
+            self.changes.push(offset);
             if self.changes.len() > LIST_LIMIT {
                 self.changes.remove(0);
             }
             self.change_pos = self.changes.len() - 1;
         }
-        self.republish_search(ctx);
-        ctx.host.changed();
     }
 
     /// Buffer edits shift the byte offsets behind any published highlights;
@@ -888,6 +907,17 @@ impl VimState {
 
     // ---- buffer edits (the ONLY mutation paths; keep marks in sync) -------
 
+    /// Apply a mark-style offset adjustment to the changelist / jumplist.
+    /// Both lists store raw byte offsets like the marks do, so they need the
+    /// same shifting when the text moves under them (vim adjusts its
+    /// jumplist and changelist on every edit; a list that stayed stale made
+    /// `g;`/`C-o` land at pre-edit positions).
+    fn adjust_positions(positions: &mut [usize], adjust: impl Fn(usize) -> usize) {
+        for pos in positions.iter_mut() {
+            *pos = adjust(*pos);
+        }
+    }
+
     /// All engine buffer mutations go through these three wrappers so marks
     /// (`a-z`, `^ . < >`) and the last-visual span shift with the text. Never
     /// call `ctx.buf.insert_text/delete_range/replace_range` directly.
@@ -898,6 +928,8 @@ impl VimState {
         ctx.buf.insert_text(at, text);
         let len = text.len();
         self.marks.adjust_insert(at, len);
+        Self::adjust_positions(&mut self.changes, |p| if p > at { p + len } else { p });
+        Self::adjust_positions(&mut self.jumps, |p| if p > at { p + len } else { p });
         self.edit_generation += 1;
         if let Some((a, b, _)) = &mut self.last_visual {
             if *a > at {
@@ -915,6 +947,18 @@ impl VimState {
         }
         ctx.buf.delete_range(range.clone());
         self.marks.adjust_delete(range.clone());
+        let (start, end) = (range.start, range.end);
+        let adjust = |p: usize| {
+            if p >= end {
+                p - (end - start)
+            } else if p > start {
+                start
+            } else {
+                p
+            }
+        };
+        Self::adjust_positions(&mut self.changes, adjust);
+        Self::adjust_positions(&mut self.jumps, adjust);
         self.edit_generation += 1;
         if let Some((a, b, _)) = &mut self.last_visual {
             if *a >= range.end {
@@ -937,6 +981,23 @@ impl VimState {
         ctx.buf.replace_range(range.clone(), text);
         let new_len = text.len();
         self.marks.adjust_replace(range.clone(), new_len);
+        // same inner-preservation rule as marks: an equal-length replace
+        // keeps inner offsets valid (same char positions), a length-changing
+        // one collapses them onto the range start
+        let delta = new_len as isize - range.len() as isize;
+        let preserve_inner = new_len == range.len();
+        let (start, end) = (range.start, range.end);
+        let adjust = move |p: usize| {
+            if p >= end {
+                (p as isize + delta).max(0) as usize
+            } else if p > start && !preserve_inner {
+                start
+            } else {
+                p
+            }
+        };
+        Self::adjust_positions(&mut self.changes, adjust);
+        Self::adjust_positions(&mut self.jumps, adjust);
         self.edit_generation += 1;
         let delta = new_len as isize - range.len() as isize;
         if let Some((a, b, _)) = &mut self.last_visual {
@@ -1025,7 +1086,10 @@ impl VimState {
 
     /// Append a jump (origin -> dest) to the jumplist, discarding any
     /// forward entries (like stepping back then jumping anew in a browser).
+    /// Also re-points the jump-context mark (`''`/`` `` ``) at the origin,
+    /// like vim.
     pub(crate) fn record_jump(&mut self, origin: usize, dest: usize) {
+        self.marks.last_jump = Some(origin);
         if self.jump_pos + 1 < self.jumps.len() {
             self.jumps.truncate(self.jump_pos + 1);
         }
@@ -1096,6 +1160,12 @@ impl VimState {
             }
         }
         self.commit_change_record();
+        // a plain insert session never ran a command `bump`: its first typed
+        // position is the changelist entry (vim probe: `i`-typing at col 2
+        // then `g;` lands on that exact offset)
+        if let Some(pos) = self.insert_change_pos.take() {
+            self.record_change_position(pos);
+        }
         self.insert_session = None;
         self.republish_search(ctx);
         self.end_edit();
@@ -1112,20 +1182,21 @@ impl VimState {
             return;
         }
         self.begin_edit(ctx);
-        let indent_chars = ctx.buf.slice(
-            ctx.buf
-                .line_start(ctx.buf.offset_to_line(self.cursor.offset))
-                ..ctx
-                    .buf
-                    .line_start(ctx.buf.offset_to_line(self.cursor.offset))
-                    + self.current_line_indent(ctx),
-        );
+        let line_start = ctx
+            .buf
+            .line_start(ctx.buf.offset_to_line(self.cursor.offset));
+        let indent_chars = ctx
+            .buf
+            .slice(line_start..line_start + self.current_line_indent(ctx));
+        let at = self.cursor.offset;
+        if self.insert_change_pos.is_none() {
+            self.insert_change_pos = Some(at);
+        }
         let expanded = if self.options.autoindent && !indent_chars.is_empty() {
             text.replace('\n', &format!("\n{indent_chars}"))
         } else {
             text.to_owned()
         };
-        let at = self.cursor.offset;
         if self.mode == Mode::Replace {
             // overwrite up to the text length, then insert the remainder.
             // Each overwritten char is stashed so Backspace can restore it
@@ -1679,7 +1750,14 @@ impl VimState {
                     let mut rest = self.cmd_seq.clone();
                     self.cmd_seq.clear();
                     rest.push(key);
-                    ctx.host.bell();
+                    // `gugu` & co. reach this retry (the pending-phase trie
+                    // has no operator rows): the re-fed trigger completes
+                    // the operator doubling, which must stay quiet — vim
+                    // finishes `gugu` without a bell. Any other remainder
+                    // still rings (`dgx` = no such motion).
+                    if !self.completes_operator_doubling(&rest) {
+                        ctx.host.bell();
+                    }
                     if rest.is_empty() {
                         return ProcessOutcome::Consumed;
                     }
@@ -1929,6 +2007,7 @@ impl VimState {
                 CmdKind::Normal(NormalCmd::MarkSet) => CharArgCmd::MarkSet,
                 CmdKind::Normal(NormalCmd::RecordMacro) => CharArgCmd::MacroRecord,
                 CmdKind::Normal(NormalCmd::PlayMacro) => CharArgCmd::MacroPlay,
+                CmdKind::Visual(VisualCmd::ReplaceChar) => CharArgCmd::VisualReplace,
                 _ => unreachable!("takes_char out of sync"),
             });
             return ProcessOutcome::Consumed;
@@ -1946,18 +2025,16 @@ impl VimState {
                     motion = Motion::GoToLine { first: true };
                 }
                 let count = self.take_total_count();
-                // `cw` on a word char acts like `ce` (keeps trailing space)
-                if self.op == Some(Operator::Change) {
-                    if let Motion::WordStart { big } = motion {
-                        if !big {
-                            if let Some(c) = ctx.buf.char_at(self.cursor.offset) {
-                                if !c.is_whitespace() {
-                                    motion = Motion::WordEnd { big };
-                                }
-                            }
-                        }
-                    }
-                }
+                // Remember a `cw`-family command: its span gets special
+                // post-processing below. (The old approach rewrote the
+                // motion to `ce`, which swallowed the next line's word on
+                // every crossing case — see the comment at the trim.)
+                let is_cw = self.op == Some(Operator::Change)
+                    && matches!(motion, Motion::WordStart { .. })
+                    && ctx
+                        .buf
+                        .char_at(self.cursor.offset)
+                        .is_some_and(|c| !c.is_whitespace());
                 if self.op.is_some() {
                     let result = motion.target(self, ctx, count);
                     if !result.moved {
@@ -1965,11 +2042,33 @@ impl VimState {
                         self.reset_pending();
                         return ProcessOutcome::Consumed;
                     }
-                    let span = ops::span_from_motion(self, ctx.buf, motion, result);
+                    let mut span = ops::span_from_motion(self, ctx.buf, motion, result);
+                    // `cw`/`cW` = the `dw` span with the trailing whitespace
+                    // excluded (all probed against vim 9.1): `cw` on "ab cd"
+                    // changes "ab"; `c2w` on "a|b c|d" from 'a' changes
+                    // "a\nb", not "a\nb c"; `cw` on a single-char word
+                    // changes that word only; the blank-line promotion stays
+                    // linewise. The old WordEnd rewrite ignored the crossing
+                    // rules entirely — `cw` on "b" wiped "b\nc".
+                    if is_cw && !span.linewise && span.end > span.start {
+                        let covered = ctx.buf.slice(span.start..span.end);
+                        let trimmed = covered.trim_end_matches([' ', '\t']);
+                        span.end = span.start + trimmed.len();
+                    }
                     self.complete_operator_with_span(ctx, span);
                 } else {
                     if !self.goto_motion(ctx, motion, count) {
-                        ctx.host.bell();
+                        // `n`/`N`/`*` misses get vim's message channel, not
+                        // just a bare bell (E35 before any search, E486 with
+                        // the pattern otherwise)
+                        if matches!(
+                            motion,
+                            Motion::SearchNext { .. } | Motion::StarSearch { .. }
+                        ) {
+                            self.report_search_miss(ctx);
+                        } else {
+                            ctx.host.bell();
+                        }
                     }
                 }
                 self.end_command();
@@ -2084,6 +2183,45 @@ impl VimState {
         if self.insert_session.is_none() {
             self.commit_change_record();
         }
+    }
+
+    /// vim's feedback for a failed `n`/`N`/`*` jump: E35 before any search
+    /// was entered, E486 with the pattern otherwise — plus the bell.
+    fn report_search_miss(&mut self, ctx: &mut Ctx) {
+        match &self.search.pattern {
+            Some(pattern) => {
+                ctx.host
+                    .status_message(&format!("E486: Pattern not found: {pattern}"));
+            }
+            None => ctx
+                .host
+                .status_message("E35: No previous regular expression"),
+        }
+        ctx.host.bell();
+    }
+
+    /// Does `rest` (re-fed after a trie miss) complete the pending operator's
+    /// doubling — `gu` pending, rest == [`u`]? Only then is the retry silent;
+    /// anything else keeps its bell.
+    fn completes_operator_doubling(&self, rest: &[Key]) -> bool {
+        if rest.len() != 1 {
+            return false;
+        }
+        let Some(op) = self.op else {
+            return false;
+        };
+        let trigger = if op == Operator::Format {
+            self.format_trigger
+        } else {
+            Self::operator_trigger(op)
+        };
+        let Some(trigger) = trigger else {
+            return false;
+        };
+        matches!(
+            &rest[0].kind,
+            KeyKind::Char(c) if *c == trigger && rest[0].modifiers.is_plain()
+        )
     }
 
     /// Prefix count × operator count, defaulting each to 1. Capped at a
@@ -2606,7 +2744,12 @@ impl VimState {
                 self.begin_edit(ctx);
                 ops::delete_span(self, ctx, &span, self.register);
                 if let Some(data) = stashed {
-                    let repeated = data.text.repeat(self.take_total_count().max(1));
+                    // visual `p` with a count repeats the register; the byte
+                    // ceiling keeps `99999999p` from allocating register × count
+                    let repeated = crate::registers::clamped_repeat(
+                        &data.text,
+                        self.take_total_count().max(1),
+                    );
                     if data.kind == crate::registers::RegisterKind::Linewise {
                         let text = if repeated.ends_with('\n') {
                             repeated
@@ -2643,6 +2786,9 @@ impl VimState {
                 self.bump(ctx);
                 self.finish_visual_op(ctx);
             }
+            // `r{char}` waits for its argument: the replacement is applied
+            // in `complete_char_arg`'s VisualReplace arm
+            VisualCmd::ReplaceChar => {}
         }
     }
 
@@ -2693,7 +2839,9 @@ impl VimState {
                     self.edit_insert(ctx, at, &format!("{indent_str}\n"));
                     self.cursor.offset = at + indent_str.len();
                 }
-                ctx.host.changed();
+                // the opened line is a change even before typing (`o` + Esc
+                // still created a line): record it for `.`/`g;`
+                self.bump(ctx);
             }
         }
         self.begin_insert(ctx, kind);
@@ -2755,6 +2903,18 @@ impl VimState {
                 ops::replace_chars(self, ctx, c, count);
                 self.end_edit();
                 self.bump(ctx);
+            }
+            CharArgCmd::VisualReplace => {
+                // Visual `r{char}`: replace every selected char (the visual
+                // op path exits visual mode + commits the change record)
+                self.begin_edit(ctx);
+                ops::visual_replace(self, ctx, c);
+                self.end_edit();
+                self.bump(ctx);
+                self.reset_pending();
+                if matches!(self.mode, Mode::Visual { .. }) {
+                    self.finish_visual_op(ctx);
+                }
             }
             CharArgCmd::MarkSet => {
                 self.marks.set(c, self.cursor.offset);

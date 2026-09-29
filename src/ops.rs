@@ -524,16 +524,25 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
     let Some(data) = vim.registers.get_for_paste(register, ctx.host) else {
         return;
     };
-    if data.text.is_empty() {
-        return;
-    }
-    let count = count.max(1);
+    // A linewise register always represents WHOLE lines, so an empty one is
+    // one empty line (e.g. `yy` on the only line of an empty buffer): `p`
+    // inserts an empty line rather than nothing (vim 9.1 parity). A charwise
+    // register that is empty has nothing to place.
+    let text = if data.text.is_empty() {
+        if data.kind != RegisterKind::Linewise {
+            return;
+        }
+        "\n".to_owned()
+    } else {
+        data.text.clone()
+    };
+    let count = clamped_repeat_count(text.len(), count.max(1));
 
     if data.kind == RegisterKind::Blockwise {
-        put_blockwise(vim, ctx, &data.text, count, after);
+        put_blockwise(vim, ctx, &text, count, after);
         return;
     }
-    let repeated = data.text.repeat(count);
+    let repeated = text.repeat(count);
 
     if data.kind == RegisterKind::Linewise {
         let line = ctx.buf.offset_to_line(vim.cursor.offset);
@@ -587,6 +596,13 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         vim.cursor.offset = clamp_to_line_end(ctx.buf, ctx.buf.prev_char_offset(end).unwrap_or(at));
     }
     vim.cursor.desired_col = None;
+}
+
+/// The paste-side guard of [`crate::registers::clamped_repeat`]: how many
+/// repeats of `per`-byte text stay under the paste byte ceiling.
+pub(crate) fn clamped_repeat_count(per: usize, count: usize) -> usize {
+    const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
+    count.min((MAX_PASTE_BYTES / per.max(1)).max(1))
 }
 
 /// Blockwise `p`/`P` from a block register (normal mode). Semantics probed
@@ -761,6 +777,60 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
     }
     vim.edit_replace(ctx, start..o, &replacements);
     vim.cursor.offset = clamp_to_line_end(ctx.buf, start + replacements.len() - ch.len_utf8());
+    vim.cursor.desired_col = None;
+}
+
+/// Visual `r{char}`: replace every selected character with `char` (vim 9.1
+/// probes: charwise replaces the covered chars; linewise fills each selected
+/// line to its own CHAR count — `中文ab` becomes `----`; blockwise fills each
+/// row's covered span, short rows keep their tail). The cursor lands on the
+/// selection start.
+pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
+    use crate::mode::VisualKind;
+    let kind = match vim.mode {
+        crate::mode::Mode::Visual { kind } => kind,
+        _ => return,
+    };
+    let replacement = ch.to_string();
+    match kind {
+        VisualKind::Block => {
+            let Some(block) = span_from_visual_block(vim, ctx.buf) else {
+                return;
+            };
+            // bottom-up so earlier row offsets stay valid
+            for range in block.rows.iter().rev() {
+                if range.is_empty() {
+                    continue;
+                }
+                let n = ctx.buf.slice(range.clone()).chars().count();
+                vim.edit_replace(ctx, range.clone(), &replacement.repeat(n));
+            }
+            vim.cursor.offset =
+                clamp_to_line_end(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
+        }
+        VisualKind::Line => {
+            let Some(span) = span_from_visual(vim, ctx.buf) else {
+                return;
+            };
+            let first = ctx.buf.offset_to_line(span.start);
+            let last = last_line_of_span(ctx.buf, &span);
+            for line in (first..=last).rev() {
+                let ls = ctx.buf.line_start(line);
+                let le = ctx.buf.line_end(line);
+                let n = ctx.buf.slice(ls..le).chars().count();
+                vim.edit_replace(ctx, ls..le, &replacement.repeat(n));
+            }
+            vim.cursor.offset = ctx.buf.first_non_blank(first.min(ctx.buf.line_count() - 1));
+        }
+        VisualKind::Char => {
+            let Some(span) = span_from_visual(vim, ctx.buf) else {
+                return;
+            };
+            let n = ctx.buf.slice(span.start..span.end).chars().count();
+            vim.edit_replace(ctx, span.start..span.end, &replacement.repeat(n));
+            vim.cursor.offset = clamp_to_line_end(ctx.buf, span.start);
+        }
+    }
     vim.cursor.desired_col = None;
 }
 

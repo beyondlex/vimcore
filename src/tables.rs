@@ -60,11 +60,17 @@ pub enum NormalCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisualCmd {
-    Exit,                    // same-kind v / V / Esc handled elsewhere
-    ToggleKind { to: char }, // v / V
-    SwapEnds,                // o
-    PutReplace,              // p / P replace selection
-    Join { literal: bool },  // J / gJ
+    Exit, // same-kind v / V / Esc handled elsewhere
+    ToggleKind {
+        to: char,
+    }, // v / V
+    SwapEnds, // o
+    PutReplace, // p / P replace selection
+    Join {
+        literal: bool,
+    }, // J / gJ
+    /// `r{char}`: replace the whole selection with `char` (char-arg).
+    ReplaceChar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +96,7 @@ impl CmdKind {
                 | CmdKind::Normal(NormalCmd::JumpMark { .. })
                 | CmdKind::Normal(NormalCmd::RecordMacro)
                 | CmdKind::Normal(NormalCmd::PlayMacro)
+                | CmdKind::Visual(VisualCmd::ReplaceChar)
         )
     }
 
@@ -564,6 +571,7 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.visual(&["g", "q"], CmdKind::Operator(Operator::Format));
     b.visual(&["p"], CmdKind::Visual(VisualCmd::PutReplace));
     b.visual(&["P"], CmdKind::Visual(VisualCmd::PutReplace));
+    b.visual(&["r"], CmdKind::Visual(VisualCmd::ReplaceChar));
     b.visual(&["J"], CmdKind::Visual(VisualCmd::Join { literal: false }));
     b.visual(
         &["g", "J"],

@@ -16,6 +16,9 @@ pub struct Marks {
     pub last_change: Option<usize>,
     /// Position where the last insert session ended (`^`).
     pub last_insert_exit: Option<usize>,
+    /// Where the last jump STARTED (`''` / `` `` `` return here; every
+    /// `record_jump` re-points it at the jump's origin).
+    pub(crate) last_jump: Option<usize>,
 }
 
 impl Marks {
@@ -44,11 +47,17 @@ impl Marks {
         self.active_visual
     }
 
-    /// Resolve special names used by `` ` ``/`'` jumps.
+    /// Resolve special names used by `` ` ``/`'` jumps: the visual marks,
+    /// the jump-context marks (`''` / `` `` ``), the last change and the
+    /// last insert exit — beyond the plain named marks.
     pub fn resolve(&self, name: char) -> Option<usize> {
         match name {
             '<' => self.last_visual.map(|(a, _)| a),
             '>' => self.last_visual.map(|(_, b)| b),
+            // `''` (linewise) and `` `` `` (exact) share the jump origin
+            '\'' | '`' => self.last_jump,
+            '.' => self.last_change.or_else(|| self.get('.')),
+            '^' => self.last_insert_exit.or_else(|| self.get('^')),
             _ => self.get(name),
         }
     }
@@ -114,6 +123,9 @@ impl Marks {
             f(p);
         }
         if let Some(p) = self.last_insert_exit.as_mut() {
+            f(p);
+        }
+        if let Some(p) = self.last_jump.as_mut() {
             f(p);
         }
     }
