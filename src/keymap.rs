@@ -84,6 +84,29 @@ impl<T> Trie<T> {
         }
         !node.children.is_empty()
     }
+
+    /// The longest PROPER prefix of `keys` that terminates on a LEAF node,
+    /// with its value. A leaf cannot wait for more keys, so when the queue
+    /// continues past a complete stored sequence — a mapping RHS expansion,
+    /// a macro or a `.` replay enqueued extra keys after a mapping's LHS —
+    /// that mapping definitively completed mid-queue and must fire with the
+    /// rest of the queue left pending. A hit with children does NOT count:
+    /// it may still grow (`j` of `jk`), and the engine's builtin-vs-mapping
+    /// resolution owns that ambiguity. `None` when the full queue IS the
+    /// match (callers check `get` first) or nothing completed.
+    pub fn longest_terminal_leaf_prefix(&self, keys: &[Key]) -> Option<(usize, &T)> {
+        let mut node = self;
+        for (i, key) in keys.iter().enumerate() {
+            match node.children.get(key) {
+                Some(child) => node = child,
+                None => return None,
+            }
+            if node.value.is_some() && node.children.is_empty() {
+                return Some((i + 1, node.value.as_ref()?));
+            }
+        }
+        None
+    }
 }
 
 /// Which mapping table applies.
@@ -169,8 +192,22 @@ pub fn lookup(table: Option<&Trie<Mapping>>, queue: &[Key]) -> MappingMatch {
             // suffixes are the callers' concern: keys were fed one at a
             // time, so a waitable prefix was already reported as Waiting on
             // an earlier feed — and a mapping that becomes complete mid-
-            // queue surfaces via the engine's combined-trie check. Nothing
-            // mapping-related is possible: fall through to builtins.
+            // queue surfaces via the engine's combined-trie check.
+            //
+            // One case the full-queue miss hides: a LEAF mapping that
+            // completed with keys still queued behind it (an expansion, a
+            // macro or a `.` replay enqueued several keys at once). The
+            // engine used to fall through, processing the mapping's keys as
+            // literals — vim replays `:imap q ax` (with `a`→`jk`) by firing
+            // each mapping as the queue passes it. Fire the leaf hit and
+            // leave the rest queued.
+            if let Some((used, mapping)) = table.longest_terminal_leaf_prefix(queue) {
+                return MappingMatch::Match {
+                    used,
+                    expansion: mapping.rhs.clone(),
+                    noremap: mapping.noremap,
+                };
+            }
             MappingMatch::None
         }
     }
