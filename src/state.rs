@@ -82,10 +82,10 @@ struct BlockInsert {
 pub(crate) const DOT_TEXT_MARKER: &str = "\u{0}dot-text";
 
 /// Safety valve for the pending-key pipeline: one keystroke may legitimately
-/// enqueue hundreds of keys (a mapping RHS, a replayed macro), but a live
-/// lock (e.g. a mapping that expands to itself despite the `:noremap`
-/// accounting) must not hang the host. On trip the queue is dropped.
-const MAX_PIPELINE_STEPS: usize = 500;
+/// enqueue thousands of keys (a mapping RHS, a replayed macro — `10000@a`
+/// with a five-key macro is 50k), but a live lock (e.g. a macro that expands
+/// to itself) must not hang the host. On trip the queue is dropped.
+const MAX_PIPELINE_STEPS: usize = 100_000;
 
 /// Depth limit for nested mapping expansions. A `:map x y` + `:map y x` pair
 /// would otherwise ping-pong forever; vim errors out the same way.
@@ -1141,7 +1141,8 @@ impl VimState {
                 }
             }
             let appended = expanded.chars().count().saturating_sub(overwritten);
-            self.replace_overwritten.extend(std::iter::repeat_n(None, appended));
+            self.replace_overwritten
+                .extend(std::iter::repeat_n(None, appended));
             self.edit_replace(ctx, at..end.min(line_end.max(at)), &expanded);
         } else {
             self.edit_insert(ctx, at, &expanded);
@@ -1411,8 +1412,7 @@ impl VimState {
                 .filter(|(_, range)| range.is_empty())
                 .map(|(i, _)| {
                     let line = block.first_line + i;
-                    let width =
-                        crate::buffer::display_column(ctx.buf, ctx.buf.line_end(line));
+                    let width = crate::buffer::display_column(ctx.buf, ctx.buf.line_end(line));
                     (line, block.col_hi.saturating_sub(width))
                 })
                 .filter(|(_, pad)| *pad > 0)
@@ -1578,12 +1578,7 @@ impl VimState {
             if key.modifiers.is_plain() && c.is_ascii_digit() {
                 let d = c.to_digit(10).unwrap() as usize;
                 if !(d == 0 && self.count.is_none()) {
-                    self.count = Some(
-                        self.count
-                            .unwrap_or(0)
-                            .saturating_mul(10)
-                            .saturating_add(d),
-                    );
+                    self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
                     return Some(ProcessOutcome::Consumed);
                 }
                 // 0 falls through to the trie (line-start motion)
@@ -2484,11 +2479,7 @@ impl VimState {
             NormalCmd::ScrollLines { down } => {
                 let count = self.take_total_count().max(1);
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
-                let delta = if down {
-                    count as i32
-                } else {
-                    -(count as i32)
-                };
+                let delta = if down { count as i32 } else { -(count as i32) };
                 ctx.host.scroll_lines(delta);
                 ctx.host.scroll_to_line(line);
             }

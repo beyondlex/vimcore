@@ -12,7 +12,7 @@
 mod common;
 
 use common::{edit, Fixture};
-use vimcore::key::{Key, parse_key_sequence};
+use vimcore::key::{parse_key_sequence, Key};
 use vimcore::registers::{RegisterKind, CLIPBOARD, UNNAMED, YANK};
 
 fn feed(edit: &mut Fixture, keys: &str) {
@@ -175,7 +175,10 @@ fn visual_i_paren_on_empty_pair_collapses() {
 
 #[test]
 fn ctrl_e_and_ctrl_y_scroll_the_view() {
-    let text = (0..20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+    let text = (0..20)
+        .map(|i| format!("l{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut f = Fixture::new(&text);
     f.host.viewport = (0, 4); // 5 行视口
     f.feed(["G"]);
@@ -205,7 +208,10 @@ fn tab_jumps_forward_like_c_i() {
 
 #[test]
 fn percent_with_count_jumps_to_file_percentage() {
-    let text = (0..101).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+    let text = (0..101)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let f = edit(&text, 0, 0, &["5", "0", "%"]);
     assert_eq!(f.line(), 50, "50% 应到第 51 行（0-based 50）");
     let f = edit(&text, 10, 0, &["1", "0", "0", "%"]);
@@ -227,14 +233,18 @@ fn colon_number_jumps_to_line() {
 fn substitute_i_flag_forces_case_insensitive() {
     // smartcase 默认开启：含大写的模式按大小写敏感；i 标志覆盖之
     let mut f = Fixture::at("Foo foo FOO", 0, 0);
-    f.feed([":", "s", "/", "F", "o", "o", "/", "X", "/", "g", "i", "<CR>"]);
+    f.feed([
+        ":", "s", "/", "F", "o", "o", "/", "X", "/", "g", "i", "<CR>",
+    ]);
     assert_eq!(f.text(), "X X X", "i 标志应强制忽略大小写");
 }
 
 #[test]
 fn substitute_capital_i_flag_forces_case_sensitive() {
     let mut f = Fixture::at("Foo foo FOO", 0, 0);
-    f.feed([":", "%", "s", "/", "f", "o", "o", "/", "X", "/", "g", "I", "<CR>"]);
+    f.feed([
+        ":", "%", "s", "/", "f", "o", "o", "/", "X", "/", "g", "I", "<CR>",
+    ]);
     assert_eq!(f.text(), "Foo X FOO", "I 标志应强制大小写敏感");
 }
 
@@ -244,7 +254,9 @@ fn substitute_capital_i_flag_forces_case_sensitive() {
 fn mark_range_substitute() {
     let mut f = Fixture::at("x\nfoo\nfoo\nfoo\nx", 0, 0);
     f.feed(["j", "m", "a", "j", "m", "b"]); // 'a=line1, 'b=line2
-    f.feed([":", "'", "a", ",", "'", "b", "s", "/", "f", "o", "o", "/", "b", "a", "r", "/", "<CR>"]);
+    f.feed([
+        ":", "'", "a", ",", "'", "b", "s", "/", "f", "o", "o", "/", "b", "a", "r", "/", "<CR>",
+    ]);
     assert_eq!(f.text(), "x\nbar\nbar\nfoo\nx", "'a,'b 两行都应替换");
 }
 
@@ -354,6 +366,13 @@ fn search_history_is_shared_between_slash_and_question() {
 fn yank_register_roundtrip_intact() {
     let mut f = Fixture::at("hello", 0, 0);
     f.feed(["y", "y"]);
-    assert_eq!(f.vim.registers.get(YANK).map(|r| r.text.clone()), Some("hello".into()));
-    assert_eq!(f.vim.registers.get(CLIPBOARD), None, "显式 yank 不碰 + 寄存器");
+    assert_eq!(
+        f.vim.registers.get(YANK).map(|r| r.text.clone()),
+        Some("hello".into())
+    );
+    assert_eq!(
+        f.vim.registers.get(CLIPBOARD),
+        None,
+        "显式 yank 不碰 + 寄存器"
+    );
 }

@@ -253,20 +253,29 @@ pub fn parse_keys(seq: &str) -> Vec<Key> {
 }
 
 /// Parse a vim mapping sequence like `"jk"`, `"<Esc>x"` into keystrokes.
-/// Angle-bracket names group multiple characters into one key.
+/// Angle-bracket names group multiple characters into one key. An
+/// unterminated `<` (no `>` ahead) falls back to literal `<` characters —
+/// `Key::parse` would otherwise swallow the whole tail into a Named key.
 pub fn parse_key_sequence(seq: &str) -> Vec<Key> {
     let mut keys = Vec::new();
     let mut chars = seq.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '<' {
             let mut name = String::from("<");
+            let mut terminated = false;
             for inner in chars.by_ref() {
                 name.push(inner);
                 if inner == '>' {
+                    terminated = true;
                     break;
                 }
             }
-            keys.push(Key::parse(&name));
+            if terminated {
+                keys.push(Key::parse(&name));
+            } else {
+                // malformed like "a<b": keep every char literal
+                keys.extend(name.chars().map(Key::char));
+            }
         } else {
             keys.push(Key::char(c));
         }

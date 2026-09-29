@@ -125,11 +125,11 @@ impl CmdKind {
                     | NormalCmd::RepeatChange
                     | NormalCmd::JumpBackward
                     | NormalCmd::JumpForward
-                | NormalCmd::OlderChange
-                | NormalCmd::NewerChange
-                | NormalCmd::WriteQuit
-                | NormalCmd::QuitNoSave
-                | NormalCmd::ScrollLines { .. }
+                    | NormalCmd::OlderChange
+                    | NormalCmd::NewerChange
+                    | NormalCmd::WriteQuit
+                    | NormalCmd::QuitNoSave
+                    | NormalCmd::ScrollLines { .. }
             ),
             CmdKind::Visual(cmd) => !matches!(
                 cmd,
@@ -248,7 +248,8 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // `forward` on SearchNext is the REPEAT polarity: `n` repeats the last
     // search in its own direction, `N` mirrors it (`?` + `n` goes up).
     b.motion_all(&["n"], Motion::SearchNext { forward: true });
-    b.motion_all(&["N"], Motion::SearchNext { forward: false });    b.motion_all(&["*"], Motion::StarSearch { forward: true });
+    b.motion_all(&["N"], Motion::SearchNext { forward: false });
+    b.motion_all(&["*"], Motion::StarSearch { forward: true });
     b.motion_all(&["#"], Motion::StarSearch { forward: false });
     b.motion_all(&["|"], Motion::Column);
     b.motion_all(&["H"], Motion::ScreenTop);
@@ -479,8 +480,14 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["<Tab>"], CmdKind::Normal(NormalCmd::JumpForward));
     // free scrolling: C-e / C-y move the VIEW one line, cursor follows only
     // when it would leave the viewport
-    b.normal(&["<C-e>"], CmdKind::Normal(NormalCmd::ScrollLines { down: true }));
-    b.normal(&["<C-y>"], CmdKind::Normal(NormalCmd::ScrollLines { down: false }));
+    b.normal(
+        &["<C-e>"],
+        CmdKind::Normal(NormalCmd::ScrollLines { down: true }),
+    );
+    b.normal(
+        &["<C-y>"],
+        CmdKind::Normal(NormalCmd::ScrollLines { down: false }),
+    );
     b.normal(&["g", ";"], CmdKind::Normal(NormalCmd::OlderChange));
     b.normal(&["g", ","], CmdKind::Normal(NormalCmd::NewerChange));
     b.normal(&["<C-a>"], CmdKind::Normal(NormalCmd::IncrementNumber));
