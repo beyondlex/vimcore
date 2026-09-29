@@ -636,10 +636,13 @@ fn cmdline_backspace_arriving_as_text_still_deletes() {
     assert_eq!(f.vim.cmdline.buffer, "fo");
     let _ = f.feed_raw(vimcore::key::Key::char('\x7f'));
     assert_eq!(f.vim.cmdline.buffer, "f");
-    // backspacing past the start cancels the prompt
+    // backspacing past the start keeps the prompt open (vim probe: mode()
+    // stays 'c' after <BS> on an empty prompt; the old cancel-on-empty
+    // behavior closed prompts vim keeps open)
     let _ = f.feed_raw(vimcore::key::Key::char('\x7f'));
     let _ = f.feed_raw(vimcore::key::Key::char('\x7f'));
-    assert_eq!(f.vim.mode(), vimcore::Mode::Normal);
+    assert_eq!(f.vim.cmdline.buffer, "");
+    assert_eq!(f.vim.mode(), vimcore::Mode::CommandLine { prompt: '/' });
 }
 
 // ---- undo grouping: change family and open-line are single undo steps --------

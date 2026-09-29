@@ -103,6 +103,17 @@ impl VimState {
             }
             ctx.host.scroll_to_line(ctx.buf.offset_to_line(offset));
         } else {
+            // vim reports the miss, not just a bell: E35 before any search
+            // was entered, E486 with the pattern otherwise
+            match &self.search.pattern {
+                Some(pattern) => {
+                    ctx.host
+                        .status_message(&format!("E486: Pattern not found: {pattern}"));
+                }
+                None => ctx
+                    .host
+                    .status_message("E35: No previous regular expression"),
+            }
             ctx.host.bell();
         }
     }
@@ -177,7 +188,7 @@ impl VimState {
                         // executing a visual `:` command ends visual mode
                         // (marks written, anchor cleared), like vim
                         if let Some((_kind, anchor)) = self.cmdline_visual.take() {
-                            self.close_visual_after_cmdline(anchor);
+                            self.close_visual_after_cmdline(ctx.buf, anchor);
                         }
                     } else {
                         self.execute_search(ctx, entry, prompt == '/');
@@ -189,13 +200,15 @@ impl VimState {
                     KeyResult::Consumed
                 }
                 "backspace" => {
-                    if self.cmdline.buffer.pop().is_none() {
-                        self.cancel_cmdline(ctx);
-                    } else if self.options.incsearch && prompt != ':' {
-                        let pattern = self.cmdline.buffer.clone();
-                        search::publish_incsearch(self, ctx, &pattern);
+                    // an empty prompt KEEPS cmdline mode on <BS> (vim probe:
+                    // mode() stays 'c') — only a real deletion edits text
+                    if self.cmdline.buffer.pop().is_some() {
+                        if self.options.incsearch && prompt != ':' {
+                            let pattern = self.cmdline.buffer.clone();
+                            search::publish_incsearch(self, ctx, &pattern);
+                        }
+                        ctx.host.changed();
                     }
-                    ctx.host.changed();
                     KeyResult::Consumed
                 }
                 "up" | "down" => {
@@ -242,7 +255,7 @@ impl VimState {
     /// return to normal mode. The cursor is NOT moved here (contrast
     /// `cancel_cmdline`, which restores the selection untouched — vim lets
     /// the executed command decide where the cursor ends up).
-    fn close_visual_after_cmdline(&mut self, anchor: usize) {
+    fn close_visual_after_cmdline(&mut self, buf: &dyn crate::buffer::VimBuffer, anchor: usize) {
         let cursor = self.cursor.offset;
         let (lo, hi) = if anchor <= cursor {
             (anchor, cursor)
@@ -251,7 +264,11 @@ impl VimState {
         };
         self.marks.set('<', lo);
         self.marks.set('>', hi);
-        self.marks.last_visual = Some((lo, hi + 1));
+        // exclusive end one CHAR past the last covered char — `hi + 1` bytes
+        // would sit inside a multi-byte cursor char (same rule as
+        // `exit_visual`; consumers floor it, but stored bounds stay clean)
+        let end = buf.next_char_offset(hi).unwrap_or(hi + 1);
+        self.marks.last_visual = Some((lo, end));
         self.visual_anchor = None;
         self.marks.active_visual = None;
         self.mode = Mode::Normal;
@@ -364,6 +381,13 @@ impl VimState {
         {
             let _register = rest.trim(); // named registers not supported
             self.ex_delete_lines(ctx, range);
+            return;
+        }
+        // :{range}y[ank] [x] [count] — yank the range's lines into a register
+        if let Some(rest) =
+            Self::boundary_cmd(line, "y").or_else(|| Self::boundary_cmd(line, "yank"))
+        {
+            self.ex_yank_lines(ctx, range, rest.trim());
             return;
         }
         ctx.host
@@ -517,6 +541,32 @@ impl VimState {
             }
             _ => None,
         }
+    }
+
+    /// `:{range}y[ank] [x] [count]` — yank the range's lines into a register
+    /// (default: the unnamed/yank path like `yy`). A numeric argument is a
+    /// COUNT (extend the range that many lines down, vim's `:2y 3`), an
+    /// alphabetic one names the register. The buffer is untouched.
+    fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
+        let mut register = None;
+        let mut extra_lines = 0usize;
+        if let Some(head) = args.chars().next() {
+            if head.is_ascii_digit() {
+                extra_lines = args.parse::<usize>().unwrap_or(1).saturating_sub(1);
+            } else if head.is_ascii_alphanumeric() {
+                register = Some(head);
+            }
+        }
+        let last = last
+            .saturating_add(extra_lines)
+            .min(ctx.buf.line_count().saturating_sub(1));
+        let first = first.min(last);
+        let span = crate::ops::OpSpan {
+            start: ctx.buf.line_start(first),
+            end: ctx.buf.line_range(last).end,
+            linewise: true,
+        };
+        crate::ops::yank_span(self, ctx, &span, register);
     }
 
     /// `:{range}d` — delete the lines of the range (single undo step),

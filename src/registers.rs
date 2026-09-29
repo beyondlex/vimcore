@@ -34,6 +34,16 @@ pub const CLIPBOARD: char = '+';
 pub const SMALL_DELETE: char = '-';
 pub const YANK: char = '0';
 
+/// `text.repeat(count)` under a hard byte ceiling. Counts arrive unvalidated
+/// from the keyboard and `99999999p` must clamp the pasted volume instead of
+/// multiplying the register into an OOM (vim dies the same way; the engine
+/// refuses to). Pairs with [`crate::ops::clamped_repeat_count`].
+pub(crate) fn clamped_repeat(text: &str, count: usize) -> String {
+    const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
+    let count = count.min((MAX_PASTE_BYTES / text.len().max(1)).max(1));
+    text.repeat(count)
+}
+
 impl Registers {
     pub fn get(&self, name: char) -> Option<&Register> {
         match name {
