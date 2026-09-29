@@ -51,6 +51,9 @@ pub enum NormalCmd {
     JumpForward,                 // C-i
     OlderChange,                 // g;
     NewerChange,                 // g,
+    /// gn / gN: select the next match (enter visual; reshape an existing
+    /// selection). With an operator (`dgn`) the span is the match itself.
+    SelectMatch { backward: bool },
     IncrementNumber,             // C-a
     DecrementNumber,             // C-x
     WriteQuit,                   // ZZ
@@ -497,6 +500,33 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     );
     b.normal(&["g", ";"], CmdKind::Normal(NormalCmd::OlderChange));
     b.normal(&["g", ","], CmdKind::Normal(NormalCmd::NewerChange));
+    // gn / gN: select the next match in the search direction (or the current
+    // one when the cursor is inside it). Plain keys enter visual; the same
+    // motion under an operator (`dgn`) changes just the match.
+    b.normal(
+        &["g", "n"],
+        CmdKind::Normal(NormalCmd::SelectMatch { backward: false }),
+    );
+    b.normal(
+        &["g", "N"],
+        CmdKind::Normal(NormalCmd::SelectMatch { backward: true }),
+    );
+    b.pending(
+        &["g", "n"],
+        CmdKind::Motion(Motion::SelectMatch { backward: false }),
+    );
+    b.pending(
+        &["g", "N"],
+        CmdKind::Motion(Motion::SelectMatch { backward: true }),
+    );
+    b.visual(
+        &["g", "n"],
+        CmdKind::Normal(NormalCmd::SelectMatch { backward: false }),
+    );
+    b.visual(
+        &["g", "N"],
+        CmdKind::Normal(NormalCmd::SelectMatch { backward: true }),
+    );
     b.normal(&["<C-a>"], CmdKind::Normal(NormalCmd::IncrementNumber));
     b.normal(&["<C-x>"], CmdKind::Normal(NormalCmd::DecrementNumber));
     b.normal(&["@"], CmdKind::Normal(NormalCmd::PlayMacro));

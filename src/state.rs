@@ -2337,11 +2337,32 @@ impl VimState {
                 if self.op.is_some() {
                     let result = motion.target(self, ctx, count);
                     if !result.moved {
-                        ctx.host.bell();
+                        if matches!(motion, Motion::SelectMatch { .. }) {
+                            self.report_search_miss(ctx);
+                        } else {
+                            ctx.host.bell();
+                        }
                         self.reset_pending();
                         return ProcessOutcome::Consumed;
                     }
-                    let mut span = ops::span_from_motion(self, ctx.buf, motion, result);
+                    // gn as an operator target covers exactly the match
+                    // (cursor..target would drag in the gap before it)
+                    let mut span = match motion {
+                        Motion::SelectMatch { .. } => match self.search.last_found_match.clone()
+                        {
+                            Some(range) => ops::OpSpan {
+                                start: range.start,
+                                end: range.end,
+                                linewise: false,
+                            },
+                            None => {
+                                self.report_search_miss(ctx);
+                                self.reset_pending();
+                                return ProcessOutcome::Consumed;
+                            }
+                        },
+                        _ => ops::span_from_motion(self, ctx.buf, motion, result),
+                    };
                     // `cw`/`cW` = the `dw` span with the trailing whitespace
                     // excluded (all probed against vim 9.1): `cw` on "ab cd"
                     // changes "ab"; `c2w` on "a|b c|d" from 'a' changes
@@ -2884,6 +2905,43 @@ impl VimState {
                     crate::buffer::floor_to_char_boundary(ctx.buf, self.changes[self.change_pos]);
                 self.cursor.offset = clamp_cursor(ctx.buf, offset);
                 self.cursor.desired_col = None;
+                ctx.host
+                    .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
+                ctx.host.changed();
+            }
+            // gn / gN: visual-select the match containing the cursor, else
+            // the next one in the search direction (`gN`: before it). In
+            // visual mode the selection is reshaped to the match. Feeds the
+            // cgn + `.` workflow: change one match, then repeat on the rest.
+            NormalCmd::SelectMatch { backward } => {
+                let count = self.take_total_count().max(1);
+                let mut from = self.cursor.offset;
+                let mut found = None;
+                for _ in 0..count {
+                    match crate::search::find_match_from(self, ctx.buf, from, backward) {
+                        Some(range) => {
+                            from = if backward { range.start } else { range.end };
+                            found = Some(range);
+                        }
+                        None => {
+                            found = None;
+                            break;
+                        }
+                    }
+                }
+                let Some(range) = found else {
+                    self.report_search_miss(ctx);
+                    return;
+                };
+                self.visual_anchor = Some(range.start);
+                self.cursor.offset = range.end.saturating_sub(1).max(range.start);
+                self.cursor.desired_col = None;
+                if !matches!(self.mode, Mode::Visual { .. }) {
+                    self.mode = Mode::Visual {
+                        kind: crate::mode::VisualKind::Char,
+                    };
+                }
+                self.marks.active_visual = Some((range.start, range.end));
                 ctx.host
                     .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
                 ctx.host.changed();

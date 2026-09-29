@@ -45,6 +45,10 @@ pub enum Motion {
     PageUp,
     LineDownFirstNonBlank, // enter / +
     LineUpFirstNonBlank,   // -
+    /// `gn`/`gN` as an operator target (`dgn`): the span is the match
+    /// itself, not cursor..target — the operator arm reads
+    /// `search.last_found_match`.
+    SelectMatch { backward: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +102,8 @@ impl Motion {
             | Motion::WordEndBack { .. }
             | Motion::MatchBracket
             | Motion::FindChar { till: false, .. }
-            | Motion::RepeatFind { .. } => MotionKind::Inclusive,
+            | Motion::RepeatFind { .. }
+            | Motion::SelectMatch { .. } => MotionKind::Inclusive,
             _ => MotionKind::Exclusive,
         }
     }
@@ -468,6 +473,32 @@ impl Motion {
                 let desired = vim.desired_column(buf);
                 let o = crate::buffer::offset_for_display_column(buf, line, desired);
                 MotionResult::new(o, MotionKind::Linewise)
+            }
+            // gn / gN as operator target: the match containing the cursor,
+            // else the next one in `backward`'s opposite direction
+            Motion::SelectMatch { backward } => {
+                let mut from = vim.cursor.offset;
+                let mut found = None;
+                for _ in 0..count {
+                    match search::find_match_from(vim, buf, from, backward) {
+                        Some(range) => {
+                            from = if backward { range.start } else { range.end };
+                            found = Some(range);
+                        }
+                        None => {
+                            found = None;
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(range) => {
+                        vim.search.last_found_match = Some(range.clone());
+                        let last = range.end.saturating_sub(1).max(range.start);
+                        MotionResult::new(last, MotionKind::Inclusive)
+                    }
+                    None => MotionResult::stuck(vim.cursor.offset),
+                }
             }
             // + / -: adjacent line, first non-blank char
             Motion::LineDownFirstNonBlank => {
