@@ -198,10 +198,88 @@ pub fn engine_smoke_contract(
     Ok(())
 }
 
+/// String-backed 参考缓冲实现：`line_range` 含终止 `\n`、`char_at` 在非
+/// 字符边界返回 `None`（永不 panic）。宿主可以直接复用，也可以照抄实现——
+/// 引擎的 `floor_to_char_boundary` 会刻意探测非边界偏移，`char_at` 若用裸
+/// 切片会从合法的引擎调用路径上 panic（第五轮检视抓到的宿主复制陷阱）。
+#[derive(Default, Clone)]
+pub struct TckStrBuf(pub String);
+
+impl TckStrBuf {
+    pub fn from_text(text: &str) -> Self {
+        TckStrBuf(text.to_owned())
+    }
+}
+
+impl VimBuffer for TckStrBuf {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn line_count(&self) -> usize {
+        if self.0.is_empty() {
+            1
+        } else if self.0.ends_with('\n') {
+            self.0.split('\n').count() - 1
+        } else {
+            self.0.split('\n').count()
+        }
+    }
+    fn char_at(&self, offset: usize) -> Option<char> {
+        if !self.0.is_char_boundary(offset) {
+            return None;
+        }
+        self.0[offset..].chars().next()
+    }
+    fn prev_char_offset(&self, offset: usize) -> Option<usize> {
+        if offset == 0 || offset > self.0.len() || !self.0.is_char_boundary(offset) {
+            return None;
+        }
+        self.0[..offset]
+            .chars()
+            .next_back()
+            .map(|c| offset - c.len_utf8())
+    }
+    fn line_range(&self, line: usize) -> Range<usize> {
+        if line >= self.line_count() {
+            return self.0.len()..self.0.len();
+        }
+        let mut start = 0;
+        for (i, part) in self.0.split('\n').enumerate() {
+            if i == line {
+                // 终止 \n 存在就包含进 range；末行延伸到缓冲区尾
+                let end = if i + 1 < self.0.split('\n').count() {
+                    start + part.len() + 1
+                } else {
+                    self.0.len()
+                };
+                return start..end;
+            }
+            start += part.len() + 1;
+        }
+        unreachable!()
+    }
+    fn offset_to_line(&self, offset: usize) -> usize {
+        self.0[..offset.min(self.0.len())].split('\n').count() - 1
+    }
+    fn slice(&self, range: Range<usize>) -> String {
+        self.0[range].to_owned()
+    }
+}
+
+impl VimBufferMut for TckStrBuf {
+    fn insert_text(&mut self, offset: usize, text: &str) {
+        self.0.insert_str(offset, text);
+    }
+    fn delete_range(&mut self, range: Range<usize>) {
+        self.0.replace_range(range, "");
+    }
+}
+
 /// 无副作用宿主：只想让引擎驱动 buffer 时使用。宿主自身的 undo、剪贴板、
 /// 高亮等语义不属于 TCK 范围，由宿主自己的测试覆盖。
 #[derive(Default)]
 pub struct TckHost;
+
 
 impl VimHost for TckHost {
     fn viewport(&self) -> (usize, usize) {
@@ -252,73 +330,6 @@ fn assert_content(buf: &impl VimBuffer, want: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// String-backed 合同参考实现（line_range 含终止 \n）。
-    #[derive(Default)]
-    struct StrBuf(pub String);
-
-    impl VimBuffer for StrBuf {
-        fn len(&self) -> usize {
-            self.0.len()
-        }
-        fn line_count(&self) -> usize {
-            if self.0.is_empty() {
-                return 1;
-            }
-            let n = self.0.split('\n').count();
-            if self.0.ends_with('\n') {
-                n - 1
-            } else {
-                n
-            }
-        }
-        fn char_at(&self, offset: usize) -> Option<char> {
-            self.0[offset..].chars().next()
-        }
-        fn prev_char_offset(&self, offset: usize) -> Option<usize> {
-            if offset == 0 || offset > self.0.len() {
-                return None;
-            }
-            self.0[..offset]
-                .chars()
-                .next_back()
-                .map(|c| offset - c.len_utf8())
-        }
-        fn line_range(&self, line: usize) -> Range<usize> {
-            if line >= self.line_count() {
-                return self.0.len()..self.0.len();
-            }
-            let mut start = 0;
-            for (i, part) in self.0.split('\n').enumerate() {
-                if i == line {
-                    // 终止 \n 存在就包含进 range；末行延伸到缓冲区尾
-                    let end = if i + 1 < self.0.split('\n').count() {
-                        start + part.len() + 1
-                    } else {
-                        self.0.len()
-                    };
-                    return start..end;
-                }
-                start += part.len() + 1;
-            }
-            unreachable!()
-        }
-        fn offset_to_line(&self, offset: usize) -> usize {
-            self.0[..offset.min(self.0.len())].split('\n').count() - 1
-        }
-        fn slice(&self, range: Range<usize>) -> String {
-            self.0[range].to_owned()
-        }
-    }
-
-    impl VimBufferMut for StrBuf {
-        fn insert_text(&mut self, offset: usize, text: &str) {
-            self.0.insert_str(offset, text);
-        }
-        fn delete_range(&mut self, range: Range<usize>) {
-            self.0.replace_range(range, "");
-        }
-    }
-
     /// 反例：非末行 range 不含 \n——常见实现错误，TCK 必须抓住。
     struct NoNewlineBuf(pub String);
 
@@ -327,13 +338,13 @@ mod tests {
             self.0.len()
         }
         fn line_count(&self) -> usize {
-            StrBuf(self.0.clone()).line_count()
+            TckStrBuf(self.0.clone()).line_count()
         }
         fn char_at(&self, offset: usize) -> Option<char> {
-            StrBuf(self.0.clone()).char_at(offset)
+            TckStrBuf(self.0.clone()).char_at(offset)
         }
         fn prev_char_offset(&self, offset: usize) -> Option<usize> {
-            StrBuf(self.0.clone()).prev_char_offset(offset)
+            TckStrBuf(self.0.clone()).prev_char_offset(offset)
         }
         fn line_range(&self, line: usize) -> Range<usize> {
             let mut start = 0;
@@ -346,7 +357,7 @@ mod tests {
             self.0.len()..self.0.len()
         }
         fn offset_to_line(&self, offset: usize) -> usize {
-            StrBuf(self.0.clone()).offset_to_line(offset)
+            TckStrBuf(self.0.clone()).offset_to_line(offset)
         }
         fn slice(&self, range: Range<usize>) -> String {
             self.0[range].to_owned()
@@ -355,11 +366,11 @@ mod tests {
 
     #[test]
     fn read_contract_accepts_reference_impl() {
-        let buf = StrBuf("alpha\nbeta 中文\n\n尾行\n".into());
+        let buf = TckStrBuf("alpha\nbeta 中文\n\n尾行\n".into());
         buffer_read_contract(&buf).unwrap();
-        let buf = StrBuf("中文 mix emoji 👨‍👩‍👧".into());
+        let buf = TckStrBuf("中文 mix emoji 👨‍👩‍👧".into());
         buffer_read_contract(&buf).unwrap();
-        let buf = StrBuf(String::new());
+        let buf = TckStrBuf(String::new());
         buffer_read_contract(&buf).unwrap();
     }
 
@@ -371,13 +382,13 @@ mod tests {
 
     #[test]
     fn edit_contract_passes_reference_impl() {
-        let mut buf = StrBuf::default();
+        let mut buf = TckStrBuf::default();
         buffer_edit_contract(&mut buf).unwrap();
     }
 
     #[test]
     fn engine_smoke_passes_reference_impl() {
-        let mut buf = StrBuf::default();
+        let mut buf = TckStrBuf::default();
         let mut host = TckHost;
         engine_smoke_contract(&mut buf, &mut host).unwrap();
         assert_eq!(buf.0, "gammax\nlpha\nbeta\n");
