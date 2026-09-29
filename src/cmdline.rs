@@ -626,7 +626,7 @@ impl VimState {
                 s.to_owned()
             }
         };
-        lines.sort_by(|a, b| lower(a).cmp(&lower(b)));
+        lines.sort_by_key(|s| lower(s));
         if unique {
             lines.dedup();
         }
