@@ -352,19 +352,38 @@ fn cw_on_trailing_blanks_keeps_newline_and_indent() {
 /// probing vim with `let @/ = "two"` + an explicit cursor position.
 #[test]
 fn count_n_steps_forward_wrapping() {
-    let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "2", "n"]);
+    let f = edit(
+        "one two\nthree two\nfour two\nfive two",
+        0,
+        0,
+        &["/", "t", "w", "o", "<Enter>", "2", "n"],
+    );
     assert_eq!(f.line(), 2, "2n from the first match lands on line 3");
 }
 
 #[test]
 fn count_n_steps_backward() {
-    let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "2", "N"]);
-    assert_eq!(f.line(), 2, "2N wraps past the first match: line 4 is one step back, line 3 is two");
+    let f = edit(
+        "one two\nthree two\nfour two\nfive two",
+        0,
+        0,
+        &["/", "t", "w", "o", "<Enter>", "2", "N"],
+    );
+    assert_eq!(
+        f.line(),
+        2,
+        "2N wraps past the first match: line 4 is one step back, line 3 is two"
+    );
 }
 
 #[test]
 fn plain_n_backward_wraps_to_last_match() {
-    let f = edit("one two\nthree two\nfour two\nfive two", 0, 0, &["/", "t", "w", "o", "<Enter>", "N"]);
+    let f = edit(
+        "one two\nthree two\nfour two\nfive two",
+        0,
+        0,
+        &["/", "t", "w", "o", "<Enter>", "N"],
+    );
     assert_eq!(f.line(), 3, "N from the first match wraps to the last");
 }
 
@@ -375,12 +394,19 @@ fn substitute_cursor_lands_on_last_substituted_line_first_non_blank() {
     // line 2 has no match, so the last substituted line is line 1;
     // vim puts the cursor at its first non-blank (col 3), regardless of
     // where the match sits in the line
-    let f = edit("  hello world\n  foo x\n  bar", 0, 0, &[
-        ":", "%", "s", "/", "o", "/", "0", "/", "<CR>",
-    ]);
+    let f = edit(
+        "  hello world\n  foo x\n  bar",
+        0,
+        0,
+        &[":", "%", "s", "/", "o", "/", "0", "/", "<CR>"],
+    );
     assert_eq!(f.text(), "  hell0 world\n  f0o x\n  bar");
     assert_eq!(f.line(), 1);
-    assert_eq!(f.cursor(), 16, "first non-blank of line 2 ('  f0o x') is byte 16");
+    assert_eq!(
+        f.cursor(),
+        16,
+        "first non-blank of line 2 ('  f0o x') is byte 16"
+    );
 }
 
 #[test]
@@ -388,9 +414,12 @@ fn substitute_cursor_survives_length_changing_earlier_lines() {
     // line 1 grows by one byte per substitution, shifting line 2; the old
     // code computed the cursor from stale pre-edit offsets and could land
     // mid-line (or mid-character on CJK)
-    let f = edit("ooo\noz\n", 0, 0, &[
-        ":", "%", "s", "/", "o", "/", "0", "0", "/", "g", "<CR>",
-    ]);
+    let f = edit(
+        "ooo\noz\n",
+        0,
+        0,
+        &[":", "%", "s", "/", "o", "/", "0", "0", "/", "g", "<CR>"],
+    );
     assert_eq!(f.text(), "000000\n00z\n");
     assert_eq!(f.line(), 1);
     assert_eq!(f.cursor(), 7, "first non-blank of line 2");
@@ -402,7 +431,12 @@ fn substitute_cursor_survives_length_changing_earlier_lines() {
 fn gv_restores_forward_selection() {
     // exit_visual used to re-read the selection AFTER parking the cursor on
     // the selection start, collapsing forward selections to one char
-    let f = edit("abcdef\nghijkl\n", 0, 0, &["v", "3", "l", "<Esc>", "g", "v"]);
+    let f = edit(
+        "abcdef\nghijkl\n",
+        0,
+        0,
+        &["v", "3", "l", "<Esc>", "g", "v"],
+    );
     assert_eq!(f.vim.mode_indicator(), "VISUAL");
     let (a, c, _) = f.vim.visual_selection().unwrap();
     assert_eq!((a, c), (0, 3), "gv must restore the forward 0..3 selection");
@@ -442,7 +476,11 @@ fn star_without_word_bells_instead_of_reusing_stale_pattern() {
     f.feed(["j"]); // line 2: "..."
     let line_before = f.line();
     f.feed(["*"]);
-    assert_eq!(f.line(), line_before, "* must not move: no word on the line");
+    assert_eq!(
+        f.line(),
+        line_before,
+        "* must not move: no word on the line"
+    );
     assert_eq!(
         f.host.highlights.len(),
         1,
@@ -454,8 +492,15 @@ fn star_without_word_bells_instead_of_reusing_stale_pattern() {
 
 #[test]
 fn huge_counts_saturate_instead_of_overflowing() {
-    let f = edit("ab\ncd\n", 0, 0, &["9", "9", "9", "9", "9", "9", "9", "9", "9",
-        "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "d", "d"]);
+    let f = edit(
+        "ab\ncd\n",
+        0,
+        0,
+        &[
+            "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9",
+            "9", "9", "9", "d", "d",
+        ],
+    );
     // saturates far past the line count; dd clamps to the last line
     assert_eq!(f.text(), "");
 
@@ -508,10 +553,14 @@ fn blockwise_put_creates_padded_rows_below() {
     // row 1 joins the cursor line, row 2 becomes a padded new line below
     let mut f = Fixture::at("ab\ncd\nef\ngh\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "l", "y"]); // block ["ab", "cd"]
-    f.feed(["G"]);                          // last line
-    f.feed(["l", "p"]);                     // col 2, put after
+    f.feed(["G"]); // last line
+    f.feed(["l", "p"]); // col 2, put after
     assert_eq!(f.text(), "ab\ncd\nef\nghab\n  cd\n");
-    assert_eq!(f.cursor(), 11, "cursor on the first pasted char (line 4, byte 11)");
+    assert_eq!(
+        f.cursor(),
+        11,
+        "cursor on the first pasted char (line 4, byte 11)"
+    );
 }
 
 #[test]

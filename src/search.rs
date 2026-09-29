@@ -205,7 +205,10 @@ pub fn word_bounds_at(buf: &dyn VimBuffer, offset: usize) -> Option<(usize, usiz
         }
     }
     // `end` is the last char OF the word; the bound is exclusive
-    Some((start, end + buf.char_at(end).map(|c| c.len_utf8()).unwrap_or(1)))
+    Some((
+        start,
+        end + buf.char_at(end).map(|c| c.len_utf8()).unwrap_or(1),
+    ))
 }
 
 /// Publish incremental highlights while the user types in the command line.

@@ -201,8 +201,8 @@ impl Motion {
             Motion::LineEnd => {
                 // `count$` ends at the END of the count-th line down (`2$`,
                 // `d2$` cross the newline like vim)
-                let line = (buf.offset_to_line(vim.cursor.offset) + count - 1)
-                    .min(buf.line_count() - 1);
+                let line =
+                    (buf.offset_to_line(vim.cursor.offset) + count - 1).min(buf.line_count() - 1);
                 let end = buf.line_end(line);
                 if end == buf.line_start(line) {
                     MotionResult::new(end, MotionKind::Inclusive)
@@ -367,7 +367,11 @@ impl Motion {
             // opposite), not the direction itself: after `?foo` a plain `n`
             // must keep searching BACKWARD, like vim.
             Motion::SearchNext { forward } => {
-                let dir = if forward { vim.search.forward } else { !vim.search.forward };
+                let dir = if forward {
+                    vim.search.forward
+                } else {
+                    !vim.search.forward
+                };
                 match search::jump_to_match(vim, buf, dir, count) {
                     Some(o) => {
                         // re-publish the matches: after Esc dismissed the

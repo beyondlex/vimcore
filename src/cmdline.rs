@@ -44,7 +44,11 @@ pub struct Cmdline {
 impl Cmdline {
     /// `/` and `?` share one search history, like vim.
     fn history_key(prompt: char) -> char {
-        if prompt == ':' { ':' } else { '/' }
+        if prompt == ':' {
+            ':'
+        } else {
+            '/'
+        }
     }
 
     fn history_for(&mut self, prompt: char) -> &mut Vec<String> {
@@ -672,10 +676,8 @@ impl VimState {
         // wherever an earlier line's substitution changed the byte length
         if let Some(line_no) = last_sub_line {
             let line = line_no.min(ctx.buf.line_count() - 1);
-            self.cursor.offset = crate::buffer::clamp_to_line_end(
-                ctx.buf,
-                ctx.buf.first_non_blank(line),
-            );
+            self.cursor.offset =
+                crate::buffer::clamp_to_line_end(ctx.buf, ctx.buf.first_non_blank(line));
             self.cursor.desired_col = None;
         }
         ctx.host.status_message(&format!("{total} substitutions"));
