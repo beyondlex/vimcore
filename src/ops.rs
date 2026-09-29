@@ -7,7 +7,7 @@
 //!   the previous line (`d}` keeps the following blank line).
 //! - Column 1 + start at/before first non-blank becomes linewise.
 
-use crate::buffer::{clamp_cursor, clamp_to_line_end, VimBuffer};
+use crate::buffer::{clamp_cursor, VimBuffer};
 use crate::mode::Mode;
 use crate::motions::{Motion, MotionKind, MotionResult};
 use crate::objects::{self, ObjectRange};
@@ -218,7 +218,16 @@ fn register_kind(span: &OpSpan) -> RegisterKind {
 }
 
 /// Delete the span into the register; updates the cursor.
+///
+/// An EMPTY charwise span is a failed motion (e.g. a `dw` whose landing
+/// equals the cursor): it deletes nothing AND stores nothing — vim keeps the
+/// previous register content there (vim 9.1 probe: `ci(` on `()` leaves the
+/// unnamed register untouched). Zero-width inner text objects rely on this
+/// (`ci(` on `()` still enters insert).
 pub fn delete_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: Option<char>) {
+    if !span.linewise && span.start >= span.end {
+        return;
+    }
     let text = ctx.buf.slice(span.start..span.end);
     vim.registers
         .store_delete(register, text, register_kind(span));
@@ -317,8 +326,12 @@ pub fn span_from_visual_block(
     })
 }
 
-/// Yank the span into the register.
+/// Yank the span into the register. An empty charwise span (failed motion)
+/// stores nothing — the register keeps its previous content, like vim.
 pub fn yank_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: Option<char>) {
+    if !span.linewise && span.start >= span.end {
+        return;
+    }
     let text = ctx.buf.slice(span.start..span.end);
     vim.registers
         .store_yank(register, text, register_kind(span));
@@ -369,7 +382,7 @@ pub fn apply(
                 typing_at = at + indent_text.len();
             }
             vim.cursor.offset = typing_at;
-            vim.begin_insert(ctx, InsertKind::Change);
+            vim.begin_insert(InsertKind::Change);
         }
         Operator::IndentLeft | Operator::IndentRight => {
             let first = ctx.buf.offset_to_line(span.start);
@@ -543,9 +556,11 @@ fn flush_paragraph(paragraph: &mut Vec<String>, indent: &str, width: usize, out:
     out.push('\n');
 }
 
-/// `p` / `P`: paste a register.
+/// `p` / `P`: paste a register. An unset register reports vim's feedback
+/// (bell — vim shows E353: Nothing in register) instead of a silent no-op.
 pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, after: bool) {
     let Some(data) = vim.registers.get_for_paste(register, ctx.host) else {
+        ctx.host.bell();
         return;
     };
     // A linewise register always represents WHOLE lines, so an empty one is

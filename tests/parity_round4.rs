@@ -200,3 +200,84 @@ fn cancelled_replace_opens_no_undo_group() {
     f.feed(["r", "<Esc>"]);
     assert_eq!(f.host.group_count, 0);
 }
+
+// ---- block insert sessions ---------------------------------------------------
+
+/// Vertical motions are locked out mid-block-insert: the row replication
+/// assumes all typing landed on the session's typing row (a page motion used
+/// to point it at another row and drift the replica offsets into
+/// mid-character positions — caught by the key fuzz).
+#[test]
+fn block_insert_locks_vertical_motions() {
+    // cursor ends on the BOTTOM row of the block (`jj`), so the typing row
+    // is line 2 and the replicas go to the rows above
+    let mut f = Fixture::at("foo\nbar\nbaz\n", 0, 0);
+    f.feed(["<C-v>", "j", "j", "I"]);
+    assert!(f.vim.mode() == vimcore::Mode::Insert);
+    f.feed(["up", "down", "pageup"]);
+    assert!(f.host.bells > 0, "vertical moves during block insert bell");
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    // typing still replicated onto every selected row, nothing corrupted
+    assert_eq!(f.text(), "Xfoo\nXbar\nXbaz\n");
+}
+
+/// Backspace during a block insert changes the typing row's length; the
+/// replica offsets must follow the row's exact byte delta, not the typed
+/// text's length.
+#[test]
+fn block_insert_backspace_keeps_replica_offsets_valid() {
+    let mut f = Fixture::at("ab\ncd\nef\n", 0, 0);
+    f.feed(["<C-v>", "j", "I"]);
+    f.type_text("xy");
+    f.feed(["<BS>"]);
+    f.type_text("z");
+    f.feed(["<Esc>"]);
+    // "y" was undone, so the replica text is "xz" — exactly what the rows get
+    assert_eq!(f.text(), "xzab\nxzcd\nef\n", "BS shrank the replica text");
+}
+
+// ---- registers ----------------------------------------------------------------
+
+/// A failed/empty charwise span stores nothing: vim 9.1 probe `ci(` on `()`
+/// leaves the unnamed register untouched. The old engine stored the empty
+/// string into `"-`/unnamed on every empty-span delete.
+#[test]
+fn empty_span_delete_keeps_previous_register() {
+    let mut f = Fixture::new("keepme\na()b\n");
+    f.feed(["g", "y", "y"]); // hmm — use a real yank below instead
+    let mut f = Fixture::new("keepme\na()b\n");
+    f.feed(["y", "y"]); // unnamed = "keepme\n"
+    f.feed(["j"]);
+    f.feed(["f", "(", "c", "i", "("]);
+    f.type_text("Z");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "keepme\na(Z)b\n");
+    let reg = f.vim.registers.get('"').expect("unnamed set");
+    assert_eq!(reg.text, "keepme\n", "empty ci( kept the previous yank");
+}
+
+/// `p` with an unset register rings the bell (vim E353) and — for the VISUAL
+/// variant — leaves the selection intact instead of deleting it.
+#[test]
+fn put_with_empty_register_bells_and_keeps_selection() {
+    let mut f = Fixture::new("abc\n");
+    f.feed(["p"]);
+    assert!(f.host.bells > 0, "normal p bells");
+    assert_eq!(f.text(), "abc\n");
+
+    let mut f = Fixture::new("abc\n");
+    f.feed(["v", "l", "p"]);
+    assert!(f.host.bells > 0, "visual p bells");
+    assert_eq!(f.text(), "abc\n", "visual p keeps the selection");
+}
+
+// ---- Ex commands ----------------------------------------------------------------
+
+/// `:{range}d [count]` extends the range downward, like `:y`'s count.
+#[test]
+fn ex_delete_supports_count_argument() {
+    let mut f = Fixture::new("one\ntwo\nthree\nfour\n");
+    f.feed([":", "2", "d", " ", "2", "<CR>"]);
+    assert_eq!(f.text(), "one\nfour\n", ":2d 2 deletes lines 2-3");
+}
