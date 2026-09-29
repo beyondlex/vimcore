@@ -188,6 +188,10 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // the cmdline consume backspace before the tries ever see it.
     b.motion_all(&["<BS>"], Motion::Left);
     b.motion_all(&["l"], Motion::Right);
+    // <Space> is vim's alias for `l` (exclusive; stops at the line end —
+    // verified against vim 9.1). handle_key canonicalizes Named("space")
+    // keystrokes to Char(' ') so both delivery paths hit this row.
+    b.motion_all(&[" "], Motion::Right);
     b.motion_all(&["j"], Motion::Down);
     b.motion_all(&["k"], Motion::Up);
     b.motion_all(&["g", "j"], Motion::Down); // no soft wrap in v1

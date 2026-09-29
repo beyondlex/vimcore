@@ -2700,7 +2700,15 @@ impl VimState {
             self.reset_pending();
             return ProcessOutcome::Consumed;
         }
-        let Some(c) = key.printable_char() else {
+        // <CR> carries a printable meaning for the commands below even
+        // though it is not "printable": `r<CR>` replaces the char with a
+        // line break (vim splits the line). For the other char-argument
+        // commands an enter argument harmlessly fails lookup.
+        let c = if key == Key::enter() {
+            '\n'
+        } else if let Some(c) = key.printable_char() {
+            c
+        } else {
             self.reset_pending();
             ctx.host.bell();
             return ProcessOutcome::Consumed;

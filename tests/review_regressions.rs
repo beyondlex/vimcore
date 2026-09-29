@@ -499,3 +499,56 @@ fn open_line_preserves_tab_indent() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "\tfoo\n\tbar\n");
 }
+
+// ---- blockwise register p/P in normal mode (verified against vim 9.1) -----------
+
+#[test]
+fn blockwise_put_creates_padded_rows_below() {
+    // yank the 2x2 block (ab/cd), put after cursor col 2 of "gh":
+    // row 1 joins the cursor line, row 2 becomes a padded new line below
+    let mut f = Fixture::at("ab\ncd\nef\ngh\n", 0, 0);
+    f.feed(["<C-v>", "j", "l", "l", "y"]); // block ["ab", "cd"]
+    f.feed(["G"]);                          // last line
+    f.feed(["l", "p"]);                     // col 2, put after
+    assert_eq!(f.text(), "ab\ncd\nef\nghab\n  cd\n");
+    assert_eq!(f.cursor(), 12, "cursor on the first pasted char (line 4 col 2)");
+}
+
+#[test]
+fn blockwise_put_before_inserts_at_cursor_column() {
+    let mut f = Fixture::at("ab\ncd\nef\ngh\n", 0, 0);
+    f.feed(["<C-v>", "j", "l", "l", "y"]);
+    f.feed(["G", "P"]);
+    assert_eq!(f.text(), "ab\ncd\nef\nabgh\ncd\n");
+}
+
+#[test]
+fn blockwise_put_count_repeats_rows_horizontally() {
+    let mut f = Fixture::at("ab\ngh", 0, 0);
+    f.feed(["<C-v>", "l", "y"]);
+    f.feed(["G", "2", "p"]);
+    // p puts one column right of the cursor char: "g" | "abab" | "h"
+    assert_eq!(f.text(), "ab\ngababh");
+}
+
+// ---- r<CR> replaces with a line break (vim splits the line) ----------------------
+
+#[test]
+fn r_enter_splits_the_line() {
+    let f = edit("abc\ndef\n", 0, 1, &["r", "<CR>"]);
+    assert_eq!(f.text(), "a\nc\ndef\n");
+}
+
+// ---- <Space> moves right like l --------------------------------------------------
+
+#[test]
+fn space_moves_right_like_l() {
+    let f = edit("ab\ncd\n", 0, 0, &[" "]);
+    assert_eq!(f.cursor(), 1);
+    // and stops at the line end, like vim
+    let f = edit("ab\ncd\n", 0, 1, &[" "]);
+    assert_eq!(f.cursor(), 1);
+    // operator form: d<Space> is dl
+    let f = edit("abc", 0, 0, &["d", " "]);
+    assert_eq!(f.text(), "bc");
+}
