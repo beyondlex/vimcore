@@ -292,3 +292,56 @@ fn ctrl_c_exits_visual() {
     let f = edit("abcdef", 0, 1, &["v", "l", "l", "<C-c>"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Normal));
 }
+
+// ---- dw/cw crossing into an indented next line (verified against vim 9.1) ----
+
+#[test]
+fn dw_into_indented_next_line_never_joins() {
+    // cursor on the trailing blanks; the landing is NOT column 1, so the
+    // generic col-1 rules never fired and the span used to swallow the
+    // newline + indent ("foobar")
+    let f = edit("foo   \n  bar", 0, 3, &["d", "w"]);
+    assert_eq!(f.text(), "foo\n  bar");
+}
+
+#[test]
+fn dw_on_last_word_of_line_stops_at_line_end() {
+    let f = edit("foo bar", 0, 4, &["d", "w"]);
+    assert_eq!(f.text(), "foo ");
+}
+
+#[test]
+fn d2w_landing_column1_empties_line_instead_of_deleting_it() {
+    // vim keeps the (now empty) line: end moves to EOL of the start line
+    let f = edit("foo x\nbar baz\ncorge", 0, 0, &["d", "2", "w"]);
+    assert_eq!(f.text(), "\nbar baz\ncorge");
+}
+
+#[test]
+fn dw_on_blank_line_with_indented_next_line_is_a_noop() {
+    // vim: no join, no line deletion — the clamped span is empty
+    let f = edit("foo\n\n  bar", 1, 0, &["d", "w"]);
+    assert_eq!(f.text(), "foo\n\n  bar");
+}
+
+#[test]
+fn dw_on_blank_line_with_column0_next_line_deletes_the_line() {
+    // column-1 landing from a blank start line: LINEWISE over the blanks
+    let f = edit("foo\n\nbar", 1, 0, &["d", "w"]);
+    assert_eq!(f.text(), "foo\nbar");
+}
+
+#[test]
+fn d3w_landing_mid_line_joins_like_vim() {
+    // deeper crossings DO span the newline
+    let f = edit("foo bar\nbaz qux\ncorge", 0, 0, &["d", "3", "w"]);
+    assert_eq!(f.text(), "qux\ncorge");
+}
+
+#[test]
+fn cw_on_trailing_blanks_keeps_newline_and_indent() {
+    let mut f = edit("ab  \n  cd", 0, 2, &["c", "w"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "abX\n  cd");
+}
