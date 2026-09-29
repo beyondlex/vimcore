@@ -1064,6 +1064,18 @@ impl VimState {
         ctx.host.changed();
     }
 
+    /// [`VimState::bump`], but only when the buffer actually changed since
+    /// `gen_before` (an `edit_*` funnel ran). Commands that can no-op (`x` on
+    /// an empty line, `p` with an empty register, `J` at EOF, `~` past the
+    /// line end, visual `<` with no indent to remove) must not feed the
+    /// changelist: vim 9.1 skips its own no-ops (`g;` after a no-op `x` walks
+    /// straight past it, probe `jx gg x g;g;` stays on the changed line).
+    pub(crate) fn bump_if_edited(&mut self, ctx: &mut Ctx, gen_before: u64) {
+        if self.edit_generation != gen_before {
+            self.bump(ctx);
+        }
+    }
+
     /// Record `offset` as the latest change position: the `.` mark and the
     /// changelist entry (`g;`/`g,`), deduping consecutive repeats.
     fn record_change_position(&mut self, offset: usize) {
@@ -2156,10 +2168,11 @@ impl VimState {
             "pagedown" => Motion::PageDown,
             "delete" => {
                 let count = self.count.take().unwrap_or(1);
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, false);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
                 return Some(ProcessOutcome::Consumed);
             }
             _ => return None,
@@ -2214,6 +2227,10 @@ impl VimState {
                         };
                     }
                     self.cmd_seq.clear();
+                    // a stale count must not survive an unmapped key: vim
+                    // cancels it, and a surviving count would silently scale
+                    // the NEXT motion (`3<C-unknown>` then `j` jumps 3 lines)
+                    self.reset_pending();
                     ctx.host.bell();
                     return ProcessOutcome::Consumed;
                 }
@@ -2269,6 +2286,10 @@ impl VimState {
                 if key.modifiers.control || key.modifiers.alt {
                     return ProcessOutcome::Unknown;
                 }
+                // a stale count must not survive an unmapped key: vim cancels
+                // it, and a surviving count would silently scale the NEXT
+                // motion (`3<C-unknown>` then `j` jumps 3 lines)
+                self.reset_pending();
                 ctx.host.bell();
                 ProcessOutcome::Consumed
             }
@@ -2474,6 +2495,10 @@ impl VimState {
 
     /// Apply an operator to the current visual selection and leave visual mode
     /// (unless the operator opened insert, e.g. `c`).
+    ///
+    /// A pending count applies only to the INDENT operators (vim 9.1: `Vj3>`
+    /// shifts three shiftwidths; `Vj3d` deletes the selection once — a count
+    /// before d/y is meaningless there).
     fn apply_visual_operator(&mut self, ctx: &mut Ctx, op: Operator) {
         if matches!(
             self.mode,
@@ -2488,14 +2513,36 @@ impl VimState {
             ctx.host.bell();
             return;
         };
+        let count = self.take_total_count().max(1);
+        let gen_before = self.edit_generation;
         self.begin_edit();
-        ops::apply(self, ctx, op, &span, self.register);
+        if matches!(op, Operator::IndentLeft | Operator::IndentRight) {
+            // the count applies to indent operators (vim 9.1: `Vj3>` shifts
+            // three shiftwidths). The line range is resolved ONCE — looping
+            // `ops::apply` would reuse the original byte span, which drifts
+            // off the tail lines as earlier indents insert bytes. The cursor
+            // lands where the single-count apply would put it.
+            let first = ctx.buf.offset_to_line(span.start);
+            let last = ops::last_line_of_span(ctx.buf, &span);
+            for _ in 0..count {
+                for line in first..=last {
+                    ops::shift_line(self, ctx, line, matches!(op, Operator::IndentRight));
+                }
+            }
+            if self.edit_generation != gen_before {
+                self.cursor.offset =
+                    ctx.buf.first_non_blank(first.min(ctx.buf.line_count() - 1));
+                self.cursor.desired_col = None;
+            }
+        } else {
+            ops::apply(self, ctx, op, &span, self.register);
+        }
         // an operator that entered insert mode (visual `c`) keeps its group
         // open so deletion + typing undo as one step
         if self.insert_session.is_none() {
             self.end_edit();
         }
-        self.bump(ctx);
+        self.bump_if_edited(ctx, gen_before);
         self.reset_pending();
         if matches!(self.mode, Mode::Visual { .. }) {
             self.finish_visual_op(ctx);
@@ -2640,29 +2687,32 @@ impl VimState {
             // x: delete count chars starting at the cursor
             NormalCmd::DeleteCharForward => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, false);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // X: delete count chars before the cursor (never crosses the
             // line start)
             NormalCmd::DeleteCharBackward => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, true);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // s: like x, but drop into insert (one undo group covers the
             // delete AND the typed replacement via `begin_insert`'s group
             // reuse)
             NormalCmd::SubstituteChar => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, false);
                 self.start_insert(ctx, InsertKind::Change);
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // S: clear the whole line's content but keep the line itself
             // (linewise `cc` — ops::apply preserves the indent)
@@ -2673,9 +2723,10 @@ impl VimState {
                     end: ctx.buf.line_range(line).end,
                     linewise: true,
                 };
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::apply(self, ctx, Operator::Change, &span, self.register);
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // C: change to end of line; on an empty tail (`C` at line end)
             // there is nothing to delete — behave like `A`
@@ -2727,45 +2778,50 @@ impl VimState {
             // ~: swap case under the cursor, advancing per char
             NormalCmd::ToggleChar => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::toggle_chars(self, ctx, count);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // p: put after the cursor / below the current line
             NormalCmd::PutAfter => {
                 let count = self.take_total_count();
                 let register = self.register.unwrap_or(crate::registers::UNNAMED);
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::put(self, ctx, register, count, true);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // P: put before the cursor / above the current line
             NormalCmd::PutBefore => {
                 let count = self.take_total_count();
                 let register = self.register.unwrap_or(crate::registers::UNNAMED);
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::put(self, ctx, register, count, false);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // J: join with separator logic (space unless line ends in
             // whitespace or next starts with `)`)
             NormalCmd::Join => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::join_lines(self, ctx, count, false);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // gJ: join without any separator, keep the next line's indent
             NormalCmd::JoinLiteral => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::join_lines(self, ctx, count, true);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // u: step the HOST undo stack back count times. The host swaps
             // the buffer text underneath the engine, so the cached search
@@ -2840,10 +2896,11 @@ impl VimState {
                     end: ctx.buf.line_range(last).end,
                     linewise: true,
                 };
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::apply(self, ctx, op, &span, self.register);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             // zz / zt / zb: hosts own actual scrolling; the engine only
             // reports which line should land where in the viewport
@@ -3287,18 +3344,20 @@ impl VimState {
             }
             CharArgCmd::Replace => {
                 let count = self.take_total_count();
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::replace_chars(self, ctx, c, count);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
             }
             CharArgCmd::VisualReplace => {
                 // Visual `r{char}`: replace every selected char (the visual
                 // op path exits visual mode + commits the change record)
+                let gen = self.edit_generation;
                 self.begin_edit();
                 ops::visual_replace(self, ctx, c);
                 self.end_edit();
-                self.bump(ctx);
+                self.bump_if_edited(ctx, gen);
                 self.reset_pending();
                 if matches!(self.mode, Mode::Visual { .. }) {
                     self.finish_visual_op(ctx);
