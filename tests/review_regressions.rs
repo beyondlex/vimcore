@@ -410,5 +410,6 @@ fn gv_restores_forward_selection() {
     // backward selections kept working before; keep them covered
     let f = edit("abcdef\nghijkl\n", 0, 3, &["v", "b", "<Esc>", "g", "v"]);
     let (a, c, _) = f.vim.visual_selection().unwrap();
-    assert_eq!((a, c), (3, 0), "backward gv unchanged (raw anchor/cursor)");
+    // gv re-anchors at the range start; the SPAN is what must survive
+    assert_eq!((a, c), (0, 3), "backward gv keeps the same span");
 }
