@@ -601,3 +601,79 @@ fn space_moves_right_like_l() {
     let f = edit("abc", 0, 0, &["d", " "]);
     assert_eq!(f.text(), "bc");
 }
+
+// ---- random-key fuzz: engine invariants under adversarial sequences -------------
+//
+// Deterministic xorshift hammering over CJK/ASCII/emoji buffers, mixing the
+// IME typing path. Guards the class of bugs found in review: mid-character
+// offsets leaking into host callbacks (visual-range ends, stored marks,
+// undo/redo cursors, span end-1 arithmetic).
+
+#[test]
+fn fuzz_random_key_sequences_hold_invariants() {
+    // deterministic pseudo-random key hammering over CJK/ASCII mixed buffer
+    let keys: Vec<&str> = [
+        "h", "j", "k", "l", "w", "b", "e", "0", "$", "^", "g", "G", "d", "c", "y", "p", "P", "x",
+        "X", "s", "S", "D", "C", "r", "a", "i", "o", "O", "v", "V", "<C-v>", "u", "<Esc>", "J",
+        "gJ", ">", "<", "gu", "gU", "g~", "gqq", "~", "f", "t", "F", "T", ";", "%", "n", "N", "*",
+        "#", "iw", "aw", "i\"", "a\"", "i(", "a(", "it", "ip", "ap", "dd", "dw", "yy", "cc", "cw",
+        "gg", "zz", "zt", "zb", "m", "`", "'", "q", "@", ".", "<C-a>", "<C-x>", "<C-r>", "<C-o>",
+        "<C-i>", "1", "2", "3", "9", "/", "?", "<CR>", ":", "noh", "w", "q", "<C-e>", "<C-y>",
+        "<C-f>", "<C-b>", "<C-d>", "<C-u>", "ge", "g_",
+    ]
+    .to_vec();
+    let mut state: u64 = 0x5EED_2026;
+    for round in 0..200 {
+        let initial = match round % 7 {
+            0 => "",
+            1 => "a",
+            2 => "中",
+            3 => "foo bar 中文 baz 👨‍👩‍👧 tail\nsecond 中文 line\n\nlast",
+            4 => "x\n",
+            5 => "éA→ ç\nｱｲｳ\n\tindent",
+            _ => "你好, world 123 -45\n#tag\"",
+        };
+        let mut f = common::Fixture::new(initial);
+        // jump cursor somewhere interesting
+        let cur = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 1);
+        f.vim.set_cursor_offset(&f.buf, cur);
+        for _ in 0..160 {
+            let k = keys[(fuzz_xorshift(&mut state) as usize) % keys.len()];
+            if std::env::var("FUZZ_TRACE").is_ok() {
+                eprintln!("key={k} text={:?} cur={}", f.text(), f.vim.cursor_offset());
+            }
+            f.feed([k]);
+            // exercise the IME text path too: while in insert/replace, type
+            // some text the way a host delivers composed input
+            if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
+                && fuzz_xorshift(&mut state) % 4 == 0
+            {
+                f.type_text("tx中");
+            }
+            // invariants
+            let text = f.text();
+            assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+            assert!(vimcore::buffer::VimBuffer::line_count(&f.buf) >= 1);
+            let co = f.vim.cursor_offset();
+            assert!(
+                co <= text.len(),
+                "cursor {co} past end in round {round} after {k}"
+            );
+            if co < text.len() {
+                assert!(
+                    text.is_char_boundary(co),
+                    "cursor {co} mid-char in round {round} after {k} (text {text:?})"
+                );
+            }
+        }
+    }
+}
+
+fn fuzz_xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}

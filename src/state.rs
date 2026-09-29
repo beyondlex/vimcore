@@ -999,7 +999,11 @@ impl VimState {
                     anchor.min(self.cursor.offset),
                     anchor.max(self.cursor.offset),
                 );
-                self.marks.active_visual = Some((a, c + 1));
+                // the exclusive end is one CHAR past the cursor — `c + 1`
+                // bytes would land inside a multi-byte cursor char and blow
+                // up `'<`/`'>` range resolution later
+                let end = crate::buffer::next_grapheme_offset(ctx.buf, c).unwrap_or(c + 1);
+                self.marks.active_visual = Some((a, end));
             }
         }
         let line = ctx.buf.offset_to_line(self.cursor.offset);
@@ -1250,9 +1254,13 @@ impl VimState {
         ctx.host.changed();
     }
 
-    /// Host-initiated cursor move (e.g. a mouse click).
+    /// Host-initiated cursor move (e.g. a mouse click). `offset` may be any
+    /// byte position — a host translating a click can easily land inside a
+    /// multi-byte char — so it is floored to a char boundary first; handing
+    /// a mid-char offset onward would panic in `offset_to_line`.
     pub fn set_cursor_offset(&mut self, buf: &dyn VimBuffer, offset: usize) {
-        let offset = clamp_to_line_end(buf, offset.min(buf.len()));
+        let offset = crate::buffer::floor_to_char_boundary(buf, offset);
+        let offset = clamp_to_line_end(buf, offset);
         self.cursor.offset = offset;
         self.cursor.desired_col = None;
         if matches!(self.mode, Mode::Visual { .. }) {
@@ -1260,10 +1268,13 @@ impl VimState {
         }
     }
 
-    /// Host-initiated visual selection (e.g. a mouse drag).
+    /// Host-initiated visual selection (e.g. a mouse drag). Both ends are
+    /// floored to char boundaries, like [`VimState::set_cursor_offset`].
     pub fn set_visual_range(&mut self, buf: &dyn VimBuffer, anchor: usize, cursor: usize) {
-        self.visual_anchor = Some(clamp_to_line_end(buf, anchor.min(buf.len())));
-        self.cursor.offset = clamp_to_line_end(buf, cursor.min(buf.len()));
+        let anchor = crate::buffer::floor_to_char_boundary(buf, anchor);
+        let cursor = crate::buffer::floor_to_char_boundary(buf, cursor);
+        self.visual_anchor = Some(clamp_to_line_end(buf, anchor));
+        self.cursor.offset = clamp_to_line_end(buf, cursor);
         if !matches!(self.mode, Mode::Visual { .. }) {
             self.mode = Mode::Visual {
                 kind: VisualKind::Char,
@@ -1290,8 +1301,9 @@ impl VimState {
             } else {
                 (cursor, anchor)
             };
-            self.marks.last_visual = Some((lo, hi + 1));
-            self.last_visual = Some((lo, hi + 1, kind));
+            let end = ctx.buf.next_char_offset(hi).unwrap_or(hi + 1);
+            self.marks.last_visual = Some((lo, end));
+            self.last_visual = Some((lo, end, kind));
             self.cursor.offset = lo;
         }
         self.visual_anchor = None;
@@ -1483,8 +1495,9 @@ impl VimState {
             } else {
                 (cursor, anchor)
             };
-            self.marks.last_visual = Some((lo, hi + 1));
-            self.last_visual = Some((lo, hi + 1, kind));
+            let end = ctx.buf.next_char_offset(hi).unwrap_or(hi + 1);
+            self.marks.last_visual = Some((lo, end));
+            self.last_visual = Some((lo, end, kind));
         }
         self.visual_anchor = None;
         if !matches!(self.mode, Mode::Insert | Mode::Replace) {
@@ -2291,9 +2304,14 @@ impl VimState {
                 for _ in 0..count {
                     if let Some(offset) = ctx.host.undo() {
                         // the host swapped the text underneath the engine:
-                        // cached match offsets are stale until a re-scan
+                        // cached match offsets are stale until a re-scan,
+                        // and the restored cursor may now sit inside a
+                        // multi-byte char — floor before cursor math
                         self.edit_generation += 1;
-                        self.cursor.offset = clamp_to_line_end(ctx.buf, offset.min(ctx.buf.len()));
+                        self.cursor.offset = clamp_to_line_end(
+                            ctx.buf,
+                            crate::buffer::floor_to_char_boundary(ctx.buf, offset),
+                        );
                     } else {
                         ctx.host.bell();
                         break;
@@ -2308,7 +2326,10 @@ impl VimState {
                 for _ in 0..count {
                     if let Some(offset) = ctx.host.redo() {
                         self.edit_generation += 1;
-                        self.cursor.offset = clamp_to_line_end(ctx.buf, offset.min(ctx.buf.len()));
+                        self.cursor.offset = clamp_to_line_end(
+                            ctx.buf,
+                            crate::buffer::floor_to_char_boundary(ctx.buf, offset),
+                        );
                     } else {
                         ctx.host.bell();
                         break;
@@ -2406,7 +2427,8 @@ impl VimState {
                         break;
                     }
                 }
-                let offset = self.changes[self.change_pos].min(ctx.buf.len());
+                let offset =
+                    crate::buffer::floor_to_char_boundary(ctx.buf, self.changes[self.change_pos]);
                 self.cursor.offset = clamp_to_line_end(ctx.buf, offset);
                 self.cursor.desired_col = None;
                 ctx.host
@@ -2450,7 +2472,10 @@ impl VimState {
                         ctx.host.bell();
                         break;
                     }
-                    self.cursor.offset = clamp_to_line_end(ctx.buf, self.jumps[self.jump_pos]);
+                    self.cursor.offset = clamp_to_line_end(
+                        ctx.buf,
+                        crate::buffer::floor_to_char_boundary(ctx.buf, self.jumps[self.jump_pos]),
+                    );
                     self.cursor.desired_col = None;
                     ctx.host
                         .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
@@ -2461,7 +2486,11 @@ impl VimState {
             NormalCmd::RestoreVisual => {
                 if let Some((lo, hi, kind)) = self.last_visual {
                     self.visual_anchor = Some(lo);
-                    self.cursor.offset = hi.saturating_sub(1).min(ctx.buf.len());
+                    // hi is the exclusive end; floor(hi-1) is the START of
+                    // the last covered char, boundary-safe for multi-byte
+                    self.cursor.offset =
+                        crate::buffer::floor_to_char_boundary(ctx.buf, hi.saturating_sub(1))
+                            .min(ctx.buf.len());
                     self.mode = Mode::Visual { kind };
                 }
             }
@@ -2607,9 +2636,7 @@ impl VimState {
                 };
                 let count = self.take_total_count();
                 let first = ctx.buf.offset_to_line(span.start);
-                let last = ctx
-                    .buf
-                    .offset_to_line(span.end.saturating_sub(1).max(span.start));
+                let last = ops::last_line_of_span(ctx.buf, &span);
                 self.begin_edit(ctx);
                 self.cursor.offset = span.start;
                 ops::join_lines(self, ctx, (last - first + 1).max(count), literal);
@@ -2645,7 +2672,7 @@ impl VimState {
             }
             InsertKind::LastInsertExit => {
                 if let Some(off) = self.marks.last_insert_exit {
-                    self.cursor.offset = off.min(ctx.buf.len());
+                    self.cursor.offset = crate::buffer::floor_to_char_boundary(ctx.buf, off);
                 }
             }
             InsertKind::OpenLine { below } => {
@@ -2768,7 +2795,7 @@ impl VimState {
             CharArgCmd::JumpMark { linewise } => match self.marks.resolve(c) {
                 Some(offset) => {
                     let origin = self.cursor.offset;
-                    let offset = offset.min(ctx.buf.len());
+                    let offset = crate::buffer::floor_to_char_boundary(ctx.buf, offset);
                     if linewise {
                         let line = ctx.buf.offset_to_line(offset);
                         let target = ctx.buf.first_non_blank(line);

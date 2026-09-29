@@ -400,18 +400,30 @@ impl VimState {
                     .active_visual()
                     .map(|(a, _)| ctx.buf.offset_to_line(a))
                     .or_else(|| {
-                        vim.marks
-                            .resolve('<')
-                            .map(|off| ctx.buf.offset_to_line(off))
+                        vim.marks.resolve('<').map(|off| {
+                            let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
+                            ctx.buf.offset_to_line(off)
+                        })
                     }),
                 "'>" => vim
                     .marks
                     .active_visual()
-                    .map(|(_, b)| ctx.buf.offset_to_line(b.saturating_sub(1)))
+                    .map(|(_, b)| {
+                        ctx.buf
+                            .offset_to_line(crate::buffer::floor_to_char_boundary(
+                                ctx.buf,
+                                b.saturating_sub(1),
+                            ))
+                    })
                     .or_else(|| {
-                        vim.marks
-                            .resolve('>')
-                            .map(|off| ctx.buf.offset_to_line(off))
+                        vim.marks.resolve('>').map(|off| {
+                            // '<'> hi is exclusive; floor(hi-1) = last char
+                            let off = crate::buffer::floor_to_char_boundary(
+                                ctx.buf,
+                                off.saturating_sub(1),
+                            );
+                            ctx.buf.offset_to_line(off)
+                        })
                     }),
                 // `'a`-style marks: resolve through the mark table (the range
                 // scanner accepts any `'x`; dropping them here made
@@ -420,7 +432,10 @@ impl VimState {
                     .chars()
                     .next()
                     .and_then(|name| vim.marks.resolve(name))
-                    .map(|off| ctx.buf.offset_to_line(off.min(ctx.buf.len()))),
+                    .map(|off| {
+                        let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
+                        ctx.buf.offset_to_line(off)
+                    }),
                 other => other.parse::<usize>().ok().map(|n| n.saturating_sub(1)),
             }
         }

@@ -152,6 +152,18 @@ pub fn span_from_object(_buf: &dyn VimBuffer, object: ObjectRange) -> OpSpan {
     }
 }
 
+/// The last LINE a span touches. `span.end - 1` is only a char boundary when
+/// the span does not end inside a multi-byte char — a linewise span over a
+/// final line with no trailing newline (`"中"`: end-1 sits inside 中) needs a
+/// floored probe, or hosts whose `offset_to_line` checks boundaries panic.
+pub(crate) fn last_line_of_span(buf: &dyn VimBuffer, span: &OpSpan) -> usize {
+    let mut probe = span.end.max(span.start.saturating_add(1)) - 1;
+    while probe > span.start && buf.char_at(probe).is_none() {
+        probe -= 1;
+    }
+    buf.offset_to_line(probe)
+}
+
 /// Resolve a text object against the cursor.
 pub fn object_span(
     vim: &VimState,
@@ -323,9 +335,7 @@ pub fn apply(
             let effective = if span.linewise {
                 // `cc` clears the lines' contents but the lines themselves
                 // survive: never consume the last newline of the span
-                let last = ctx
-                    .buf
-                    .offset_to_line(span.end.saturating_sub(1).max(span.start));
+                let last = last_line_of_span(ctx.buf, span);
                 OpSpan {
                     start: span.start,
                     end: ctx.buf.line_end(last),
@@ -344,9 +354,7 @@ pub fn apply(
         }
         Operator::IndentLeft | Operator::IndentRight => {
             let first = ctx.buf.offset_to_line(span.start);
-            let last = ctx
-                .buf
-                .offset_to_line(span.end.saturating_sub(1).max(span.start));
+            let last = last_line_of_span(ctx.buf, span);
             for line in first..=last {
                 shift_line(vim, ctx, line, matches!(op, Operator::IndentRight));
             }
@@ -354,9 +362,7 @@ pub fn apply(
             vim.cursor.desired_col = None;
         }
         Operator::Format => {
-            let last_line = ctx
-                .buf
-                .offset_to_line(span.end.saturating_sub(1).max(span.start));
+            let last_line = last_line_of_span(ctx.buf, span);
             format_lines(vim, ctx, span.start, last_line);
         }
         Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
