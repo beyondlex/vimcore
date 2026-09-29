@@ -2110,7 +2110,6 @@ impl VimState {
             // a visual change spans several commands (`v`, the motions, the
             // operator) — keep accumulating; the commit lands when the
             // selection resolves (`finish_visual_op`, `exit_insert`)
-            return;
         } else if self.recording_mutated && !self.recording.is_empty() {
             self.last_change = std::mem::take(&mut self.recording);
             self.recording_mutated = false;
