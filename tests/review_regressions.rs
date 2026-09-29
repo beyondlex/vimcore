@@ -511,7 +511,7 @@ fn blockwise_put_creates_padded_rows_below() {
     f.feed(["G"]);                          // last line
     f.feed(["l", "p"]);                     // col 2, put after
     assert_eq!(f.text(), "ab\ncd\nef\nghab\n  cd\n");
-    assert_eq!(f.cursor(), 12, "cursor on the first pasted char (line 4 col 2)");
+    assert_eq!(f.cursor(), 11, "cursor on the first pasted char (line 4, byte 11)");
 }
 
 #[test]
