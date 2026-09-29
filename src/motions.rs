@@ -387,9 +387,13 @@ impl Motion {
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
             }
-            // * / #: word under cursor becomes the pattern, then jump
+            // * / #: word under cursor becomes the pattern, then jump. No
+            // word on this line → stuck (bell), NOT a jump with the stale
+            // pattern from a previous search.
             Motion::StarSearch { forward } => {
-                search::search_word_under_cursor(vim, buf, ctx.host, forward);
+                if !search::search_word_under_cursor(vim, buf, ctx.host, forward) {
+                    return MotionResult::stuck(vim.cursor.offset);
+                }
                 match search::jump_to_match(vim, buf, forward, 1) {
                     Some(o) => MotionResult::new(o, MotionKind::Exclusive),
                     None => MotionResult::stuck(vim.cursor.offset),
