@@ -75,6 +75,18 @@ struct BlockInsert {
     text: String,
 }
 
+/// Pending count-repeat of a plain insert session (`3ifoo<Esc>` types foo
+/// three times): the count, whether the session opened a LINE (`o`/`O` so
+/// each copy gets its own line), and the text typed so far. Sessions that
+/// navigated (arrows/backspace/enter) or typed multi-line text do not
+/// replicate. `.` repeats one copy (documented divergence from vim).
+#[derive(Debug)]
+struct InsertRepeat {
+    count: usize,
+    linewise: bool,
+    text: String,
+}
+
 /// Synthetic pending-key marker for a recorded [`RecordedStep::Text`]: when
 /// the `.` replay reaches it, the stashed text is applied through
 /// `insert_text_at_cursor` instead of the key pipeline. Not producible by
@@ -213,6 +225,8 @@ pub struct VimState {
     /// receive the typed text when the session exits, and the text typed on
     /// the cursor row so far.
     block_insert: Option<BlockInsert>,
+    /// Pending count-repeat of a plain insert session (see [`InsertRepeat`]).
+    insert_repeat: Option<InsertRepeat>,
 
     /// Jumplist (`C-o`/`C-i`): visited positions, `jump_pos` = index of the
     /// current entry. Jump motions and search execution append the origin
@@ -299,6 +313,7 @@ impl VimState {
             format_trigger: None,
             cmdline_visual: None,
             block_insert: None,
+            insert_repeat: None,
             jumps: Vec::new(),
             jump_pos: 0,
             insert_session: None,
@@ -1123,7 +1138,53 @@ impl VimState {
         self.cursor.desired_col = None;
     }
 
+    /// Count-repeat insert on session exit: `3ifoo<Esc>` typed "foo" once,
+    /// this appends two more copies. Only plain type-then-escape sessions
+    /// replicate: the cursor must still sit at the end of the typed text and
+    /// the text must be single-line (arrows/backspace/enter set no flag but
+    /// move the cursor or add `\n`, both of which bail out). Linewise
+    /// (`3ofoo<Esc>`) copies get their own lines below, each with the opened
+    /// line's indent.
+    fn replicate_count_insert(&mut self, ctx: &mut Ctx) {
+        let Some(rep) = self.insert_repeat.take() else {
+            return;
+        };
+        if rep.text.is_empty() || rep.text.contains('\n') {
+            return;
+        }
+        let Some(start) = self.insert_change_pos else {
+            return;
+        };
+        if self.cursor.offset != start + rep.text.len() {
+            return; // the session moved around: no replication
+        }
+        let copies = rep.count - 1;
+        if rep.linewise {
+            let line = ctx.buf.offset_to_line(self.cursor.offset);
+            let ls = ctx.buf.line_start(line);
+            let indent_str = ctx.buf.slice(ls..ls + ctx.buf.line_indent(line).0);
+            let at = ctx.buf.line_end(line);
+            let mut extra = String::new();
+            for _ in 0..copies {
+                extra.push_str(&format!("\n{indent_str}{}", rep.text));
+            }
+            let extra_len = extra.len();
+            self.edit_insert(ctx, at, &extra);
+            self.cursor.offset = at + extra_len;
+        } else {
+            let extra = rep.text.repeat(copies);
+            let len = extra.len();
+            self.edit_insert(ctx, self.cursor.offset, &extra);
+            self.cursor.offset += len;
+        }
+        self.cursor.desired_col = None;
+    }
+
     pub(crate) fn exit_insert(&mut self, ctx: &mut Ctx) {
+        // count-repeat insert (`3ifoo<Esc>`): replicate the typed text while
+        // the session's undo group is open and BEFORE the exit cursor
+        // step-back, so the cursor lands one left of the LAST copy (vim)
+        self.replicate_count_insert(ctx);
         // back one char unless at the line start (Replace mode too: vim
         // leaves the cursor on the last replaced character)
         let line_start = ctx
@@ -1191,6 +1252,9 @@ impl VimState {
         let at = self.cursor.offset;
         if self.insert_change_pos.is_none() {
             self.insert_change_pos = Some(at);
+        }
+        if let Some(rep) = &mut self.insert_repeat {
+            rep.text.push_str(text);
         }
         let expanded = if self.options.autoindent && !indent_chars.is_empty() {
             text.replace('\n', &format!("\n{indent_chars}"))
@@ -2115,7 +2179,22 @@ impl VimState {
                 ProcessOutcome::Consumed
             }
             CmdKind::EnterInsert(insert) => {
+                // vim's count-repeat insert: a count typed before i/a/I/A/
+                // gI/gi/o/O repeats the typed text that many times on exit
+                // (for c/s the count belongs to the motion; Replace and
+                // visual-block sessions never repeat)
+                let count = self.take_total_count();
                 self.start_insert(ctx, insert);
+                if count > 1
+                    && !matches!(insert, InsertKind::Change | InsertKind::Replace)
+                    && self.block_insert.is_none()
+                {
+                    self.insert_repeat = Some(InsertRepeat {
+                        count,
+                        linewise: matches!(insert, InsertKind::OpenLine { .. }),
+                        text: String::new(),
+                    });
+                }
                 self.end_command();
                 ProcessOutcome::Consumed
             }
