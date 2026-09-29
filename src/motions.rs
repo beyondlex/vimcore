@@ -410,7 +410,9 @@ impl Motion {
                 };
                 match vim.marks.resolve(name) {
                     Some(o) => {
-                        let o = o.min(buf.len());
+                        // a length-preserving replace can leave a stored
+                        // mark mid-character; floor before cursor math
+                        let o = crate::buffer::floor_to_char_boundary(buf, o);
                         if linewise {
                             MotionResult::new(
                                 buf.line_start(buf.offset_to_line(o)),

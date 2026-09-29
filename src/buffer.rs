@@ -106,10 +106,26 @@ pub trait VimBufferMut: VimBuffer {
     }
 }
 
-/// Clamp helper: never park the cursor inside the `\n`.
+/// Clamp helpers: engine offsets are always char boundaries that stay inside
+// their line — every offset arriving from OUTSIDE the engine (a host click,
+// a stored mark after a length-preserving replace, a stale jumplist entry)
+// passes through these before the cursor or `offset_to_line` sees it.
+
+/// Never park the cursor inside the `\n`.
 pub fn clamp_to_line_end(buf: &dyn VimBuffer, offset: usize) -> usize {
     let line = buf.offset_to_line(offset);
     offset.min(buf.line_end(line))
+}
+
+/// Floor `offset` to the nearest char boundary at or below it. Equal-length
+/// replacements can move inner byte boundaries, leaving stored offsets
+/// (marks, changelist, jumplist) pointing mid-character.
+pub fn floor_to_char_boundary(buf: &dyn VimBuffer, offset: usize) -> usize {
+    let mut offset = offset.min(buf.len());
+    while offset > 0 && buf.char_at(offset).is_none() {
+        offset -= 1;
+    }
+    offset
 }
 
 // ---- display columns & graphemes (wide-char aware) ---------------------------
