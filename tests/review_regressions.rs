@@ -624,7 +624,7 @@ fn fuzz_random_key_sequences_hold_invariants() {
     ]
     .to_vec();
     let mut state: u64 = 0x5EED_2026;
-    for round in 0..200 {
+    for round in 0..500 {
         let initial = match round % 7 {
             0 => "",
             1 => "a",
@@ -643,7 +643,12 @@ fn fuzz_random_key_sequences_hold_invariants() {
             if std::env::var("FUZZ_TRACE").is_ok() {
                 eprintln!("key={k} text={:?} cur={}", f.text(), f.vim.cursor_offset());
             }
-            f.feed([k]);
+            // multi-char entries ("dd", "iw", "<C-a>") must become REAL key
+            // sequences — feeding them through `feed([k])` would parse the
+            // whole string as one junk Named key and silently test nothing
+            for key in vimcore::key::parse_key_sequence(k) {
+                f.feed_raw(key);
+            }
             // exercise the IME text path too: while in insert/replace, type
             // some text the way a host delivers composed input
             if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
@@ -664,6 +669,23 @@ fn fuzz_random_key_sequences_hold_invariants() {
                 assert!(
                     text.is_char_boundary(co),
                     "cursor {co} mid-char in round {round} after {k} (text {text:?})"
+                );
+            }
+            // stored mark offsets must stay addressable too (they are floored
+            // at use, but a corrupt one means the adjust funnels missed)
+            for (name, off) in f.vim.marks.items() {
+                assert!(
+                    off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
+                    "mark {name} at {off} invalid in round {round} after {k} (text {text:?})"
+                );
+            }
+            if let Some((lo, hi)) = f.vim.marks.last_visual {
+                assert!(
+                    lo <= text.len()
+                        && (lo == text.len() || text.is_char_boundary(lo))
+                        && hi <= text.len()
+                        && (hi == text.len() || text.is_char_boundary(hi)),
+                    "last_visual {lo}..{hi} invalid in round {round} after {k} (text {text:?})"
                 );
             }
         }

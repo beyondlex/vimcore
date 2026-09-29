@@ -267,7 +267,7 @@ impl VimState {
         // exclusive end one CHAR past the last covered char — `hi + 1` bytes
         // would sit inside a multi-byte cursor char (same rule as
         // `exit_visual`; consumers floor it, but stored bounds stay clean)
-        let end = buf.next_char_offset(hi).unwrap_or(hi + 1);
+        let end = buf.next_char_offset(hi).unwrap_or(hi);
         self.marks.last_visual = Some((lo, end));
         self.visual_anchor = None;
         self.marks.active_visual = None;

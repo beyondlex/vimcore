@@ -202,6 +202,97 @@ fn backspace_on_empty_prompt_stays_in_cmdline() {
 
 // ---- runaway replay & paste counts (engine-invariant, no vim probe) -----------
 
+/// `.` after a count-insert re-runs the EnterInsert path with its count —
+/// the replay inserts one copy at the cursor, then the exit replication
+/// appends the rest (vim probe on "Xaa": `3iab<Esc>.` → `ababaabababbXaa`,
+/// byte-identical to the engine).
+#[test]
+fn dot_repeat_after_count_insert_repeats_count() {
+    let mut f = edit("aa\n", 0, 0, &["3", "i"]);
+    f.type_text("ab");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "abababaa\n");
+    f.feed(["."]);
+    assert_eq!(f.text(), "ababaabababbaa\n");
+}
+
+/// A mapping that expands to itself must hit the depth guard, not hang.
+#[test]
+fn self_recursive_mapping_is_bounded() {
+    let mut f = common::Fixture::new("x\n");
+    f.vim
+        .keymaps_mut()
+        .map_str(vimcore::keymap::ModeClass::Normal, "x", "x");
+    f.feed(["x"]);
+    assert_eq!(f.text(), "x\n");
+    assert!(f.host.bells > 0, "guard trips with a bell");
+}
+
+/// A macro that plays itself nests forever at a constant queue size; the
+/// pipeline guard must drop it and survive.
+#[test]
+fn self_playing_macro_is_bounded() {
+    let mut f = edit("word\n", 0, 0, &["q", "a", "@", "a", "q"]);
+    f.feed(["@", "a"]);
+    assert_eq!(f.text(), "word\n", "guard dropped the runaway replay");
+}
+
+/// `:1,2y` then `p`: the Ex yank feeds normal-mode paste.
+#[test]
+fn ex_yank_then_put_roundtrip() {
+    let mut f = common::Fixture::at("a\nb\nc\n", 2, 0);
+    f.feed([":"]);
+    for c in "1,2y".chars() {
+        f.feed([c.to_string().as_str()]);
+    }
+    f.feed(["<Enter>", "p"]);
+    assert_eq!(
+        f.text(),
+        "a\nb\nc\na\nb\n",
+        "p pastes below the cursor line"
+    );
+}
+
+/// `''` after a search jump returns to the line the search started from.
+#[test]
+fn context_mark_after_search_jump() {
+    let mut f = common::Fixture::at("top\nmid\nneedle\nbottom\n", 0, 0);
+    f.feed(["/", "n", "e", "e", "d", "l", "e", "<Enter>"]);
+    assert_eq!(f.line(), 2);
+    f.feed(["'", "'"]);
+    assert_eq!(f.line(), 0, "'' returns to the pre-search line");
+}
+
+/// Wide-char replace argument: `r` accepts multi-byte chars and keeps the
+/// cursor on the replaced char. (Fixture `col` is a BYTE offset: 3 = on 文.)
+#[test]
+fn replace_char_with_wide_char() {
+    let f = edit("abc\n", 0, 0, &["r", "中"]);
+    assert_eq!(f.text(), "中bc\n");
+    assert_eq!(f.cursor(), 0);
+    let f = edit("中文\n", 0, 3, &["r", "x"]);
+    assert_eq!(f.text(), "中x\n");
+    assert_eq!(f.cursor(), "中".len());
+}
+
+/// A visual operator that deletes its own selection must record clamped
+/// `last_visual` bounds — the raw anchor can point past the new end (fuzz
+/// found `Vd` on the whole buffer storing `0..len_before`).
+#[test]
+fn visual_delete_records_clamped_last_visual() {
+    let mut f = common::Fixture::new("你好, world 123 -45\n#tag\"\n");
+    f.vim.set_visual_range(&f.buf, 0, f.buf.len());
+    f.feed(["d"]);
+    assert_eq!(f.text(), "", "whole-buffer linewise selection wiped");
+    let (lo, hi) = f.vim.marks.last_visual.expect("last_visual recorded");
+    assert!(hi <= f.buf.len(), "last_visual {lo}..{hi} past the new end");
+    // gv after the wipe must not panic and stays in-bounds
+    f.feed(["g", "v"]);
+    assert!(f.cursor() <= f.buf.len());
+}
+
+// ---- runaway replay & paste counts (engine-invariant, no vim probe) -----------
+
 /// `.` with an absurd count must clamp the queued work, not OOM the host:
 /// the eager replay queue is bounded by the same budget as the pipeline
 /// guard. (Pre-guard this test allocates ~1e9 keys and runs for minutes.)
