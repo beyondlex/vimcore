@@ -4,6 +4,44 @@
 与 vim 的已知分歧、悬而未决的可疑点、性能与体验备注。以现实代码逻辑为准；
 README 与 `src/lib.rs` 的分层图已同步为宿主无关措辞。
 
+## 〇、第三轮检视增补（同日稍后，回归测试在 `tests/parity_round3.rs`）
+
+### 新修复（语义类均先跑 vim 9.1 探针）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **`cw`/`cW` 跨行吞词**：单字符词 `b` 上的 `cw` 删掉 `b\nc`；`cw` 在行尾词上吞掉下一行 | 旧实现把 motion 重写成 `ce`，绕过了 `dw` 的全部跨行特判。正确规则是「**`dw` 的 span 去掉尾部空白**」——`cw` 单字符词、`c2w`、`cW`、标点、制表符、`cw` 行尾词六个探针全部只有该规则能同时对齐（`ce` 本身确实跨行：`ce` 在 `a|b|c` 的 b 上会改 `b\nc`，所以不能靠它） |
+| 2 | `gugu`/`gUgU`/`g~g~`/`gqgq` 中途响铃 | 双写经「弃首键重喂」路径完成，`g` 的 trie miss 误响铃；仅当重喂键补全双写时静默（`dgx` 等真失败仍响铃，vim 同） |
+| 3 | `''`/`` `` ``/`'.` 无处可跳 | 新增 `marks.last_jump`（`record_jump` 维护）与 `resolve` 的隐式名分支；`g;`/`'.` 对齐 vim（insert 会话见 #4） |
+| 4 | **changelist / jumplist 不随编辑平移**：`g;`/`C-o` 落在过期偏移 | `edit_*` 三个包装器现按 marks 同款规则调整两个列表；宿主 undo/redo 后则走 `sanitize_stored_offsets` 全量 floor（相对调整无从谈起） |
+| 5 | 纯 `i` 会话不进 changelist（`g;`/`'.` 漏掉打字） | vim 探针：`g;` = 首个输入字节的精确位、`'.` = 该行行首非空白。`insert_text_at_cursor` 记录首输入位，`exit_insert` 落账；`o`+Esc 也算变更 |
+| 6 | 空 linewise 寄存器 `p`/`P` 无操作 | vim 探针：插一个空行。只在「单空行缓冲 `yy`」这类真空文本时触发 |
+| 7 | 搜索失败静默响铃 | `n`/`N`/`*`/`/⏎` 现报 `E486: Pattern not found` / `E35: No previous regular expression` |
+| 8 | 空提示符上退格会关闭 `/`/`:` | vim 探针（`mode()` 仍为 `c`）：保持提示符打开 |
+| 9 | `99999999.`/巨型 count 宏要排队上亿按键（实测跑 5 分钟） | 回放队列是预构造的，count 现按管线护栏 10 万步预算钳制；超出预算的轮次直接不排 |
+| 10 | `99999999p` = 寄存器 × count 字节的分配（OOM） | 粘贴字节封顶 16MB（`registers::clamped_repeat` / `ops::clamped_repeat_count`），normal `p` 与 visual `p` 都走 |
+| 11 | 可视算子删除自身选区后 `last_visual` 越界（fuzz 抓到 `0..17` 存于空缓冲） | `finish_visual_op`/`exit_visual` 改用 `clamped_visual_bounds`（floor+min）；缓冲末尾的 `unwrap_or(hi+1)` 回退改 `hi` |
+| 12 | fuzz 的多字符键项（`dd`/`iw`/`<C-a>`）被 `Key::parse` 并成单个 Named 垃圾键，实为 no-op | fuzz 改走 `parse_key_sequence` 实化；新增 mark/last_visual 边界不变量；轮数 200→500 |
+
+### 新功能
+
+- **visual `r{char}`**：字符级按覆盖字符数填充、行级按各行字符数（`中文ab`
+  → `----`，按字符不按显示宽）、块级按每行覆盖段；光标落选区起点（探针）。
+- **`:{range}y[ank] [x] [count]`**：行级 yank 进寄存器（数字参数是行数），
+  与 `:d` 对称。
+- **计数重复插入**：`3ifoo<Esc>` → `foofoofoo`、`3ofoo<Esc>` 开三行、
+  `2a!` 翻倍。光标停在最后一组末字符（探针 col 一致）、单一 undo 组、
+  `.` 连 count 一起重放（count 键被录制，重放走同一条 EnterInsert 路径）。
+  保守语义：光标仍在输入末尾且文本单行才复制；c/s 的 count 属于 motion；
+  Replace/块选不参与。
+
+### 新增已知分歧（接续前表编号）
+
+16. 计数重复插入只覆盖「纯打字到 Esc」；会话内用过方向键/回车的重放语义
+    未对齐 vim（不复制）。
+17. `:s` 的 `c`/`n`/`e` 等标志被静默忽略（`i`/`I`/`g` 有效）。
+18. 块选 `$` 扩展列（各行到自身行尾的 ragged block）未实现。
+
 ## 一、已修复的 bug
 
 每条都有对应回归测试；语义类修复先在 vim 9.1 上跑探针取实证，再改引擎。
