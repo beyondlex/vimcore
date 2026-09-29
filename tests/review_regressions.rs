@@ -395,3 +395,20 @@ fn substitute_cursor_survives_length_changing_earlier_lines() {
     assert_eq!(f.line(), 1);
     assert_eq!(f.cursor(), 7, "first non-blank of line 2");
 }
+
+// ---- gv after a forward (cursor right of anchor) selection ----------------------
+
+#[test]
+fn gv_restores_forward_selection() {
+    // exit_visual used to re-read the selection AFTER parking the cursor on
+    // the selection start, collapsing forward selections to one char
+    let f = edit("abcdef\nghijkl\n", 0, 0, &["v", "3", "l", "<Esc>", "g", "v"]);
+    assert_eq!(f.vim.mode_indicator(), "VISUAL");
+    let (a, c, _) = f.vim.visual_selection().unwrap();
+    assert_eq!((a, c), (0, 3), "gv must restore the forward 0..3 selection");
+
+    // backward selections kept working before; keep them covered
+    let f = edit("abcdef\nghijkl\n", 0, 3, &["v", "b", "<Esc>", "g", "v"]);
+    let (a, c, _) = f.vim.visual_selection().unwrap();
+    assert_eq!((a, c), (3, 0), "backward gv unchanged (raw anchor/cursor)");
+}
