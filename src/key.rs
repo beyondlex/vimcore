@@ -175,24 +175,34 @@ impl Key {
     }
 
     fn parse_angle(inner: &str) -> Key {
-        // strip any combination of C- M- D- S- prefixes
+        // strip any combination of modifier prefixes (C- M- D- S-), in ANY
+        // letter case: vim accepts `<c-a>` as well as `<C-a>` (and rc files
+        // use both spellings freely)
         let mut modifiers = Modifiers::NONE;
         let mut rest = inner;
         loop {
-            if let Some(r) = rest.strip_prefix("C-") {
-                modifiers.control = true;
-                rest = r;
-            } else if let Some(r) = rest.strip_prefix("M-") {
-                modifiers.alt = true;
-                rest = r;
-            } else if let Some(r) = rest.strip_prefix("D-") {
-                modifiers.platform = true;
-                rest = r;
-            } else if let Some(r) = rest.strip_prefix("S-") {
-                modifiers.shift = true;
-                rest = r;
-            } else {
-                break;
+            let stripped = match rest.get(..2).map(str::to_ascii_lowercase).as_deref() {
+                Some("c-") => {
+                    modifiers.control = true;
+                    rest.get(2..)
+                }
+                Some("m-") => {
+                    modifiers.alt = true;
+                    rest.get(2..)
+                }
+                Some("d-") => {
+                    modifiers.platform = true;
+                    rest.get(2..)
+                }
+                Some("s-") => {
+                    modifiers.shift = true;
+                    rest.get(2..)
+                }
+                _ => None,
+            };
+            match stripped {
+                Some(r) => rest = r,
+                None => break,
             }
         }
         let key = match rest.to_ascii_lowercase().as_str() {

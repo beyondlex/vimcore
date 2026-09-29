@@ -413,3 +413,20 @@ fn gv_restores_forward_selection() {
     // gv re-anchors at the range start; the SPAN is what must survive
     assert_eq!((a, c), (0, 3), "backward gv keeps the same span");
 }
+
+// ---- <c-a> lowercase modifier spellings ------------------------------------------
+
+#[test]
+fn angle_keys_accept_lowercase_modifier_prefixes() {
+    use vimcore::key::{Key, KeyKind};
+    // rc files use <c-a>, <C-a>, <C-A> interchangeably; the old parser was
+    // case-sensitive and turned <c-a> into Named("c-a")
+    assert_eq!(Key::parse("<c-a>"), Key::parse("<C-a>"));
+    assert_eq!(Key::parse("<C-a>").kind, KeyKind::Char('a'));
+    assert!(Key::parse("<c-a>").modifiers.control);
+    assert_eq!(Key::parse("<C-S-a>").modifiers.control, true);
+    assert_eq!(Key::parse("<C-S-a>").modifiers.shift, true);
+    // a plain <s-x> keeps the shift flag on the char
+    assert!(Key::parse("<s-x>").modifiers.shift);
+    assert_eq!(Key::parse("<s-x>").kind, KeyKind::Char('x'));
+}
