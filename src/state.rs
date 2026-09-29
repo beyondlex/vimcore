@@ -2910,7 +2910,14 @@ impl VimState {
             }
             InsertKind::InsertFirstNonBlank => {
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
-                self.cursor.offset = ctx.buf.first_non_blank(line);
+                if ctx.buf.line_is_blank(line) {
+                    // all-blank line: vim's `I` types AFTER the blanks (`"   "
+                    // + IZ → "   Z"`, vim 9.1) — at the line end, not before
+                    // the last space where `^` parks the block cursor
+                    self.cursor.offset = ctx.buf.line_end(line);
+                } else {
+                    self.cursor.offset = ctx.buf.first_non_blank(line);
+                }
             }
             InsertKind::AppendLineEnd => {
                 let line = ctx.buf.offset_to_line(self.cursor.offset);

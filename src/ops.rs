@@ -62,11 +62,12 @@ pub fn span_from_motion(
     let crossed_lines = target_line != start_line;
 
     // `w`/`W` operator special cases (each row verified against vim 9.1):
-    // * landing in column 1 of the target line — from a BLANK start line vim
-    //   promotes the motion to LINEWISE over the covered lines (`dw` on a
-    //   blank line deletes the line); from a content line the span is
-    //   clamped to the end of the start line (`d2w` empties the line instead
-    //   of deleting it).
+    // * landing in column 1 of the target line — from an EMPTY start line vim
+    //   promotes the motion to LINEWISE over the covered line (`dw` on an
+    //   empty line deletes the line). The promotion needs an empty line, not
+    //   merely a blank one: on "   " vim's `dw` from col 0 deletes the three
+    //   spaces and KEEPS the newline (["", …]) — the blank case falls to the
+    //   single-`w` clamp below (vim 9.1 probes).
     // * a SINGLE-`w` crossing (count == 1, i.e. the landing is the first
     //   word start after the cursor — trailing blanks or the last word) is
     //   clamped to the end of the start line, so `dw`/`cw` never join lines.
@@ -74,11 +75,12 @@ pub fn span_from_motion(
     //   line the landing is not column 1, and without the clamp the span
     //   would swallow the newline and the indent.
     // * deeper crossings (count > 1 landing past the target line's first
-    //   word) DO span the newline, like vim (`d3w` joins).
+    //   word) DO span the newline, like vim (`d3w` joins; from a blank-only
+    //   line `d2w` removes the line's spaces together with the next line).
     if matches!(motion, Motion::WordStart { .. }) && crossed_lines {
         let big = matches!(motion, Motion::WordStart { big: true });
         if target == buf.line_start(target_line) {
-            if buf.line_is_blank(start_line) {
+            if buf.line_start(start_line) == buf.line_end(start_line) {
                 return OpSpan {
                     start: buf.line_start(start_line),
                     end: buf.line_range(target_line - 1).end,
@@ -104,14 +106,24 @@ pub fn span_from_motion(
 
     if result.kind == MotionKind::Exclusive
         && crossed_lines
-        && target == buf.line_start(target_line)
+        && (target == buf.line_start(target_line) || result.offset >= buf.len())
     {
+        // a landing PAST the buffer end (the count ran off the last word) is
+        // column 1 of vim's phantom line after the trailing newline: the same
+        // linewise promotion applies (`d2w` from a blank-only line removes
+        // the last line INCLUDING its newline — vim 9.1 probe `d2w@0` on
+        // "AAAA / \"   \" / BBBB\\n" leaves ["AAAA"], not ["AAAA", ""]).
+        let range_end = if result.offset >= buf.len() {
+            buf.len()
+        } else {
+            buf.line_range(target_line - 1).end
+        };
         if start <= buf.first_non_blank(start_line) {
             // exclusive + column 1 + started at/before first non-blank:
             // becomes linewise over the lines fully covered
             return OpSpan {
                 start: buf.line_start(start_line),
-                end: buf.line_range(target_line - 1).end,
+                end: range_end,
                 linewise: true,
             };
         }

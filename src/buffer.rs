@@ -75,12 +75,20 @@ pub trait VimBuffer {
         (offset - start, true)
     }
 
-    /// Offset of the first non-blank character of `line` (line end if blank).
+    /// Offset of the first non-blank character of `line`. On a whitespace
+    /// ONLY line there is none — vim parks the cursor on the LAST character
+    /// instead (vim 9.1: `^` on `"   "` sits on col 3), never on the newline:
+    /// a cursor on the `\n` would make later `dw`/`diw` swallow the line
+    /// break. An empty line keeps its start.
     fn first_non_blank(&self, line: usize) -> usize {
         let start = self.line_start(line);
         let (indent, _) = self.line_indent(line);
         let end = self.line_end(line);
-        (start + indent).min(end)
+        let at = (start + indent).min(end);
+        if at == end && end > start && self.char_at(end) == Some('\n') {
+            return self.prev_char_offset(end).unwrap_or(start);
+        }
+        at
     }
 
     /// Is `offset` at (or past) the end of its line, before the newline?
