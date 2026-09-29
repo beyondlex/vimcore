@@ -5,6 +5,62 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺、第五轮检视增补（2026-09-30，回归测试在 `tests/parity_round5.rs`）
+
+本轮以「探针先行」推进：所有语义改动先用 vim 9.1 无头脚本（`-es` +
+`normal!`，注意该模式下光标初始落在最后一行，探针必须显式 `gg` 锚定）
+实证，再动引擎。两条第四轮结论被探针复核后**推翻**：
+`visual y` 后 vim 的光标**原地不动**（留在可移动端，旧行为本来就对，
+第四轮记录中无此问题但本轮一度误改后回滚）；`:set number` 的 ex_set
+解析其实正确（`number` 不以 `no` 开头，首轮读码误判，探针证伪）。
+
+### 新修复（语义类均先跑 vim 9.1 探针）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **visual 缩进算子忽略 count**：`Vj3>` 只缩一档 | vim 探针 sw=4 expandtab：`Vj3>` → 12 空格、`Vj2>` → 8。count 只对缩进算子生效（`Vj3d` 仍删一次选区）。实现上只解析一次行区间、直接循环 `shift_line`——复用 `ops::apply` 会复用旧字节 span，前面的缩进插入后 span 漂移，尾部行漏缩（实测 l1 缩 3 次 l2 缩 1 次） |
+| 2 | **visual 未映射键不清 count**：`V 3 & j` 跳三行 | vim 取消整个 pending。两处 Miss 分支（cmd_seq 续走分支 + 单键分支）都补了 `reset_pending` |
+| 3 | **no-op 命令污染 changelist**：空行 `x` 后第二次 `g;` 落在幽灵变更点 | vim 探针 `jx gg x g;g;` 两次都停在真实变更行。`x`/`X`/`s`/`S`/`p`/`P`/`J`/`gJ`/`~`/`<Del>`/`r`/visual `r`/linewise 算子全部改走 `bump_if_edited`（按 `edit_generation` 判真编辑） |
+| 4 | **映射在展开队列中部完成时被当字面量**：`:imap a <Esc>` + `:imap q ax` 敲 `q`，`a` 不触发 | `Trie::get` 对「前缀已是叶子、后面还挂键」整队 Miss。新增 `longest_terminal_leaf_prefix`：完整序列恰为叶子才命中并消费前缀；带孩子的命中仍走既有 builtin-vs-mapping 消解（该取舍有专门测试防回归）。自指映射由 MAX_MAP_DEPTH 兜底 |
+| 5 | **`/<CR>` 无前次模式静默**、**`:s//x/` 无前次模式哑铃** | vim 探针 `/<CR>` → v:errmsg = E35。两处都补 `E35: No previous regular expression` + bell |
+| 6 | **`:1y a 2` 忽略 count** | vim 探针：寄存器后的数字参数是 count（两行进 `"a`）。`:y` 参数解析改为「首参数字=count；字母=寄存器+可选第二 count」 |
+| 7 | **TCK 参考实现违反自身 `char_at` 契约**：裸切片在非边界偏移 panic | 引擎的 `floor_to_char_boundary` 刻意探测非边界；宿主照抄参考实现会从合法路径吃 panic（`"中文"` offset 1 实测复现）。补 `is_char_boundary` 守卫，并从测试模块提升为公共 `tck::TckStrBuf`（宿主可直接复用） |
+
+### 新功能
+
+- **`:{range}sor[t][!] [i] [u]`**：行排序。`!` 反转、`i` 忽略大小写、
+  `u` 排序后去重；范围末尾的换行保真。单行范围是无操作（vim 同）。
+  旧路径把 `:sort` 喂进替换解析器后只哑铃。`n`/`x`/`o` 等旗标忽略。
+- **`:{range}j[oin][!]`**：行连接。单行范围连接下一行（裸 `:j` 即此
+  语义），`!` 逐字连接（≈ `gJ`）。复用 `ops::join_lines` 的分隔符逻辑。
+- **`&` 与裸 `:s`**：重复上一条替换命令（`Cmdline::last_substitute`
+  在解析成功时记录，E486 后重放同一命令并报同一错误）；无前次时报
+  vim 的 E33。
+- **删除死代码 `CmdKind::mutates()`**：惰性 undo 组改造后无人调用，
+  文档声称的用途已不存在（gpui_vim / crossterm_vim 下游未引用）。
+
+### 新增已知分歧（接续前表编号）
+
+23. visual 缩进的 count 只认**前置**形式（`3>`）；`>3` 在 vim 里同样
+    忽略，故一致——但 `Vj>3` 里滞留的 count 会成为下一个 motion 的
+    count（vim 相同，非分歧，备忘）。
+24. `:sort` 不支持 `n`（数值）/`x`/`o`/`b` 旗标与 `{pattern}` 截断。
+25. `:j` 的 count 形式（`:j 3`）未实现（用 `:j` 于 `:,+1j` 代替）。
+
+### 悬而未决（本轮记录、未改动）
+
+- **`set_cursor_offset` 在 visual 模式把 anchor 搬到点击点**：选区塌缩
+  成零宽但停留在 Visual 模式——既不像 vim 的「点击退出 visual」也不像
+  「拖拽扩展」。需要消费方（gpui-vim 的鼠标路径）确认意图后再定语义。
+- **visual `p` 用 linewise 寄存器**的精确语义（选区被行级文本替换的
+  边界情况）vim 探针结果不明确，双方行为都存疑，暂不动。
+- **Tab 的显示宽度按 1 记账**（`char_display_width` 对控制字符返回 1）：
+  j/k 列保持、`|`、块选在含 Tab 行上与终端渲染有偏差。真要修需要
+  tabstop 感知的显示列，牵动 `display_column` 全链，本轮不做。
+- **`all_matches` 的 10_000 匹配截断**：超出后 `n` 只在截断集合内环绕。
+  巨型文件 + 宽匹配的场景需要宿主用 `set_hlsearch_live_update(false)`
+  自管（既有机制），截断值暂不调。
+
 ## 〇、第四轮检视增补（同日，回归测试在 `tests/parity_round4.rs`）
 
 探针方式升级：vim 9.1 以 `-es` 脚本逐例实证（注意 `-es` 下 setline 不进
