@@ -620,13 +620,16 @@ impl VimState {
         let range_end = ctx.buf.line_end(last_line);
         let mut joined: Vec<String> = Vec::new();
         let mut total = 0usize;
-        let mut last_match: Option<usize> = None;
+        // the cursor lands on the LAST SUBSTITUTED line, at its first
+        // non-blank (vim 9.1 probes: `%s` over lines where the tail has no
+        // matches ends on the last line that changed). Line numbers are
+        // stable — replacements can never introduce newlines.
+        let mut last_sub_line: Option<usize> = None;
         for line_no in first_line..=last_line {
             let ls = ctx.buf.line_start(line_no);
             let le = ctx.buf.line_end(line_no);
             let text = ctx.buf.slice(ls..le);
             let mut hits = 0usize;
-            let mut last_hit: Option<usize> = None;
             // one counting replacer serves both modes: `replace` stops after
             // the first match, `replace_all` runs to the end of the line
             let count_replacements = |caps: &regex::Captures| -> String {
@@ -636,7 +639,6 @@ impl VimState {
                     return m.as_str().to_owned();
                 }
                 hits += 1;
-                last_hit = Some(m.start());
                 let mut out = String::new();
                 caps.expand(replacement, &mut out);
                 out
@@ -649,9 +651,7 @@ impl VimState {
             .to_string();
             if hits > 0 {
                 total += hits;
-                if let Some(off) = last_hit {
-                    last_match = Some(ls + off);
-                }
+                last_sub_line = Some(line_no);
             }
             joined.push(replaced);
         }
@@ -668,8 +668,14 @@ impl VimState {
         self.edit_replace(ctx, range_start..range_end, &new_text);
         self.end_edit();
         self.bump(ctx);
-        if let Some(offset) = last_match {
-            self.cursor.offset = crate::buffer::clamp_to_line_end(ctx.buf, offset);
+        // computed AFTER the edit: pre-edit match offsets would be stale
+        // wherever an earlier line's substitution changed the byte length
+        if let Some(line_no) = last_sub_line {
+            let line = line_no.min(ctx.buf.line_count() - 1);
+            self.cursor.offset = crate::buffer::clamp_to_line_end(
+                ctx.buf,
+                ctx.buf.first_non_blank(line),
+            );
             self.cursor.desired_col = None;
         }
         ctx.host.status_message(&format!("{total} substitutions"));
