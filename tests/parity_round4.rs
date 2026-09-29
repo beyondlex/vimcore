@@ -331,3 +331,80 @@ fn word_motion_lands_on_last_char_at_buffer_end() {
     let f = edit("abc", 0, 0, &["w", "x"]);
     assert_eq!(f.text(), "ab", "x deletes the char under the cursor");
 }
+
+// ---- gn / gN: select the next match -------------------------------------------
+
+/// `gn` selects the match containing the cursor (else the next one) as a
+/// charwise visual selection; `dgn` changes exactly the match (vim probes:
+/// `dgn` on "abfoo cd foocd" with pattern `foo` leaves "ab cd foocd";
+/// `cgn` + `.` rewrites successive matches).
+#[test]
+fn gn_selects_the_match_for_operators_and_visual() {
+    // dgn deletes exactly the match
+    let mut f = Fixture::new("abfoo cd foocd\n");
+    f.feed(["/", "f", "o", "o", "<CR>"]);
+    f.feed(["d", "g", "n"]);
+    assert_eq!(f.text(), "ab cd foocd\n", "dgn removes just the match");
+
+    // count: the match containing the cursor is #1, so 2gn/d2gn takes the
+    // NEXT one (vim's 2gn ≙ 2n then select)
+    let mut f = Fixture::new("a foo b foo c\n");
+    f.feed(["/", "f", "o", "o", "<CR>"]);
+    f.feed(["d", "2", "g", "n"]);
+    assert_eq!(f.text(), "a foo b  c\n", "2gn targets the second match");
+
+    // plain gn enters visual mode over the match. `/` from col 0 skips the
+    // match AT the cursor (vim same), landing on the second foo; gn then
+    // selects the one under the cursor.
+    let mut f = Fixture::new("foo bar foo\n");
+    f.feed(["/", "f", "o", "o", "<CR>"]);
+    f.feed(["g", "n"]);
+    assert_eq!(
+        f.vim.mode(),
+        vimcore::Mode::Visual {
+            kind: vimcore::mode::VisualKind::Char
+        }
+    );
+    f.feed(["d"]);
+    assert_eq!(f.text(), "foo bar \n", "the selection was the match");
+
+    // cgn + `.`: the classic change-every-match workflow
+    let mut f = Fixture::new("a b a b a b\n");
+    f.feed(["/", "b", "<CR>"]);
+    f.feed(["c", "g", "n"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "a X a b a b\n");
+    f.feed(["."]);
+    assert_eq!(f.text(), "a X a X a b\n");
+    f.feed(["."]);
+    assert_eq!(f.text(), "a X a X a X\n");
+}
+
+/// `gN` selects backward: with the cursor at the end of "aa b aa b" the
+/// selection covers the SECOND `aa`.
+#[test]
+fn gn_backward_selects_the_previous_match() {
+    let mut f = Fixture::new("aa b aa b\n");
+    f.feed(["/", "a", "a", "<CR>"]);
+    f.feed(["G", "$", "g", "N", "d"]);
+    assert_eq!(f.text(), "aa b  b\n", "gN picked the trailing aa");
+}
+
+/// No pattern at all: vim opens a search prompt; the engine reports E35
+/// (same as `n`) — recorded as a divergence.
+#[test]
+fn gn_without_pattern_reports_e35() {
+    let mut f = Fixture::new("abc\n");
+    f.feed(["g", "n"]);
+    assert_eq!(
+        f.vim.mode(),
+        vimcore::Mode::Normal,
+        "no selection without a pattern"
+    );
+    assert!(
+        f.host.statuses.iter().any(|s| s.contains("E35")),
+        "E35 reported, got {:?}",
+        f.host.statuses
+    );
+}

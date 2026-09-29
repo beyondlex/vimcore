@@ -16,6 +16,8 @@ pub struct SearchState {
     /// The match under the cursor for `n`/`N` stepping.
     pub last_matches: Vec<Range<usize>>,
     pub last_index: Option<usize>,
+    /// The range `gn`/`dgn` last selected, for the operator span.
+    pub(crate) last_found_match: Option<Range<usize>>,
     /// Buffer edit generation `last_matches` was computed at. Every edit
     /// funnels through `VimState::edit_*` (or engine-driven undo/redo), which
     /// bumps the generation, so consecutive `n`/`N` keystrokes walk the
@@ -31,6 +33,7 @@ impl Default for SearchState {
             pattern: None,
             forward: true,
             last_matches: Vec::new(),
+            last_found_match: None,
             last_index: None,
             matches_generation: None,
         }
@@ -219,4 +222,31 @@ pub fn publish_incsearch(vim: &mut VimState, ctx: &mut Ctx, pattern: &str) {
     let matches = all_matches(vim, ctx.buf, pattern);
     ctx.host
         .set_search_highlights(&matches, matches.first().cloned());
+}
+
+/// The match to select for `gn`/`gN`: the match CONTAINING `offset` if there
+/// is one, else the first match starting after it (`backward`: before it) —
+/// vim's gn prefers the current match, and `cgn` + `.` relies on "next after
+/// the cursor" afterwards. Returns None when there is no pattern or no match
+/// (the caller reports E35/E486).
+pub fn find_match_from(
+    vim: &mut VimState,
+    buf: &dyn VimBuffer,
+    offset: usize,
+    backward: bool,
+) -> Option<Range<usize>> {
+    let pattern = vim.search.pattern.clone()?;
+    if vim.search.matches_generation != Some(vim.edit_generation) {
+        let matches = all_matches(vim, buf, &pattern);
+        vim.search.matches_generation = Some(vim.edit_generation);
+        vim.search.last_matches = matches;
+    }
+    let matches = &vim.search.last_matches;
+    let containing = matches.iter().find(|m| m.contains(&offset));
+    let found = match containing {
+        Some(m) => Some(m.clone()),
+        None if backward => matches.iter().rev().find(|m| m.end <= offset).cloned(),
+        None => matches.iter().find(|m| m.start > offset).cloned(),
+    };
+    found
 }
