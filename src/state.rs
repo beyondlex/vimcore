@@ -1393,17 +1393,52 @@ impl VimState {
 
     /// Visual-block `I` (insert at the left edge) and `A` (append at the
     /// right edge): typing lands on the cursor row, the rest replicate on
-    /// exit. Short rows insert at their line end, like vim.
+    /// exit. `I` on rows shorter than the block inserts at their line end;
+    /// `A` pads short rows with spaces up to the block's right edge first,
+    /// exactly like vim (vim 9.1: block cols 3-5, row `ab` → `ab   X`).
     fn begin_block_insert(&mut self, ctx: &mut Ctx, append: bool) {
         let Some(block) = ops::span_from_visual_block(self, ctx.buf) else {
             ctx.host.bell();
             return;
         };
+        // pads for short rows under `A`, collected first and applied
+        // BOTTOM-UP so the row offsets computed below stay valid
+        let pads: Vec<(usize, usize)> = if append {
+            block
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, range)| range.is_empty())
+                .map(|(i, _)| {
+                    let line = block.first_line + i;
+                    let width =
+                        crate::buffer::display_column(ctx.buf, ctx.buf.line_end(line));
+                    (line, block.col_hi.saturating_sub(width))
+                })
+                .filter(|(_, pad)| *pad > 0)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !pads.is_empty() {
+            self.begin_edit(ctx);
+            for (line, pad) in pads.iter().rev() {
+                let at = ctx.buf.line_end(*line);
+                self.edit_insert(ctx, at, &" ".repeat(*pad));
+            }
+        }
         let cursor_line = ctx.buf.offset_to_line(self.cursor.offset);
+        // the pads above shifted every row below them: recompute each row's
+        // byte range against the CURRENT buffer instead of trusting the
+        // pre-pad spans in block.rows
+        let last_row_line = block.first_line + block.rows.len() - 1;
+        let ranges: Vec<std::ops::Range<usize>> = (block.first_line..=last_row_line)
+            .map(|line| ops::block_row_range(ctx.buf, line, block.col_lo, block.col_hi))
+            .collect();
         let mut rows = Vec::new();
         let mut typing_offset = None;
         let mut typing_raw = 0usize;
-        for (i, range) in block.rows.iter().enumerate() {
+        for (i, range) in ranges.iter().enumerate() {
             let line = block.first_line + i;
             let (offset, raw) = if append {
                 let end = if range.is_empty() {
@@ -2627,8 +2662,11 @@ impl VimState {
                 // host takes can actually undo the inserted line
                 self.begin_edit(ctx);
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
+                let line_start = ctx.buf.line_start(line);
+                // copy the line's indent VERBATIM (tabs stay tabs; the old
+                // " ".repeat(indent) silently retabbed tab-indented files)
                 let (indent, _) = ctx.buf.line_indent(line);
-                let indent_str = " ".repeat(indent);
+                let indent_str = ctx.buf.slice(line_start..line_start + indent);
                 if below {
                     let at = ctx.buf.line_end(line);
                     self.edit_insert(ctx, at, &format!("\n{indent_str}"));
