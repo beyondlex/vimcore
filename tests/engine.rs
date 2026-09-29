@@ -116,9 +116,10 @@ fn delete_dw_and_special_cases() {
     let f = edit("foo   \nbar", 0, 0, &["d", "w"]);
     assert_eq!(f.text(), "\nbar");
 
-    // on whitespace before a word: linewise-style (deletes the blanks+nl)
+    // on a whitespace-only line: the blanks go, the NEWLINE stays (vim 9.1
+    // probe: `dw` on "  \nbar" → ['', 'bar']; only an EMPTY line deletes)
     let f = edit("  \nbar", 0, 0, &["d", "w"]);
-    assert_eq!(f.text(), "bar");
+    assert_eq!(f.text(), "\nbar");
 }
 
 #[test]
