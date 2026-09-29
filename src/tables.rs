@@ -59,6 +59,9 @@ pub enum NormalCmd {
     WriteQuit,                   // ZZ
     QuitNoSave,                  // ZQ
     ScrollLines { down: bool },  // C-e / C-y: scroll the view one line
+    /// `&`: repeat the last `:s` on the current line (the stored command
+    /// line re-runs through `execute_ex`).
+    RepeatSubstitute,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,51 +104,6 @@ impl CmdKind {
                 | CmdKind::Normal(NormalCmd::PlayMacro)
                 | CmdKind::Visual(VisualCmd::ReplaceChar)
         )
-    }
-
-    /// Does executing this command mutate the buffer? Used for undo groups.
-    ///
-    /// The `Normal` exclusion list is "pure navigation / bookkeeping":
-    /// marks, macros, scrolls and list walks only move the cursor or
-    /// engine state. `Undo`/`Redo` count as NON-mutating even though they
-    /// change the text — the HOST begins their undo accounting itself
-    /// (`begin_undo_group` was already consumed when the change being
-    /// undone was made), and a fresh group here would nest confusingly.
-    /// `RepeatChange` is excluded because its replayed steps mutate on
-    /// their own (grouped by their own `begin_edit` calls). `WriteQuit` /
-    /// `QuitNoSave` end the session without touching the buffer.
-    pub fn mutates(self) -> bool {
-        match self {
-            CmdKind::Motion(_) | CmdKind::Object(_) => false,
-            CmdKind::Operator(op) => !matches!(op, Operator::Yank),
-            CmdKind::EnterInsert(_) => true,
-            CmdKind::EnterVisual(_) => false,
-            CmdKind::Normal(cmd) => !matches!(
-                cmd,
-                NormalCmd::MarkSet
-                    | NormalCmd::JumpMark { .. }
-                    | NormalCmd::RecordMacro
-                    | NormalCmd::PlayMacro
-                    | NormalCmd::ScrollCenter
-                    | NormalCmd::ScrollTop
-                    | NormalCmd::ScrollBottom
-                    | NormalCmd::RestoreVisual
-                    | NormalCmd::Undo
-                    | NormalCmd::Redo
-                    | NormalCmd::RepeatChange
-                    | NormalCmd::JumpBackward
-                    | NormalCmd::JumpForward
-                    | NormalCmd::OlderChange
-                    | NormalCmd::NewerChange
-                    | NormalCmd::WriteQuit
-                    | NormalCmd::QuitNoSave
-                    | NormalCmd::ScrollLines { .. }
-            ),
-            CmdKind::Visual(cmd) => !matches!(
-                cmd,
-                VisualCmd::Exit | VisualCmd::ToggleKind { .. } | VisualCmd::SwapEnds
-            ),
-        }
     }
 }
 
@@ -529,6 +487,11 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     );
     b.normal(&["<C-a>"], CmdKind::Normal(NormalCmd::IncrementNumber));
     b.normal(&["<C-x>"], CmdKind::Normal(NormalCmd::DecrementNumber));
+    // &: repeat the last :s on the current line (vim)
+    b.normal(
+        &["&"],
+        CmdKind::Normal(NormalCmd::RepeatSubstitute),
+    );
     b.normal(&["@"], CmdKind::Normal(NormalCmd::PlayMacro));
     b.normal(&["z", "z"], CmdKind::Normal(NormalCmd::ScrollCenter));
     b.normal(&["z", "t"], CmdKind::Normal(NormalCmd::ScrollTop));

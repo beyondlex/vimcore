@@ -3080,6 +3080,18 @@ impl VimState {
                 ctx.host.scroll_lines(delta);
                 ctx.host.scroll_to_line(line);
             }
+            // &: repeat the last :s on the current line (the stored command
+            // line re-runs through the full Ex parser, so ranges inside it
+            // behave as typed — vim repeats them relative to the cursor)
+            NormalCmd::RepeatSubstitute => match self.cmdline.last_substitute.clone() {
+                Some(last) => self.execute_ex(ctx, &last),
+                None => {
+                    // vim: E33 "No previous substitute regular expression"
+                    ctx.host
+                        .status_message("E33: No previous substitute regular expression");
+                    ctx.host.bell();
+                }
+            },
         }
     }
 
