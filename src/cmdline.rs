@@ -424,7 +424,7 @@ impl VimState {
             match spec.strip_prefix('-') {
                 Some(n) => base.saturating_sub(n.parse::<usize>().unwrap_or(0)),
                 None => match spec.strip_prefix('+') {
-                    Some(n) => base + n.parse::<usize>().unwrap_or(0),
+                    Some(n) => base.saturating_add(n.parse::<usize>().unwrap_or(0)),
                     _ => base,
                 },
             }

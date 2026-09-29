@@ -812,8 +812,10 @@ impl VimState {
         let old_text = &text[signed_start..num_end];
         let negative = old_text.starts_with('-');
         let digits = if negative { &old_text[1..] } else { old_text };
+        // unrepresentable literals saturate at i64::MAX (vim errors instead;
+        // saturation at least keeps the sign from flipping through wrap)
         let value: i64 = digits.parse().unwrap_or(i64::MAX);
-        let new_value = if negative { -value } else { value }.wrapping_add(delta);
+        let new_value = if negative { -value } else { value }.saturating_add(delta);
         let new_text = new_value.to_string();
 
         self.begin_edit(ctx);
@@ -1534,13 +1536,19 @@ impl VimState {
 
     /// Absorb a count digit (`3` → count 3, `30` → count 30). A leading `0`
     /// is not a count — it falls through to the trie as the line-start
-    /// motion. Returns `None` when the key is not a count digit.
+    /// motion. Returns `None` when the key is not a count digit. Saturating
+    /// arithmetic: `99999999999999999dd` must not panic on usize overflow.
     fn count_digit_key(&mut self, key: &Key) -> Option<ProcessOutcome> {
         if let KeyKind::Char(c) = &key.kind {
             if key.modifiers.is_plain() && c.is_ascii_digit() {
                 let d = c.to_digit(10).unwrap() as usize;
                 if !(d == 0 && self.count.is_none()) {
-                    self.count = Some(self.count.unwrap_or(0) * 10 + d);
+                    self.count = Some(
+                        self.count
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(d),
+                    );
                     return Some(ProcessOutcome::Consumed);
                 }
                 // 0 falls through to the trie (line-start motion)
@@ -2035,10 +2043,15 @@ impl VimState {
         }
     }
 
+    /// Prefix count × operator count, defaulting each to 1. Capped at a
+    /// billion: counts arrive unvalidated from the keyboard, and `3p` scales
+    /// the register text by the count — an absurd count must not multiply
+    /// into an unbounded allocation downstream.
     fn take_total_count(&mut self) -> usize {
+        const COUNT_CAP: usize = 1_000_000_000;
         let pre = self.count.take().unwrap_or(1);
         let post = self.op_count.take().unwrap_or(1);
-        pre * post
+        pre.saturating_mul(post).min(COUNT_CAP)
     }
 
     /// End of a complete top-level command: commit the recording if the

@@ -430,3 +430,37 @@ fn angle_keys_accept_lowercase_modifier_prefixes() {
     assert!(Key::parse("<s-x>").modifiers.shift);
     assert_eq!(Key::parse("<s-x>").kind, KeyKind::Char('x'));
 }
+
+// ---- * on a line without words: must not re-jump with the stale pattern ---------
+
+#[test]
+fn star_without_word_bells_instead_of_reusing_stale_pattern() {
+    // `/two` arms the pattern; `*` on a punctuation-only line used to jump
+    // again with "two" instead of failing
+    let mut f = Fixture::at("one two\n...\n", 0, 0);
+    f.feed(["/", "t", "w", "o", "<Enter>"]); // on line 1's "two"
+    f.feed(["j"]); // line 2: "..."
+    let line_before = f.line();
+    f.feed(["*"]);
+    assert_eq!(f.line(), line_before, "* must not move: no word on the line");
+    assert_eq!(
+        f.host.highlights.len(),
+        1,
+        "highlights still describe /two — no stale re-jump happened"
+    );
+}
+
+// ---- absurd counts must not panic -----------------------------------------------
+
+#[test]
+fn huge_counts_saturate_instead_of_overflowing() {
+    let f = edit("ab\ncd\n", 0, 0, &["9", "9", "9", "9", "9", "9", "9", "9", "9",
+        "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "d", "d"]);
+    // saturates far past the line count; dd clamps to the last line
+    assert_eq!(f.text(), "");
+
+    let f = edit("x99999999999999999999\n", 0, 1, &["<C-a>"]);
+    // literal overflows i64: saturates at i64::MAX instead of wrapping
+    // negative (the exact rendering is unspecified; must not panic)
+    assert!(f.text().starts_with('x'));
+}

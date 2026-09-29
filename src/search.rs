@@ -150,13 +150,14 @@ pub fn jump_to_match(
 
 /// `*` / `#`: build a whole-word pattern from the word under the cursor and
 /// search for it. When the cursor is NOT on a word, vim uses the closest
-/// word FORWARD on the same line.
+/// word FORWARD on the same line. Returns false when no word was found (the
+/// caller must not jump: a stale pattern would silently re-search).
 pub fn search_word_under_cursor(
     vim: &mut VimState,
     buf: &dyn VimBuffer,
     host: &mut dyn crate::host::VimHost,
     forward: bool,
-) {
+) -> bool {
     let offset = vim.cursor.offset;
     // not on a word char: scan forward to the next one within this line
     let offset = if !matches!(buf.char_at(offset), Some(c) if is_word_char(c)) {
@@ -170,16 +171,17 @@ pub fn search_word_under_cursor(
         offset
     };
     let Some((start, end)) = word_bounds_at(buf, offset) else {
-        return;
+        return false;
     };
     let literal = buf.slice(start..end);
     if literal.is_empty() {
-        return;
+        return false;
     }
     let escaped = regex::escape(&literal);
     let pattern = format!(r"\b{escaped}\b");
     set_pattern_inner(vim, buf, host, pattern, forward);
     vim.search.forward = forward;
+    true
 }
 
 /// Word bounds around `offset` (the run of word chars containing it).
