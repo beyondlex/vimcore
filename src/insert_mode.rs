@@ -48,13 +48,23 @@ impl VimState {
                     "delete" => {
                         let at = self.cursor.offset;
                         if let Some(c) = ctx.buf.char_at(at) {
-                            self.begin_edit(ctx);
+                            self.begin_edit();
                             self.edit_delete(ctx, at..at + c.len_utf8());
                             ctx.host.changed();
                         }
                         return ProcessOutcome::Consumed;
                     }
                     "up" | "down" => {
+                        // vertical moves are locked out mid-block-insert: the
+                        // row replication assumes all typing landed on the
+                        // session's typing row, and a page motion would point
+                        // it at another row (drifting the replica offsets).
+                        // vim allows vertical moves here (extending the
+                        // block), which this engine does not model.
+                        if self.in_block_insert() {
+                            ctx.host.bell();
+                            return ProcessOutcome::Consumed;
+                        }
                         let motion = if name == "up" {
                             Motion::Up
                         } else {
@@ -84,10 +94,18 @@ impl VimState {
                         return ProcessOutcome::Consumed;
                     }
                     "pageup" => {
+                        if self.in_block_insert() {
+                            ctx.host.bell();
+                            return ProcessOutcome::Consumed;
+                        }
                         self.goto_motion(ctx, Motion::PageUp, 1);
                         return ProcessOutcome::Consumed;
                     }
                     "pagedown" => {
+                        if self.in_block_insert() {
+                            ctx.host.bell();
+                            return ProcessOutcome::Consumed;
+                        }
                         self.goto_motion(ctx, Motion::PageDown, 1);
                         return ProcessOutcome::Consumed;
                     }
@@ -138,7 +156,7 @@ impl VimState {
             if let Some(orig) = self.replace_overwritten.pop() {
                 if at > line_start {
                     if let Some(prev) = ctx.buf.prev_char_offset(at) {
-                        self.begin_edit(ctx);
+                        self.begin_edit();
                         match orig {
                             Some(c) => self.edit_replace(ctx, prev..at, &c.to_string()),
                             None => self.edit_delete(ctx, prev..at),
@@ -148,7 +166,7 @@ impl VimState {
                     }
                 } else if at > 0 {
                     // crossed the line start: join with the previous line
-                    self.begin_edit(ctx);
+                    self.begin_edit();
                     self.edit_delete(ctx, at - 1..at);
                     self.cursor.offset = at - 1;
                     ctx.host.changed();
@@ -159,14 +177,18 @@ impl VimState {
 
         if at > line_start {
             if let Some(prev) = ctx.buf.prev_char_offset(at) {
-                self.begin_edit(ctx);
+                self.begin_edit();
                 self.edit_delete(ctx, prev..at);
                 self.cursor.offset = prev;
+                // a block-insert session replicates block.text onto the other
+                // rows on exit: a backspace that undoes typed text must
+                // shrink it too, or the replicas carry the deleted char
+                self.block_backspace_undo(at);
                 ctx.host.changed();
             }
         } else if at > 0 {
             // join with the previous line
-            self.begin_edit(ctx);
+            self.begin_edit();
             self.edit_delete(ctx, at - 1..at);
             self.cursor.offset = at - 1;
             ctx.host.changed();
@@ -194,7 +216,7 @@ impl VimState {
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
         let target = word::prev_word_start(ctx.buf, at, false).max(line_start);
         if target < at {
-            self.begin_edit(ctx);
+            self.begin_edit();
             self.edit_delete(ctx, target..at);
             self.cursor.offset = target;
             ctx.host.changed();
@@ -205,7 +227,7 @@ impl VimState {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
         if at > line_start {
-            self.begin_edit(ctx);
+            self.begin_edit();
             self.edit_delete(ctx, line_start..at);
             self.cursor.offset = line_start;
             ctx.host.changed();

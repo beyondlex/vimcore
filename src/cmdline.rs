@@ -375,12 +375,22 @@ impl VimState {
         if self.ex_substitute(ctx, line, range) {
             return;
         }
-        // :{range}d[elete] — delete the range's lines
+        // :{range}d[elete] [x] [count] — delete the range's lines; a numeric
+        // argument extends the range that many lines down (vim's `:2d 3`),
+        // an alphabetic one names the register (unsupported, ignored)
         if let Some(rest) =
             Self::boundary_cmd(line, "d").or_else(|| Self::boundary_cmd(line, "delete"))
         {
-            let _register = rest.trim(); // named registers not supported
-            self.ex_delete_lines(ctx, range);
+            let rest = rest.trim();
+            let extra_lines = match rest.chars().next() {
+                Some(c) if c.is_ascii_digit() => rest.parse::<usize>().unwrap_or(1),
+                _ => 1,
+            };
+            let (first, last) = range;
+            let last = last
+                .saturating_add(extra_lines.saturating_sub(1))
+                .min(ctx.buf.line_count().saturating_sub(1));
+            self.ex_delete_lines(ctx, (first, last));
             return;
         }
         // :{range}y[ank] [x] [count] — yank the range's lines into a register
@@ -579,7 +589,7 @@ impl VimState {
             ctx.host.bell();
             return;
         }
-        self.begin_edit(ctx);
+        self.begin_edit();
         self.edit_delete(ctx, start..end);
         self.bump(ctx);
         let below = ctx.buf.line_count().saturating_sub(1);
@@ -732,7 +742,7 @@ impl VimState {
             return true;
         }
 
-        self.begin_edit(ctx);
+        self.begin_edit();
         let new_text = joined.join("\n");
         self.edit_replace(ctx, range_start..range_end, &new_text);
         self.end_edit();

@@ -11,7 +11,7 @@
 //! `KeyResult::Unknown` is the contract with the host: an unknown key is fed
 //! back to gpui's normal key handling (keymap bindings, IME, ...).
 
-use crate::buffer::{clamp_cursor, clamp_to_line_end, VimBuffer, VimBufferMut};
+use crate::buffer::{clamp_cursor, VimBuffer, VimBufferMut};
 use crate::cmdline::Cmdline;
 use crate::host::{ScrollAnchor, VimHost};
 use crate::key::{Key, KeyKind, Modifiers};
@@ -65,14 +65,23 @@ pub enum InsertKind {
 /// typed text is replicated onto every other row (single undo group).
 #[derive(Debug)]
 struct BlockInsert {
-    /// (adjusted offset, raw row start) for the non-cursor rows. Adjusted
-    /// accounts for the block deletion; raw is the position in the original
-    /// buffer, used to know which rows sit below the cursor's row.
+    /// (insert offset, row's line index) for the non-cursor rows, both taken
+    /// at session start. The offset already accounts for a block `c`
+    /// deletion; the line index decides which rows shift with the typing.
     rows: Vec<(usize, usize)>,
-    /// Raw start of the cursor's row: rows after it shift with the typed
-    /// text.
-    cursor_raw: usize,
+    /// Line index the typing happens on (session start; vertical motions are
+    /// locked out mid-session, so this stays the typing row throughout).
+    typing_line: usize,
+    /// Byte length of the typing row at session start. The exact per-row
+    /// shift on exit is this row's length DELTA — typing, backspace and
+    /// autoindent newlines all fold into it (an estimate from the typed
+    /// text's length drifted when the session edited the row otherwise, and
+    /// replication offsets landed mid-character).
+    typing_line_len: usize,
     text: String,
+    /// Cursor offset right after the last appended chunk; a backspace
+    /// landing here undoes typed text and shrinks `text` to match.
+    typed_end: Option<usize>,
 }
 
 /// Pending count-repeat of a plain insert session (`3ifoo<Esc>` types foo
@@ -440,6 +449,35 @@ impl VimState {
         self.macro_capture.as_ref().map(|(reg, _)| *reg)
     }
 
+    /// True while a visual-block `I`/`A`/`c` session is gathering text for
+    /// multi-row replication (insert mode locks vertical motions then).
+    pub(crate) fn in_block_insert(&self) -> bool {
+        self.block_insert.is_some()
+    }
+
+    /// Remember where the block session's typed text ends (its cursor after
+    /// an append), so a backspace there can shrink the replica text.
+    pub(crate) fn block_note_typed_end(&mut self, at: usize) {
+        if let Some(block) = &mut self.block_insert {
+            block.typed_end = Some(at);
+        }
+    }
+
+    /// Backspace undo for a block session: when the cursor is exactly at the
+    /// end of the appended text, drop its last char from the replica. `at`
+    /// is the cursor offset BEFORE the deletion.
+    pub(crate) fn block_backspace_undo(&mut self, at: usize) {
+        let Some(block) = &mut self.block_insert else {
+            return;
+        };
+        if block.typed_end == Some(at) {
+            if let Some(c) = block.text.chars().last() {
+                block.text.truncate(block.text.len() - c.len_utf8());
+                block.typed_end = Some(at - c.len_utf8());
+            }
+        }
+    }
+
     /// Host-side recording suppression: while set, text placed into the
     /// buffer is NOT recorded for `.` repeat. Wrap IME composition preview
     /// mutations (the raw pinyin) with this; only the committed text should
@@ -779,7 +817,7 @@ impl VimState {
     /// recorded; [`VimState::flush_undo_group`] announces it lazily, right
     /// before the group's FIRST actual edit, when the cursor is still
     /// pre-edit as the `begin_undo_group` contract requires.
-    fn open_undo_group(&mut self, ctx: &mut Ctx) -> u64 {
+    fn open_undo_group(&mut self) -> u64 {
         match self.open_undo {
             Some(id) => id,
             None => {
@@ -803,11 +841,11 @@ impl VimState {
     }
 
     /// Open (or reuse) the undo group for the current logical command.
-    pub(crate) fn begin_edit(&mut self, ctx: &mut Ctx) {
+    pub(crate) fn begin_edit(&mut self) {
         if !self.replaying {
             self.recording_mutated = true;
         }
-        self.open_undo_group(ctx);
+        self.open_undo_group();
     }
 
     /// Close any open undo group (end of a logical command or insert session).
@@ -872,7 +910,7 @@ impl VimState {
         let new_value = if negative { -value } else { value }.saturating_add(delta);
         let new_text = new_value.to_string();
 
-        self.begin_edit(ctx);
+        self.begin_edit();
         let abs = start + signed_start;
         self.edit_replace(ctx, abs..start + num_end, &new_text);
         self.bump(ctx);
@@ -1167,13 +1205,13 @@ impl VimState {
 
     // ---- insert sessions -------------------------------------------------------
 
-    pub(crate) fn begin_insert(&mut self, ctx: &mut Ctx, kind: InsertKind) {
+    pub(crate) fn begin_insert(&mut self, kind: InsertKind) {
         // Reuse an open undo group when one exists: the change family (c/s/S/C)
         // deletes the span through a group that is already open, and the
         // deletion + subsequent typing must undo as ONE step. Without this the
         // host would snapshot between deletion and typing, so the first `u`
         // only undid the typing and a second one was needed for the deletion.
-        self.open_undo_group(ctx);
+        self.open_undo_group();
         self.insert_session = Some(InsertSession);
         self.mode = if kind == InsertKind::Replace {
             Mode::Replace
@@ -1244,19 +1282,22 @@ impl VimState {
         self.marks.set('^', self.cursor.offset);
         // visual-block I/A/c: replicate the typed text onto the other rows
         // while the session's undo group is still open (one `u` restores
-        // all). Rows below the cursor's row shift by the typed byte length.
+        // all). Rows BELOW the typing row shift by that row's exact byte
+        // delta (see `BlockInsert::typing_line_len`); rows above don't move.
         if let Some(block) = self.block_insert.take() {
             if !block.text.is_empty() {
+                let cur_len =
+                    ctx.buf.line_end(block.typing_line) - ctx.buf.line_start(block.typing_line);
+                let shift = cur_len as isize - block.typing_line_len as isize;
                 let mut rows: Vec<usize> = block
                     .rows
                     .into_iter()
-                    .map(|(adjusted, raw)| {
-                        adjusted
-                            + if raw > block.cursor_raw {
-                                block.text.len()
-                            } else {
-                                0
-                            }
+                    .map(|(adjusted, line)| {
+                        if line > block.typing_line {
+                            (adjusted as isize + shift).max(0) as usize
+                        } else {
+                            adjusted
+                        }
                     })
                     .collect();
                 rows.sort_unstable_by(|a, b| b.cmp(a)); // bottom-up inserts
@@ -1287,7 +1328,7 @@ impl VimState {
         if !matches!(self.mode, Mode::Insert | Mode::Replace) || text.is_empty() {
             return;
         }
-        self.begin_edit(ctx);
+        self.begin_edit();
         let line_start = ctx
             .buf
             .line_start(ctx.buf.offset_to_line(self.cursor.offset));
@@ -1332,6 +1373,7 @@ impl VimState {
             self.edit_insert(ctx, at, &expanded);
         }
         self.cursor.offset = at + expanded.len();
+        self.block_note_typed_end(self.cursor.offset);
         self.republish_search(ctx);
         ctx.host.changed();
     }
@@ -1423,7 +1465,7 @@ impl VimState {
 
     /// Replace an arbitrary range (IME committed composition text).
     pub fn replace_range(&mut self, ctx: &mut Ctx, range: Range<usize>, text: &str) {
-        self.begin_edit(ctx);
+        self.begin_edit();
         self.edit_replace(ctx, range.clone(), text);
         // place the cursor at the end of the replacement when it touches it
         if range.contains(&self.cursor.offset) || self.cursor.offset == range.end {
@@ -1498,7 +1540,7 @@ impl VimState {
         };
         match op {
             Operator::Delete => {
-                self.begin_edit(ctx);
+                self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
                 self.end_edit();
                 self.bump(ctx);
@@ -1533,21 +1575,26 @@ impl VimState {
                 self.finish_visual_op(ctx);
             }
             Operator::Change => {
-                self.begin_edit(ctx);
+                self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
                 self.bump(ctx);
                 self.reset_pending();
                 self.cursor.offset = clamp_cursor(ctx.buf, adjusted[0]);
+                let typing_line = ctx.buf.offset_to_line(self.cursor.offset);
                 self.block_insert = Some(BlockInsert {
                     rows: adjusted[1..]
                         .iter()
                         .copied()
-                        .zip(block.rows[1..].iter().map(|r| r.start))
+                        .enumerate()
+                        .map(|(i, offset)| (offset, block.first_line + 1 + i))
                         .collect(),
-                    cursor_raw: block.rows[0].start,
+                    typing_line,
+                    typing_line_len: ctx.buf.line_end(typing_line)
+                        - ctx.buf.line_start(typing_line),
                     text: String::new(),
+                    typed_end: None,
                 });
-                self.begin_insert(ctx, InsertKind::Insert);
+                self.begin_insert(InsertKind::Insert);
                 // blockwise `c` needs per-row text replication that a replay of
                 // the recorded keys cannot reproduce (the typed text is applied
                 // as one inline step) — keep it out of `.`
@@ -1608,7 +1655,7 @@ impl VimState {
             Vec::new()
         };
         if !pads.is_empty() {
-            self.begin_edit(ctx);
+            self.begin_edit();
             for (line, pad) in pads.iter().rev() {
                 let at = ctx.buf.line_end(*line);
                 self.edit_insert(ctx, at, &" ".repeat(*pad));
@@ -1624,26 +1671,23 @@ impl VimState {
             .collect();
         let mut rows = Vec::new();
         let mut typing_offset = None;
-        let mut typing_raw = 0usize;
         for (i, range) in ranges.iter().enumerate() {
             let line = block.first_line + i;
-            let (offset, raw) = if append {
-                let end = if range.is_empty() {
+            let offset = if append {
+                if range.is_empty() {
                     ctx.buf.line_end(line)
                 } else {
                     range.end
-                };
-                (end, end)
+                }
             } else if range.is_empty() {
-                (ctx.buf.line_end(line), range.start)
+                ctx.buf.line_end(line)
             } else {
-                (range.start, range.start)
+                range.start
             };
             if line == cursor_line {
                 typing_offset = Some(offset);
-                typing_raw = raw;
             } else {
-                rows.push((offset, raw));
+                rows.push((offset, line));
             }
         }
         let Some(typing_offset) = typing_offset else {
@@ -1654,10 +1698,12 @@ impl VimState {
         self.cursor.desired_col = None;
         self.block_insert = Some(BlockInsert {
             rows,
-            cursor_raw: typing_raw,
+            typing_line: cursor_line,
+            typing_line_len: ctx.buf.line_end(cursor_line) - ctx.buf.line_start(cursor_line),
             text: String::new(),
+            typed_end: None,
         });
-        self.begin_insert(ctx, InsertKind::Insert);
+        self.begin_insert(InsertKind::Insert);
         // visual-block I/A: like block `c`, the row replication is not
         // reproducible from a replayed text step — keep it out of `.`
         self.recording_blocked = true;
@@ -1973,7 +2019,7 @@ impl VimState {
             "pagedown" => Motion::PageDown,
             "delete" => {
                 let count = self.count.take().unwrap_or(1);
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::delete_chars(self, ctx, count, false);
                 self.end_edit();
                 self.bump(ctx);
@@ -2284,7 +2330,7 @@ impl VimState {
             ctx.host.bell();
             return;
         };
-        self.begin_edit(ctx);
+        self.begin_edit();
         ops::apply(self, ctx, op, &span, self.register);
         // an operator that entered insert mode (visual `c`) keeps its group
         // open so deletion + typing undo as one step
@@ -2302,7 +2348,7 @@ impl VimState {
     pub(crate) fn complete_operator_with_span(&mut self, ctx: &mut Ctx, span: ops::OpSpan) {
         let Some(op) = self.op.take() else { return };
         self.op_count = None;
-        self.begin_edit(ctx);
+        self.begin_edit();
         ops::apply(self, ctx, op, &span, self.register);
         // an operator that entered insert mode (cw/ciw/cc) keeps its group
         // open so deletion + typing undo as one step
@@ -2436,7 +2482,7 @@ impl VimState {
             // x: delete count chars starting at the cursor
             NormalCmd::DeleteCharForward => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::delete_chars(self, ctx, count, false);
                 self.end_edit();
                 self.bump(ctx);
@@ -2445,7 +2491,7 @@ impl VimState {
             // line start)
             NormalCmd::DeleteCharBackward => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::delete_chars(self, ctx, count, true);
                 self.end_edit();
                 self.bump(ctx);
@@ -2455,7 +2501,7 @@ impl VimState {
             // reuse)
             NormalCmd::SubstituteChar => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::delete_chars(self, ctx, count, false);
                 self.start_insert(ctx, InsertKind::Change);
                 self.bump(ctx);
@@ -2469,7 +2515,7 @@ impl VimState {
                     end: ctx.buf.line_range(line).end,
                     linewise: true,
                 };
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::apply(self, ctx, Operator::Change, &span, self.register);
                 self.bump(ctx);
             }
@@ -2483,7 +2529,7 @@ impl VimState {
                     linewise: false,
                 };
                 if span.end > span.start {
-                    self.begin_edit(ctx);
+                    self.begin_edit();
                     ops::apply(self, ctx, Operator::Change, &span, self.register);
                     self.bump(ctx);
                 } else {
@@ -2499,7 +2545,7 @@ impl VimState {
                     linewise: false,
                 };
                 if span.end > span.start {
-                    self.begin_edit(ctx);
+                    self.begin_edit();
                     ops::apply(self, ctx, Operator::Delete, &span, self.register);
                     self.bump(ctx);
                 }
@@ -2523,7 +2569,7 @@ impl VimState {
             // ~: swap case under the cursor, advancing per char
             NormalCmd::ToggleChar => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::toggle_chars(self, ctx, count);
                 self.end_edit();
                 self.bump(ctx);
@@ -2532,7 +2578,7 @@ impl VimState {
             NormalCmd::PutAfter => {
                 let count = self.take_total_count();
                 let register = self.register.unwrap_or(crate::registers::UNNAMED);
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::put(self, ctx, register, count, true);
                 self.end_edit();
                 self.bump(ctx);
@@ -2541,7 +2587,7 @@ impl VimState {
             NormalCmd::PutBefore => {
                 let count = self.take_total_count();
                 let register = self.register.unwrap_or(crate::registers::UNNAMED);
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::put(self, ctx, register, count, false);
                 self.end_edit();
                 self.bump(ctx);
@@ -2550,7 +2596,7 @@ impl VimState {
             // whitespace or next starts with `)`)
             NormalCmd::Join => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::join_lines(self, ctx, count, false);
                 self.end_edit();
                 self.bump(ctx);
@@ -2558,7 +2604,7 @@ impl VimState {
             // gJ: join without any separator, keep the next line's indent
             NormalCmd::JoinLiteral => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::join_lines(self, ctx, count, true);
                 self.end_edit();
                 self.bump(ctx);
@@ -2636,7 +2682,7 @@ impl VimState {
                     end: ctx.buf.line_range(last).end,
                     linewise: true,
                 };
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::apply(self, ctx, op, &span, self.register);
                 self.end_edit();
                 self.bump(ctx);
@@ -2798,7 +2844,7 @@ impl VimState {
             return;
         };
         self.recording_blocked = true;
-        self.begin_edit(ctx);
+        self.begin_edit();
         let cursor_to = block.rows.first().map(|r| r.start).unwrap_or(0);
         match data.kind {
             crate::registers::RegisterKind::Blockwise => {
@@ -2872,13 +2918,20 @@ impl VimState {
                 let Some(span) = ops::span_from_visual(self, ctx.buf) else {
                     return;
                 };
-                // stash the paste content before the deletion rewrites registers
-                let stashed = self.registers.get_for_paste(register, ctx.host);
-                self.begin_edit(ctx);
+                // an unset register: vim reports E353 and leaves the
+                // selection INTACT — delete-then-nothing would lose it
+                let Some(stashed) = self.registers.get_for_paste(register, ctx.host) else {
+                    ctx.host.bell();
+                    return;
+                };
+                // the stash doubles as protection: delete_span rewrites the
+                // registers with the deleted selection before the paste
+                self.begin_edit();
                 ops::delete_span(self, ctx, &span, self.register);
-                if let Some(data) = stashed {
+                {
                     // visual `p` with a count repeats the register; the byte
                     // ceiling keeps `99999999p` from allocating register × count
+                    let data = stashed;
                     let repeated = crate::registers::clamped_repeat(
                         &data.text,
                         self.take_total_count().max(1),
@@ -2912,7 +2965,7 @@ impl VimState {
                 let count = self.take_total_count();
                 let first = ctx.buf.offset_to_line(span.start);
                 let last = ops::last_line_of_span(ctx.buf, &span);
-                self.begin_edit(ctx);
+                self.begin_edit();
                 self.cursor.offset = span.start;
                 ops::join_lines(self, ctx, (last - first + 1).max(count), literal);
                 self.end_edit();
@@ -2963,7 +3016,7 @@ impl VimState {
             InsertKind::OpenLine { below } => {
                 // open the undo group BEFORE mutating, so the snapshot the
                 // host takes can actually undo the inserted line
-                self.begin_edit(ctx);
+                self.begin_edit();
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
                 let line_start = ctx.buf.line_start(line);
                 // copy the line's indent VERBATIM (tabs stay tabs; the old
@@ -2984,7 +3037,7 @@ impl VimState {
                 self.bump(ctx);
             }
         }
-        self.begin_insert(ctx, kind);
+        self.begin_insert(kind);
         if kind == InsertKind::Replace {
             self.replace_overwritten.clear();
         }
@@ -3039,7 +3092,7 @@ impl VimState {
             }
             CharArgCmd::Replace => {
                 let count = self.take_total_count();
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::replace_chars(self, ctx, c, count);
                 self.end_edit();
                 self.bump(ctx);
@@ -3047,7 +3100,7 @@ impl VimState {
             CharArgCmd::VisualReplace => {
                 // Visual `r{char}`: replace every selected char (the visual
                 // op path exits visual mode + commits the change record)
-                self.begin_edit(ctx);
+                self.begin_edit();
                 ops::visual_replace(self, ctx, c);
                 self.end_edit();
                 self.bump(ctx);
