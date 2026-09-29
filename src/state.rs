@@ -256,6 +256,9 @@ pub struct VimState {
 
     undo_seq: u64,
     open_undo: Option<u64>,
+    /// Whether `open_undo` has been announced to the host (lazy group
+    /// opening — see `flush_undo_group`).
+    undo_group_announced: bool,
     /// Bumped by every buffer mutation (the `edit_*` funnels, engine-driven
     /// undo/redo, option changes through `:set`). Lets `n`/`N` tell whether
     /// the cached match list still describes the current text.
@@ -329,6 +332,7 @@ impl VimState {
             replace_overwritten: Vec::new(),
             undo_seq: 0,
             open_undo: None,
+            undo_group_announced: false,
             edit_generation: 0,
             pending_unknown_char: None,
         }
@@ -765,6 +769,16 @@ impl VimState {
 
     /// Open a new undo group unless one is already open for the current
     /// logical command, and return its id.
+    ///
+    /// The host hook does NOT fire here: groups get opened speculatively by
+    /// whole command families, several of which turn out to be no-ops (`x` on
+    /// an empty line, `J` at EOF, `i<Esc>`, `p` with an empty register, a
+    /// failed `r`). A host snapshot for a group that never edits would
+    /// consume a real undo step — vim's `u` skips its own no-ops (probe:
+    /// `x` on an empty line leaves the undo count untouched). The id is just
+    /// recorded; [`VimState::flush_undo_group`] announces it lazily, right
+    /// before the group's FIRST actual edit, when the cursor is still
+    /// pre-edit as the `begin_undo_group` contract requires.
     fn open_undo_group(&mut self, ctx: &mut Ctx) -> u64 {
         match self.open_undo {
             Some(id) => id,
@@ -772,8 +786,18 @@ impl VimState {
                 self.undo_seq += 1;
                 let id = self.undo_seq;
                 self.open_undo = Some(id);
-                ctx.host.begin_undo_group(id, self.cursor.offset);
                 id
+            }
+        }
+    }
+
+    /// Announce the pending group to the host (once). Called by the three
+    /// `edit_*` funnels — the only paths that actually mutate the buffer.
+    fn flush_undo_group(&mut self, ctx: &mut Ctx) {
+        if let Some(id) = self.open_undo {
+            if !self.undo_group_announced {
+                self.undo_group_announced = true;
+                ctx.host.begin_undo_group(id, self.cursor.offset);
             }
         }
     }
@@ -789,6 +813,7 @@ impl VimState {
     /// Close any open undo group (end of a logical command or insert session).
     pub(crate) fn end_edit(&mut self) {
         self.open_undo = None;
+        self.undo_group_announced = false;
     }
 
     /// `C-a`/`C-x`: find the number at or after the cursor on this line and
@@ -957,6 +982,7 @@ impl VimState {
         if text.is_empty() {
             return;
         }
+        self.flush_undo_group(ctx);
         ctx.buf.insert_text(at, text);
         let len = text.len();
         self.marks.adjust_insert(at, len);
@@ -977,6 +1003,7 @@ impl VimState {
         if range.start >= range.end {
             return;
         }
+        self.flush_undo_group(ctx);
         ctx.buf.delete_range(range.clone());
         self.marks.adjust_delete(range.clone());
         let (start, end) = (range.start, range.end);
@@ -1010,6 +1037,7 @@ impl VimState {
         if range.start >= range.end {
             return self.edit_insert(ctx, range.start, text);
         }
+        self.flush_undo_group(ctx);
         ctx.buf.replace_range(range.clone(), text);
         let new_len = text.len();
         self.marks.adjust_replace(range.clone(), new_len);
