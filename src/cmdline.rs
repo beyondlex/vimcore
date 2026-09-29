@@ -39,6 +39,10 @@ pub struct Cmdline {
     pub stash: Option<String>,
     /// Last executed Ex command line (`@:` replays it).
     pub last_command: Option<String>,
+    /// The last substitute command line (`s/pat/rep/flags`), for `&` and the
+    /// bare `:s` repeat. Stored when the command PARSES (even on E486 — vim
+    /// retries the same command and reports the same miss).
+    pub last_substitute: Option<String>,
 }
 
 impl Cmdline {
@@ -70,10 +74,19 @@ impl VimState {
             // empty pattern: re-use the last one, like vim — but in the
             // direction of the CURRENT prompt (`?` + Enter repeats BACKWARD,
             // `/` + Enter forward; verified against vim 9.1)
-            if let Some(last) = self.search.pattern.clone() {
-                search::set_pattern(self, ctx, last, forward);
-                self.jump_to_current_match(ctx, forward, 1);
-                ctx.host.changed();
+            match self.search.pattern.clone() {
+                Some(last) => {
+                    search::set_pattern(self, ctx, last, forward);
+                    self.jump_to_current_match(ctx, forward, 1);
+                    ctx.host.changed();
+                }
+                // vim reports E35 instead of a silent no-op (probe:
+                // `/<CR>` with no previous search sets v:errmsg to E35)
+                None => {
+                    ctx.host
+                        .status_message("E35: No previous regular expression");
+                    ctx.host.bell();
+                }
             }
             return;
         }
@@ -400,6 +413,23 @@ impl VimState {
             self.ex_yank_lines(ctx, range, rest.trim());
             return;
         }
+        // :{range}sor[t] [!] [i] [u] — sort the range's lines (before `s`:
+        // `sort` starts with an `s` and would otherwise hit the substitute
+        // parser's alphanumeric-separator guard)
+        if let Some(rest) =
+            Self::boundary_cmd(line, "sort").or_else(|| Self::boundary_cmd(line, "sor"))
+        {
+            self.ex_sort(ctx, range, rest.trim());
+            return;
+        }
+        // :{range}j[oin][!] — join the range's lines; a one-line range joins
+        // with the NEXT line (vim's bare `:j`), `!` removes all whitespace
+        if let Some(rest) =
+            Self::boundary_cmd(line, "join").or_else(|| Self::boundary_cmd(line, "j"))
+        {
+            self.ex_join(ctx, range, rest.trim().starts_with('!'));
+            return;
+        }
         ctx.host
             .status_message(&format!("E492: Not an editor command: {line}"));
         ctx.host.bell();
@@ -553,18 +583,96 @@ impl VimState {
         }
     }
 
+    /// `:{range}j[oin][!]` — join the range's lines into one (single undo
+    /// step). Without `!` the J separator logic applies (one space at the
+    /// seam); with `!` the lines are concatenated verbatim (vim's `:j!` ≈
+    /// `gJ`). A one-line range joins with the NEXT line, so the bare `:j`
+    /// works.
+    fn ex_join(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), bang: bool) {
+        let last = last.min(ctx.buf.line_count().saturating_sub(1));
+        let first = first.min(last);
+        let lines = last - first + 1;
+        // a single-address range still joins one seam (`:5j` = join 5 and 6)
+        let joins = if lines < 2 { 1 } else { lines - 1 };
+        self.cursor.offset = ctx.buf.line_start(first);
+        self.begin_edit();
+        crate::ops::join_lines(self, ctx, joins + 1, bang);
+        self.end_edit();
+        self.bump(ctx);
+        self.cursor.desired_col = None;
+        ctx.host.changed();
+        self.commit_change_record();
+    }
+
+    /// `:{range}sor[t][!] [flags]` — sort the range's lines. Flags (subset
+    /// of vim's): `!` reverse, `i` ignore case, `u` dedupe AFTER sorting.
+    /// Other vim flags (`n` numeric, `x`/`o`/`b`…) are ignored.
+    fn ex_sort(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), flags: &str) {
+        let last = last.min(ctx.buf.line_count().saturating_sub(1));
+        let first = first.min(last);
+        let reverse = flags.contains('!');
+        let ignore_case = flags.contains('i');
+        let unique = flags.contains('u');
+        if first == last && !unique {
+            // a one-line range has nothing to reorder (vim: `:sort` on one
+            // line is a no-op)
+            return;
+        }
+        let mut lines: Vec<String> = (first..=last).map(|l| ctx.buf.line_content(l)).collect();
+        let lower = |s: &str| {
+            if ignore_case {
+                s.to_lowercase()
+            } else {
+                s.to_owned()
+            }
+        };
+        lines.sort_by(|a, b| lower(a).cmp(&lower(b)));
+        if unique {
+            lines.dedup();
+        }
+        if reverse {
+            lines.reverse();
+        }
+        let start = ctx.buf.line_start(first);
+        let end = ctx.buf.line_range(last).end;
+        // the range includes the last line's terminating newline — the join
+        // must give it back or `:%sort` shaves the buffer's final newline
+        let had_trailing_newline = ctx.buf.slice(start..end).ends_with('\n');
+        let mut new_text = lines.join("\n");
+        if had_trailing_newline {
+            new_text.push('\n');
+        }
+        self.begin_edit();
+        self.edit_replace(ctx, start..end, &new_text);
+        self.end_edit();
+        self.bump(ctx);
+        self.cursor.offset = ctx.buf.first_non_blank(first);
+        self.cursor.desired_col = None;
+        ctx.host.changed();
+        self.commit_change_record();
+    }
+
     /// `:{range}y[ank] [x] [count]` — yank the range's lines into a register
-    /// (default: the unnamed/yank path like `yy`). A numeric argument is a
-    /// COUNT (extend the range that many lines down, vim's `:2y 3`), an
-    /// alphabetic one names the register. The buffer is untouched.
+    /// (default: the unnamed/yank path like `yy`). The second argument is a
+    /// COUNT that extends the range that many lines down whether or not a
+    /// register named it (`:2y a 3` = three lines into `"a`, vim 9.1 probe);
+    /// a lone numeric first argument is a count (`:2y 3`). The buffer is
+    /// untouched.
     fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
         let mut register = None;
         let mut extra_lines = 0usize;
-        if let Some(head) = args.chars().next() {
-            if head.is_ascii_digit() {
-                extra_lines = args.parse::<usize>().unwrap_or(1).saturating_sub(1);
-            } else if head.is_ascii_alphanumeric() {
-                register = Some(head);
+        let mut parts = args.split_whitespace();
+        if let Some(head) = parts.next() {
+            if let Some(c) = head.chars().next() {
+                if c.is_ascii_digit() {
+                    extra_lines = head.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                } else if c.is_ascii_alphanumeric() {
+                    register = Some(c);
+                    // the count may follow the register (`:y a 2`)
+                    if let Some(count) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                        extra_lines = count.saturating_sub(1);
+                    }
+                }
             }
         }
         let last = last
@@ -638,20 +746,38 @@ impl VimState {
     /// `:[%]s{sep}pattern{sep}replacement{sep}[flags]` — over the current
     /// line, or every line with `%`. `g` replaces all matches per line
     /// (default: first match per line). Replacement follows Rust regex
-    /// expansion (`$1`, documented divergence from vim's `\1`). Returns
-    /// false when `line` is not a substitute command at all.
+    /// expansion (`$1`, documented divergence from vim's `\1`). The bare
+    /// `:s` repeats the last substitute (vim; same on the current line).
+    /// Returns false when `line` is not a substitute command at all.
     fn ex_substitute(&mut self, ctx: &mut Ctx, line: &str, range: (usize, usize)) -> bool {
         let Some(after_s) = line.strip_prefix('s') else {
             return false;
         };
+        if after_s.is_empty() {
+            // bare `:s` = repeat the last substitute on the current line
+            return match self.cmdline.last_substitute.clone() {
+                Some(last) => {
+                    self.execute_ex(ctx, &last);
+                    true
+                }
+                None => {
+                    // vim: E33 "No previous substitute regular expression"
+                    ctx.host
+                        .status_message("E33: No previous substitute regular expression");
+                    ctx.host.bell();
+                    true
+                }
+            };
+        }
         let Some(sep) = after_s.chars().next() else {
             ctx.host.bell();
             return true;
         };
         if sep.is_alphanumeric() {
-            // `:sort` & friends are not supported; don't mangle them
-            ctx.host.bell();
-            return true;
+            // words starting with `s` that are not commands of this engine
+            // (`:sort` is handled before this parser) get the standard
+            // unknown-command report instead of a bare bell
+            return false;
         }
         let mut parts = after_s[sep.len_utf8()..].split(sep);
         let (Some(pattern), Some(replacement)) = (parts.next(), parts.next()) else {
@@ -669,6 +795,10 @@ impl VimState {
             match self.search.pattern.clone() {
                 Some(p) => p,
                 None => {
+                    // same message channel as the `n` miss: a bare bell hid
+                    // WHY nothing happened
+                    ctx.host
+                        .status_message("E35: No previous regular expression");
                     ctx.host.bell();
                     return true;
                 }
@@ -680,6 +810,9 @@ impl VimState {
             ctx.host.bell();
             return true;
         };
+        // remember for `&` / bare `:s` — even on E486, vim retries the same
+        // command and reports the same miss
+        self.cmdline.last_substitute = Some(line.to_owned());
         // `i` forces case-insensitive for this substitution, `I` forces
         // case-sensitive (overriding ignorecase/smartcase, like vim)
         if flags.contains('i') {
