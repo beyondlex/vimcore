@@ -245,3 +245,65 @@ fn block_session_ignores_host_click() {
         "点击不移动打字点，复制完整落在块行上"
     );
 }
+
+// ---- 7. 体验补充（块选 O / :marks 特殊标记 / :bN 别名） ------------------------
+
+/// vim 9.1 探针 probe10：块 anchor(2,2) cursor(3,3) 时 `O` → cursor(2,3)
+/// （同列、换到块另一行端）；`o` → cursor(2,2)（对角角，既有 SwapEnds）。
+#[test]
+fn block_visual_O_moves_to_other_row_same_col() {
+    let mut f = Fixture::new("aaaa\nbbbb\ncccc\ndddd\n");
+    f.feed(["2", "g", "g", "l"]); // line1 col1 (0-based)
+    f.feed(["<C-v>", "j", "l"]); // block lines1-2 cols1-2，cursor (2,2)
+    f.feed(["O"]);
+    let (anchor, cursor, _) = f.vim.visual_selection().unwrap();
+    assert_eq!(f.buf.offset_to_line(cursor), 1, "O 把光标换到 anchor 行");
+    assert_eq!(
+        vimcore::buffer::display_column(&f.buf, cursor),
+        2,
+        "光标列保持不变"
+    );
+    assert_eq!(f.buf.offset_to_line(anchor), 2, "anchor 换到原光标行");
+    assert_eq!(
+        vimcore::buffer::display_column(&f.buf, anchor),
+        1,
+        "anchor 列保持不变（选区矩形在屏幕上不变）"
+    );
+
+    // 单行块 O：无事发生
+    let mut f = Fixture::new("aaaa\nbbbb\n");
+    f.feed(["<C-v>", "l"]);
+    let before = f.vim.visual_selection().unwrap();
+    f.feed(["O"]);
+    assert_eq!(f.vim.visual_selection(), Some(before), "单行块 O 不动");
+}
+
+/// 字符/行可视模式没有 `O`（vim 仅块选支持）——响铃。
+#[test]
+fn char_visual_O_bells() {
+    let mut f = Fixture::new("abc\n");
+    f.feed(["v", "l", "O"]);
+    assert!(f.host.bells > 0, "char visual 的 O 响铃");
+}
+
+/// `:marks` 现在也列出 `.`（最后变更）与 `^`（最后插入退出）。
+#[test]
+fn marks_listing_shows_change_and_insert_specials() {
+    let mut f = Fixture::new("alpha\nbeta\n");
+    f.feed(["x"]); // 变更 → `.
+    f.feed(["i"]); // 插入会话 → `^
+    f.type_text("Z");
+    f.feed(["escape"]);
+    f.feed([":", "m", "a", "r", "k", "s", "\n"]);
+    let msgs = f.host.statuses.join("\n");
+    assert!(msgs.contains(".  line 1"), ":marks 应列出 `.`（{msgs}）");
+    assert!(msgs.contains("^  line 1"), ":marks 应列出 `^`（{msgs}）");
+}
+
+/// `:bN` 是 `:bprev` 的 vim 别名（旧行为 E492）。
+#[test]
+fn bN_aliases_bprev() {
+    let mut f = Fixture::new("text\n");
+    f.feed([":", "b", "N", "\n"]);
+    assert_eq!(f.host.bells, 0, ":bN 应命中 bprev 而非 E492 响铃");
+}

@@ -397,6 +397,12 @@ impl VimState {
                     ctx.host
                         .status_message(&Self::mark_line(ctx.buf, name, offset));
                 }
+                if let Some(offset) = self.marks.last_change {
+                    ctx.host.status_message(&Self::mark_line(ctx.buf, '.', offset));
+                }
+                if let Some(offset) = self.marks.last_insert_exit {
+                    ctx.host.status_message(&Self::mark_line(ctx.buf, '^', offset));
+                }
                 if let Some((lo, _)) = self.marks.last_visual {
                     ctx.host.status_message(&Self::mark_line(ctx.buf, '<', lo));
                 }
@@ -421,7 +427,7 @@ impl VimState {
             }
             return;
         }
-        if line == "bprev" || line == "bprevious" || line == "bp" {
+        if line == "bprev" || line == "bprevious" || line == "bp" || line == "bN" {
             if !ctx.host.cycle_buffer(false) {
                 ctx.host.bell();
             }
@@ -506,28 +512,16 @@ impl VimState {
     /// newlines shown as `^J` (vim's rendering) and the tail elided.
     fn register_line(name: char, reg: &crate::registers::Register) -> String {
         const MAX_TEXT: usize = 50;
+        let flat = reg.text.trim_end_matches('\n').replace('\n', "^J");
+        let mut shown: String = flat.chars().take(MAX_TEXT).collect();
+        if flat.chars().count() > MAX_TEXT {
+            shown.push('…');
+        }
         let kind = match reg.kind {
             crate::registers::RegisterKind::Charwise => "c",
             crate::registers::RegisterKind::Linewise => "l",
             crate::registers::RegisterKind::Blockwise => "b",
         };
-        let mut shown: String = reg
-            .text
-            .trim_end_matches('\n')
-            .replace('\n', "^J")
-            .chars()
-            .take(MAX_TEXT)
-            .collect();
-        if reg
-            .text
-            .trim_end_matches('\n')
-            .replace('\n', "^J")
-            .chars()
-            .count()
-            > MAX_TEXT
-        {
-            shown.push('…');
-        }
         format!("\"{name}  {kind}  {shown}")
     }
 
