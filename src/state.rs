@@ -1099,7 +1099,7 @@ impl VimState {
     /// recompute and republish so `hlsearch` visuals follow the text. No-op
     /// while nothing is published (`:noh`, no pattern) — editing must not
     /// revive cleared highlights.
-    fn republish_search(&mut self, ctx: &mut Ctx) {
+    pub(crate) fn republish_search(&mut self, ctx: &mut Ctx) {
         // hosts embedding the engine in huge-file editors can turn this off
         // (set_hlsearch_live_update(false)) and call refresh_highlights on
         // their own schedule (e.g. 150ms after the last edit)

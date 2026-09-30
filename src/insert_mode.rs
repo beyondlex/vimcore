@@ -64,6 +64,11 @@ impl VimState {
                             }
                             self.begin_edit();
                             self.edit_delete(ctx, at..at + c.len_utf8());
+                            // every other edit path republishes the hlsearch
+                            // scan; skipping it here left `last_matches`
+                            // pointing mid-character (fuzz round 10) — the
+                            // stale cache is what `cancel_cmdline` republishes
+                            self.republish_search(ctx);
                             ctx.host.changed();
                         }
                         return ProcessOutcome::Consumed;
@@ -188,6 +193,7 @@ impl VimState {
                             Some(c) => self.edit_replace(ctx, prev..at, &c.to_string()),
                             None => self.edit_delete(ctx, prev..at),
                         }
+                        self.republish_search(ctx);
                         self.cursor.offset = prev;
                         ctx.host.changed();
                     }
@@ -195,6 +201,7 @@ impl VimState {
                     // crossed the line start: join with the previous line
                     self.begin_edit();
                     self.edit_delete(ctx, at - 1..at);
+                    self.republish_search(ctx);
                     self.cursor.offset = at - 1;
                     ctx.host.changed();
                 }
@@ -211,12 +218,14 @@ impl VimState {
                 // rows on exit: a backspace that undoes typed text must
                 // shrink it too, or the replicas carry the deleted char
                 self.block_backspace_undo(at);
+                self.republish_search(ctx);
                 ctx.host.changed();
             }
         } else if at > 0 {
             // join with the previous line
             self.begin_edit();
             self.edit_delete(ctx, at - 1..at);
+            self.republish_search(ctx);
             self.cursor.offset = at - 1;
             ctx.host.changed();
         }
@@ -257,6 +266,7 @@ impl VimState {
                 self.begin_edit();
                 self.edit_delete(ctx, target..at);
                 self.cursor.offset = target;
+                self.republish_search(ctx);
                 ctx.host.changed();
             }
             return;
@@ -271,6 +281,7 @@ impl VimState {
             self.begin_edit();
             self.edit_delete(ctx, at - 1..at);
             self.cursor.offset = at - 1;
+            self.republish_search(ctx);
             ctx.host.changed();
         }
     }
@@ -287,6 +298,7 @@ impl VimState {
             self.begin_edit();
             self.edit_delete(ctx, line_start..at);
             self.cursor.offset = line_start;
+            self.republish_search(ctx);
             ctx.host.changed();
             return;
         }
@@ -298,6 +310,7 @@ impl VimState {
             self.begin_edit();
             self.edit_delete(ctx, at - 1..at);
             self.cursor.offset = at - 1;
+            self.republish_search(ctx);
             ctx.host.changed();
         }
     }
