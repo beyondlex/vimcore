@@ -287,6 +287,21 @@ fn block_put_with_short_register_leaves_exhausted_rows_empty() {
     assert_eq!(f.buf.slice(0..f.buf.len()), "aaaa\nbbbb\ncc\n");
 }
 
+/// `<C-u>` 在行首与上一行并线（vim 9.1 探针：['aaaa','bbbb'] (2,1)
+/// `i<C-u>x<Esc>` → ['aaaaxbbbb']），旧行为钳在行首不动。
+#[test]
+fn insert_ctrl_u_at_line_start_joins_previous_line() {
+    let mut f = Fixture::at("aaaa\nbbbb", 1, 0);
+    f.feed(["i"]);
+    f.feed_raw(vimcore::key::Key {
+        modifiers: vimcore::key::Modifiers::ctrl(),
+        kind: vimcore::key::KeyKind::Char('u'),
+    });
+    f.type_text("x");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.buf.slice(0..f.buf.len()), "aaaaxbbbb");
+}
+
 // ---- 12. insert_change_pos 跨行移动后 floor（fuzz round9 抓取） -----------------
 
 /// fuzz round9（seed 7）抓取：insert 会话首敲位置（insert_change_pos）是
