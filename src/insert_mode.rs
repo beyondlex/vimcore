@@ -244,7 +244,8 @@ impl VimState {
     /// (9.1 probe: `i<C-w>` at (2,1) of ['aaaa','bbbb'] → ['aaaabbbb'] and
     /// ['aaaa','  bbbb','cc'] at (3,1) keeps both lines' text). The block-
     /// session lock: replica offsets assume every row stays a row, so the
-    /// join is refused with a bell (the same rule as the line-start BS).
+    /// join is refused with a bell (the same rule as the line-start BS and
+    /// `<C-u>` below).
     fn insert_delete_word_before(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
@@ -274,6 +275,11 @@ impl VimState {
         }
     }
 
+    /// `<C-u>`: delete to the line start; at the line start vim JOINS with
+    /// the previous line (removes the newline — 9.1 probe: `i<C-u>` at (2,1)
+    /// of ['aaaa','bbbb'] → ['aaaabbbb']), so the dead end does the same
+    /// edit the line-start BS does. Block sessions refuse the join (the
+    /// replica offsets assume every row stays a row).
     fn insert_delete_to_line_start(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
@@ -281,6 +287,17 @@ impl VimState {
             self.begin_edit();
             self.edit_delete(ctx, line_start..at);
             self.cursor.offset = line_start;
+            ctx.host.changed();
+            return;
+        }
+        if self.in_block_insert() {
+            ctx.host.bell();
+            return;
+        }
+        if at > 0 {
+            self.begin_edit();
+            self.edit_delete(ctx, at - 1..at);
+            self.cursor.offset = at - 1;
             ctx.host.changed();
         }
     }
