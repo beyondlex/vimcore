@@ -315,11 +315,8 @@ impl VimState {
         // would sit inside a multi-byte cursor char (same rule as
         // `exit_visual`; consumers floor it, but stored bounds stay clean)
         let end = buf.next_char_offset(hi).unwrap_or(hi);
-        self.marks.last_visual = Some((lo, end));
-        // `gv` reads the engine-level span (kind included), not just the
-        // marks — without this a visual `:` command never becomes the
-        // "last visual area"
-        self.last_visual = Some((lo, end, kind));
+        // one source of truth (kind included) — `gv` and `'<`/`'>` read it
+        self.marks.last_visual = Some((lo, end, kind));
         self.visual_anchor = None;
         self.marks.active_visual = None;
         self.mode = Mode::Normal;
@@ -398,12 +395,14 @@ impl VimState {
                         .status_message(&Self::mark_line(ctx.buf, name, offset));
                 }
                 if let Some(offset) = self.marks.last_change {
-                    ctx.host.status_message(&Self::mark_line(ctx.buf, '.', offset));
+                    ctx.host
+                        .status_message(&Self::mark_line(ctx.buf, '.', offset));
                 }
                 if let Some(offset) = self.marks.last_insert_exit {
-                    ctx.host.status_message(&Self::mark_line(ctx.buf, '^', offset));
+                    ctx.host
+                        .status_message(&Self::mark_line(ctx.buf, '^', offset));
                 }
-                if let Some((lo, _)) = self.marks.last_visual {
+                if let Some((lo, _, _)) = self.marks.last_visual {
                     ctx.host.status_message(&Self::mark_line(ctx.buf, '<', lo));
                 }
                 if let Some(offset) = self.marks.last_jump {

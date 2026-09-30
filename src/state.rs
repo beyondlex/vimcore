@@ -165,7 +165,6 @@ pub struct VimState {
     pub mode: Mode,
     pub cursor: Cursor,
     pub(crate) visual_anchor: Option<usize>,
-    pub(crate) last_visual: Option<(usize, usize, VisualKind)>,
 
     // pending command assembly
     count: Option<usize>,
@@ -303,7 +302,6 @@ impl VimState {
                 desired_col: None,
             },
             visual_anchor: None,
-            last_visual: None,
             count: None,
             register: None,
             register_pending: false,
@@ -1156,14 +1154,6 @@ impl VimState {
         for pos in self.jumps.iter_mut() {
             *pos = floor(*pos);
         }
-        // `gv` reads the ENGINE-side last_visual (kind-bearing), not the
-        // marks pair — both copies must be floored (fuzz round 8: a host
-        // undo after an equal-length replace left the engine copy mid-char
-        // while the marks copy was clean)
-        if let Some((a, b, _)) = self.last_visual.as_mut() {
-            *a = floor(*a);
-            *b = floor(*b);
-        }
     }
 
     /// Apply a mark-style offset adjustment to the changelist / jumplist.
@@ -1191,14 +1181,6 @@ impl VimState {
         Self::adjust_positions(&mut self.changes, |p| if p > at { p + len } else { p });
         Self::adjust_positions(&mut self.jumps, |p| if p > at { p + len } else { p });
         self.edit_generation += 1;
-        if let Some((a, b, _)) = &mut self.last_visual {
-            if *a > at {
-                *a += len;
-            }
-            if *b > at {
-                *b += len;
-            }
-        }
     }
 
     pub(crate) fn edit_delete(&mut self, ctx: &mut Ctx, range: Range<usize>) {
@@ -1221,18 +1203,6 @@ impl VimState {
         Self::adjust_positions(&mut self.changes, adjust);
         Self::adjust_positions(&mut self.jumps, adjust);
         self.edit_generation += 1;
-        if let Some((a, b, _)) = &mut self.last_visual {
-            if *a >= range.end {
-                *a -= range.len();
-            } else if *a > range.start {
-                *a = range.start;
-            }
-            if *b >= range.end {
-                *b -= range.len();
-            } else if *b > range.start {
-                *b = range.start;
-            }
-        }
         // Relative shifts keep offsets on char boundaries of the OLD text,
         // but two shapes can still leave them unaddressable: a deletion
         // reaching the buffer end shifts offsets past the NEW end, and an
@@ -1257,19 +1227,6 @@ impl VimState {
         }
         for pos in self.jumps.iter_mut() {
             floor(pos);
-        }
-        // BOTH last_visual copies: `'<`/`'>` resolve the marks pair, `gv`
-        // reads the engine-side (kind-bearing) one — reflooring only the
-        // marks copy let `gv` restore a mid-char anchor on multi-byte text
-        // (fuzz round 8: equal-length replaces redraw the byte grid under
-        // the engine copy)
-        if let Some((a, b)) = self.marks.last_visual.as_mut() {
-            floor(a);
-            floor(b);
-        }
-        if let Some((a, b, _)) = self.last_visual.as_mut() {
-            floor(a);
-            floor(b);
         }
     }
 
@@ -1299,18 +1256,6 @@ impl VimState {
         Self::adjust_positions(&mut self.changes, adjust);
         Self::adjust_positions(&mut self.jumps, adjust);
         self.edit_generation += 1;
-        let delta = new_len as isize - range.len() as isize;
-        if let Some((a, b, _)) = &mut self.last_visual {
-            let apply = |pos: &mut usize| {
-                if *pos >= range.end {
-                    *pos = (*pos as isize + delta).max(0) as usize;
-                } else if *pos > range.start {
-                    *pos = range.start;
-                }
-            };
-            apply(a);
-            apply(b);
-        }
         self.refloor_stored_offsets(ctx);
     }
 
@@ -1542,8 +1487,7 @@ impl VimState {
         if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
             let floor = |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
             let (lo, hi) = (floor(lo), floor(hi));
-            self.marks.last_visual = Some((lo.min(hi), hi.max(lo)));
-            self.last_visual = Some((lo.min(hi), hi.max(lo), kind));
+            self.marks.last_visual = Some((lo.min(hi), hi.max(lo), kind));
         }
         self.republish_search(ctx);
         self.end_edit();
@@ -1777,8 +1721,7 @@ impl VimState {
         // breaking `gv`
         if let Some((lo, hi, kind)) = self.clamped_visual_bounds(ctx.buf) {
             let end = ctx.buf.next_char_offset(hi).unwrap_or(hi);
-            self.marks.last_visual = Some((lo, end));
-            self.last_visual = Some((lo, end, kind));
+            self.marks.last_visual = Some((lo, end, kind));
             self.cursor.offset = lo;
         }
         self.visual_anchor = None;
@@ -2029,8 +1972,7 @@ impl VimState {
     pub(crate) fn finish_visual_op(&mut self, ctx: &mut Ctx) {
         if let Some((lo, hi, kind)) = self.clamped_visual_bounds(ctx.buf) {
             let end = ctx.buf.next_char_offset(hi).unwrap_or(hi);
-            self.marks.last_visual = Some((lo, end));
-            self.last_visual = Some((lo, end, kind));
+            self.marks.last_visual = Some((lo, end, kind));
         }
         self.visual_anchor = None;
         // the selection is resolved — the live range must go, or `parse_range`
@@ -3246,7 +3188,7 @@ impl VimState {
             }
             // gv: re-select the last visual range (its kind, too)
             NormalCmd::RestoreVisual => {
-                if let Some((lo, hi, kind)) = self.last_visual {
+                if let Some((lo, hi, kind)) = self.marks.last_visual {
                     // floor the anchor too (defensive: the stored span is
                     // refloored on every edit, but a host text swap between
                     // engines must not resurrect a mid-char offset)
@@ -3398,8 +3340,9 @@ impl VimState {
                     crate::buffer::display_column(ctx.buf, anchor),
                     crate::buffer::display_column(ctx.buf, cursor),
                 );
-                self.visual_anchor =
-                    Some(crate::buffer::offset_for_display_column(ctx.buf, c_line, a_col));
+                self.visual_anchor = Some(crate::buffer::offset_for_display_column(
+                    ctx.buf, c_line, a_col,
+                ));
                 self.cursor.offset =
                     crate::buffer::offset_for_display_column(ctx.buf, a_line, c_col);
                 self.cursor.desired_col = None;

@@ -291,7 +291,7 @@ fn visual_delete_records_clamped_last_visual() {
     f.vim.set_visual_range(&f.buf, 0, 0);
     f.feed(["V", "G", "d"]);
     assert_eq!(f.text(), "", "whole-buffer linewise selection wiped");
-    let (lo, hi) = f.vim.marks.last_visual.expect("last_visual recorded");
+    let (lo, hi, _) = f.vim.marks.last_visual.expect("last_visual recorded");
     assert!(hi <= f.buf.len(), "last_visual {lo}..{hi} past the new end");
     // gv after the wipe must not panic and stays in-bounds
     f.feed(["g", "v"]);
