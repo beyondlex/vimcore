@@ -19,6 +19,7 @@
 
 mod common;
 
+use common::Fixture;
 use vimcore::key::parse_key_sequence;
 
 fn fuzz_xorshift(state: &mut u64) -> u64 {
@@ -325,6 +326,105 @@ fn fuzz_round10_holds_invariants() {
                 for (i, m) in f.vim.search.last_matches.iter().enumerate() {
                     assert_addressable(&format!("match{i}.start"), m.start, &text, &ctx);
                     assert_addressable(&format!("match{i}.end"), m.end, &text, &ctx);
+                }
+            }
+        }
+    }
+}
+
+// ---- Ex 参数面轰炸：固定命令串之外的任意参数组合 ------------------------------
+
+/// Ex 命令面 + 任意参数组合的 panic 猎捕：正则注入、怪分隔符、巨行号、
+/// 负偏移、mark 名注入、非 ASCII 参数。
+#[test]
+fn ex_argument_fuzz_holds() {
+    let cmds = [
+        ":s/^/$/g",
+        ":s/\\x",
+        ":s/(/x/",
+        ":s/[/",
+        "x/",
+        ":s/x/y",
+        ":s//x/",
+        ":s/\\\\/y/",
+        ":s/中/文/g",
+        ":s/./中/",
+        ":s/中*/-/",
+        ":5,2d",
+        ":99d",
+        ":99y",
+        ":0d",
+        ":$y",
+        ":+2,-1j",
+        ":.+1d",
+        ":'a,'bd",
+        ":5j 99",
+        ":sort!iu",
+        ":sort ix",
+        ":sort 中",
+        ":y 中",
+        ":d !",
+        ":d ! 2",
+        ":y a b",
+        ":set ts=0",
+        ":set sw=abc",
+        ":set ts?",
+        ":set 中",
+        ":set!",
+        ":marks",
+        ":reg",
+        ":action",
+        ":action 中 空格",
+        ":action  a  b ",
+        ":",
+        ":5",
+        ":-5",
+        ":%",
+        ":@a",
+        ":noh!",
+        ":w!",
+        ":q a",
+        ":99999999999999999999d",
+        ":'<",
+        ":'<,$d",
+        ":.,.+999999999d",
+        ":s/\\/",
+        ":s/a\\/b/c/",
+        ":substitute",
+        ":substitutex/y/",
+        ":sor",
+        ":jjoin",
+    ];
+    let buffers = ["", "a\nb\n", "中文\nx/y\n", "a(b[c]d)e\n", "foo bar\n"];
+    for seed in 0..64u64 {
+        let mut state = 0xDEADBEEF ^ seed.wrapping_mul(0x9E37_79B9);
+        for round in 0..40 {
+            let mut f = Fixture::new(buffers[round % buffers.len()]);
+            let cur = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 1);
+            f.vim.set_cursor_offset(&f.buf, cur);
+            // 随机 1-4 条 Ex 命令串行执行
+            for _ in 0..1 + fuzz_xorshift(&mut state) % 4 {
+                let cmd = cmds[(fuzz_xorshift(&mut state) as usize) % cmds.len()];
+                for c in cmd.chars() {
+                    let key = if c == '\n' {
+                        vimcore::key::Key::named("enter")
+                    } else {
+                        vimcore::key::Key::char(c)
+                    };
+                    f.feed_raw(key);
+                }
+                f.feed_raw(vimcore::key::Key::named("enter"));
+                let text = f.text();
+                let off = f.vim.cursor_offset();
+                assert!(
+                    off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
+                    "seed {seed} round {round} cmd {cmd}: cursor {off} bad in {text:?}"
+                );
+                for (name, mo) in f.vim.marks.items() {
+                    assert!(
+                        mo <= text.len() && (mo == text.len() || text.is_char_boundary(mo)),
+                        "seed {seed} round {round} cmd {cmd}: mark {name} {mo} bad in {text:?}"
+                    );
                 }
             }
         }
