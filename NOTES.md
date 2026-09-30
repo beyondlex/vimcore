@@ -5,6 +5,71 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺、第七轮检视增补（2026-09-30，回归测试在 `tests/parity_round7.rs`、
+fuzz 在 `tests/fuzz_round7.rs`）
+
+本轮通读全部 `src/`，读码列可疑点 → vim 9.1 探针实证 → 修复。另有
+两条读码怀疑被**证伪**未改动：`Options::describe("notabstop")` 正确
+返回 None（`no` 前缀不误吞数值选项）；`:sort` 单行范围与 `:sort u`
+单行范围在 vim 下都是无操作，引擎原有 `!unique` 守卫之外的行为一致。
+
+### 新修复（语义类均先跑 vim 9.1 探针；fuzz 类标注抓取方式）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **visual 算子后 `:'<,'>` 读到过期范围** | 探针复现：`Vjd` 后 `:'<,'>d` 把缓冲删空。`marks.active_visual`（live 选区）在 `finish_visual_op` 落账后不清除，而 `parse_range` 的 `'<` 解析**优先**读它——visual 算子之后所有 `'<` 范围命令都命中过期偏移。修复：`finish_visual_op` 清除 live 选区 |
+| 2 | **visual 文本对象扩展不更新 live 范围** | 探针复现：跨行 `vi(` 后 `:s/ba/X/` 只替换了塌缩行。visual 模式下只有 motion 扩展会更新 `active_visual`，对象扩展（`viw`/`vi(`）漏了。修复：对象扩展后同步 |
+| 3 | **visual `c` / 块 `I`/`A`/`c` 后 `gv` 失效** | vim 探针：`viwcX<Esc>` 后 `gv` 重选编辑前字节范围（`'<` 保持 (1,1)、`'>` 保持 (1,5)），块 I 后恢复原块。引擎 insert 会话绕过 `finish_visual_op`，`last_visual` 永不更新 → gv 落空。新增 `pending_visual_marks` 暂存：三处 visual→insert 入口在改动前记录选区，`exit_insert` 会话结束后写回（floor 到当前文本） |
+| 4 | **`hlsearch=false` 时取消 `/` 提示符高亮泄漏** | hlsearch 关闭 + incsearch 打开：预览高亮在 Esc 后被 `cancel_cmdline` 用 `last_matches`（上一模式的匹配）顶替，留下永久高亮。修复：取消时尊重 hlsearch |
+| 5 | **`g<Esc>` 误响铃、`3"<Esc>` count 存活** | normal_key 的 Esc 检查排在 trie walk 之后：`g<Esc>` 走 trie-miss 重试路径响铃；register-pending 分支吞掉 Esc 而 count 存活，随后的 `dd` 变成删 3 行。修复：Esc 检查提前到全部 pending 状态之前 |
+| 6 | **`:sort u` 单行范围建幻影 undo 组** | 单行没有可去重的连续重复，旧 `!unique` 守卫漏掉 `u` 形态——无变化的 replace 宣告 undo 组，空耗一个 `u`。修复：单行一律 no-op |
+| 7 | **visual `:` 执行后 `'<`/`'>` 被重写**（消除分歧 #14） | `:s` 把光标放到行首非空白，按「锚点..执行后光标」重写让选区塌缩、破坏 `gv` 二次语义。修复：`cmdline_visual` 记录 prompt 时光标，`close_visual_after_cmdline` 按提示符时范围落账（vim：保留执行的 range） |
+| 8 | **`gn` 多字节匹配光标 mid-char**（fuzz 抓取） | `cursor = range.end - 1` 字节算术在匹配以多字节字符结尾时（如 `中`）落进字符内部，宿主 `offset_to_line`/`slice` 直接 panic。`state.rs` 与 `motions.rs` 两处同款，改 `prev_char_offset` 取末字符起点 |
+| 9 | **`db` 行首 usize 下溢 panic**（fuzz 抓取） | 列 1 规则只建模了向下跨行，`db` 向上跨行时 `target_line - 1` 下溢。vim 探针：`db` 在行首 = linewise 删除**上一行**（['abc','def'] → ['def']）。补齐镜像分支（覆盖 target_line..=start_line-1） |
+| 10 | **块插入会话光标偏移陈旧**（fuzz 抓取） | `exit_insert` 复制行在光标上方插入后，光标字节偏移未跟随平移——逻辑位置落在 `text.len()` 字节之前（多字节文本上 mid-char）。修复：插入位在光标上方时同步平移光标。连带：块会话中 insert 回车能把光标移到另一行走飞复制假设——与纵向移动同款封锁（响铃） |
+| 11 | **存储偏移可寻址性缺口**（fuzz 抓取） | 两形态逃过相对调整：删除触及缓冲末尾时偏移越过新长度（删空缓冲后 `last_visual` 越界）；等长替换（`gJ` 的 `\n`→空格）重画字节网格把内部 mark 留在多字节字符中间。`edit_delete`/`edit_replace` 新增 `refloor_stored_offsets`——全部存储偏移（marks/changes/jumps/last_visual）floor+clamp 回当前文本 |
+
+### 新功能
+
+- **`:d {register}`**：`:[range]d[elete] [x] [count]` 的寄存器参数落地
+  （`:1,2d a` 存入 `"a`，vim 同款），参数解析与 `:y` 共用
+  `parse_reg_count`；不带寄存器时仍走编号环/`"-` 路径。已知分歧 #7
+  就此消除。
+
+### 新增已知分歧（接续前表编号）
+
+29. 块插入会话结束后光标停在**打字行**的插入位（逻辑位随复制平移
+    修正）；vim 停在**顶行**插入列（探针 `x<C-v>jjI#<Esc>` → [1,1]）。
+    行为差异不影响文本，暂不追。
+
+### 悬而未决（本轮记录、未改动）
+
+- **`:s` 空匹配**（如 `s/x*/-/`）引擎策略是「零宽匹配不计数不替换，
+  全空则 E486」，vim 会逐位展开（`s/x*/-/` 改写整行）。推进规则未探
+  针实证，维持第六轮悬置。
+- `parse_range` 对负行号（`:-5`）饱和到 0，vim 报 E16。无害分歧。
+- `set_cursor_offset` 在 visual 模式把 anchor 搬到点击点（选区塌缩成
+  零宽但停留 visual）——需消费方确认意图，前轮悬置维持。
+- Tab 显示宽度按 1 记账（tabstop 感知显示列牵动全链），前轮悬置维持。
+- `set`/`mark` 等参数校验宽松：`m<Space>` 静默忽略（vim E355）、
+  `q:` 记录到寄存器 `:` 而非开命令窗口。无害，暂缓。
+
+### 体验备注（本轮新增）
+
+- `Esc` 现在是 normal 模式最高优先级的「全部取消」键：任何 pending
+  （count/寄存器前缀/算子/多键序列）+ 高亮一并清掉，与 vim 一致。
+- `:reg`/`:marks`/`:set` 三类只读反馈通道（第六轮引入）继续有效；
+  本轮补齐的 `:d a` 让删除也可进命名寄存器，`:reg` 可见。
+
+### 性能备注（本轮复核）
+
+- bench_probe 全量复跑：`n` 连跳 3.6µs/键、hlsearch 重扫 0.30ms/次
+  （900KB/万匹配，优于第六轮记录的 0.75ms）、`:%s` 600KB 5.6ms。
+  100x `x` 删除 232µs/键的大头是宿主 String 缓冲的 O(n) memmove
+  （bench 的 `B` 宿主 `delete_range` 即 `String::replace_range`），
+  引擎侧无新热点。refloor_stored_offsets 新增的每次编辑 O(存储偏移
+  数) 开销在此量级下不可见。
+
 ## 〇⁺⁺、第六轮检视增补（2026-09-30，回归测试在 `tests/parity_round6.rs`）
 
 本轮通读全部 `src/`（约 8k 行），先读码列可疑点、再 vim 9.1 探针逐例
@@ -240,7 +305,8 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
    剪贴板没有 charwise/linewise 元数据，多行 charwise 文本会被按行粘贴。
    若宿主能提供元数据，可在 `get_for_paste` 扩展。
 6. **`:` 范围内 `;` 与 `,` 等价**（vim 的 `;` 会把光标依次落在中间地址）。
-7. **`:d` 的命名寄存器参数被忽略**（`:1,2d a` 不存入 `"a`）。
+7. ~~`:d` 的命名寄存器参数被忽略~~（**第七轮已修复**：`:1,2d a`
+   存入 `"a`）。
 8. **句子 motion 只认 `.!?` 单字符**，无 `...`、换行跟随等规则
    （`Motion::SentenceNext` 注释已声明）。
 9. **tag 对象（`it`/`at`）**：属性值里的 `<`/`>` 会干扰解析；光标恰好
@@ -252,8 +318,8 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
     `ignored` 收集（IdeaVim 同款取舍）。
 13. **`""yy` 落 `"0`**：`""` 即匿名寄存器，yank 必写 `"0`，行为与 vim
     一致；但 `""dd` 不进数字环（vim 也如此）。
-14. **visual `:` 执行后 `'<`/`'>` 被按「锚点..当前光标」重写**，与 vim
-    「保留执行前范围」不同。影响 `gv` 二次语义，待定是否修。
+14. ~~visual `:` 执行后 `'<`/`'>` 被按「锚点..当前光标」重写~~
+    （**第七轮已修复**：按提示符时的选区范围落账，`gv` 二次语义恢复）。
 15. **`o`/`A` 进入 insert 后的块复制不含多行文本**：块插入复制的文本
     含 `\n` 时每行都会粘进（无宿主可见的崩坏，但语义未对齐 vim）。
 
