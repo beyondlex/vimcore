@@ -517,7 +517,12 @@ impl Motion {
                 match found {
                     Some(range) => {
                         vim.search.last_found_match = Some(range.clone());
-                        let last = range.end.saturating_sub(1).max(range.start);
+                        // last char START (not `end - 1` bytes: a multi-byte
+                        // final char would put the cursor mid-character)
+                        let last = buf
+                            .prev_char_offset(range.end)
+                            .unwrap_or(range.start)
+                            .max(range.start);
                         MotionResult::new(last, MotionKind::Inclusive)
                     }
                     None => MotionResult::stuck(vim.cursor.offset),

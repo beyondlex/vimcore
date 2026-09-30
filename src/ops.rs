@@ -114,30 +114,45 @@ pub fn span_from_motion(
         // linewise promotion applies (`d2w` from a blank-only line removes
         // the last line INCLUDING its newline — vim 9.1 probe `d2w@0` on
         // "AAAA / \"   \" / BBBB\\n" leaves ["AAAA"], not ["AAAA", ""]).
-        let range_end = if result.offset >= buf.len() {
+        //
+        // The column-1 rules cover BOTH crossing directions: `w` lands at the
+        // target line's start going DOWN, `b`/`B` from a line start go UP.
+        // vim 9.1 probes: `db` at line start deletes the PREVIOUS line
+        // linewise (['abc','def'] → ['def']), `dB` on an indented line ditto.
+        let phantom = result.offset >= buf.len();
+        let first_line = start_line.min(target_line);
+        let last_covered = start_line.max(target_line) - 1;
+        let range_end = if phantom {
             buf.len()
         } else {
-            buf.line_range(target_line - 1).end
+            // the line ADJACENT to the column-1 landing keeps the span from
+            // covering the landing line itself
+            buf.line_range(last_covered).end
         };
         if start <= buf.first_non_blank(start_line) {
             // exclusive + column 1 + started at/before first non-blank:
             // becomes linewise over the lines fully covered
             return OpSpan {
-                start: buf.line_start(start_line),
+                start: buf.line_start(first_line),
                 end: range_end,
                 linewise: true,
             };
         }
-        // exclusive + column 1: the end moves to the last CHARACTER of the
-        // previous line, and the motion becomes inclusive — i.e. the span
-        // ends AT the line end, so the newline itself survives. Including it
-        // (`line_end + 1`) made `dw` over trailing blanks join two lines,
-        // which vim never does (verified against vim 9.1).
-        return OpSpan {
-            start,
-            end: buf.line_end(target_line - 1),
-            linewise: false,
-        };
+        // exclusive + column 1, NOT promoted: the end moves to the last
+        // CHARACTER of the adjacent line, and the motion becomes inclusive —
+        // i.e. the span ends AT the line end, so the newline itself survives.
+        // Including it (`line_end + 1`) made `dw` over trailing blanks join
+        // two lines, which vim never does (verified against vim 9.1). Only
+        // the downward direction reaches this for `w`; the upward `b` family
+        // always promotes (crossing up implies the cursor is at the line
+        // start, i.e. at/before its first non-blank) — guard anyway.
+        if target_line > start_line {
+            return OpSpan {
+                start,
+                end: buf.line_end(target_line - 1),
+                linewise: false,
+            };
+        }
     }
 
     let (lo, hi) = if target >= start {

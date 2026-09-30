@@ -8,7 +8,6 @@ mod common;
 use common::Fixture;
 use vimcore::buffer::VimBuffer;
 use vimcore::mode::VisualKind;
-use vimcore::state::VimState;
 
 
 // ---- 1. active_visual 生命周期 ---------------------------------------------
@@ -47,10 +46,6 @@ fn object_extension_updates_live_range_for_cmdline() {
 
 // ---- 2. visual 变更会话后 gv 恢复选区 --------------------------------------
 
-fn visual_selection_of(vim: &VimState) -> Option<(usize, usize, VisualKind)> {
-    vim.visual_selection()
-}
-
 /// `viwcX<Esc>` 后 `gv` 恢复选区。vim 9.1 探针：`'<`/`'>` 保持编辑前
 /// 字节范围（gv 重选 5 字符），而非塌缩/移位后的空区。
 #[test]
@@ -62,9 +57,7 @@ fn gv_restores_selection_after_visual_change() {
     f.feed(["escape"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "X beta\ngamma\n");
     f.feed(["g", "v"]);
-    let sel = visual_selection_of(&f.vim)
-        .map(|(a, c, kind)| (a, c, kind))
-        .expect("gv 应恢复选区");
+    let sel = f.vim.visual_selection().expect("gv 应恢复选区");
     assert_eq!(sel.0, 0, "gv 起点 = 原选区起点");
     assert_eq!(sel.2, VisualKind::Char);
     // vim 探针：'> 保持原偏移（gv 重选原字节范围 0..5）
@@ -81,7 +74,7 @@ fn gv_restores_block_after_block_insert() {
     f.feed(["escape"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "Zab\nZcd\nZef\n");
     f.feed(["g", "v"]);
-    let sel = visual_selection_of(&f.vim).expect("gv 应恢复块选区");
+    let sel = f.vim.visual_selection().expect("gv 应恢复块选区");
     assert_eq!(sel.2, VisualKind::Block);
     assert_eq!(sel.0, 0, "块起点 = 原块首（L0 行首）");
     assert_eq!(sel.1, 6, "块终点 = 原块末（L2 行首，编辑前偏移）");
@@ -205,6 +198,43 @@ fn ex_delete_count_semantics_unchanged() {
     // 被删的多行文本落在 "1（编号环）
     let reg = f.vim.registers.get('1').expect("多行删除应进 \"1");
     assert_eq!(reg.text, "two\nthree\nfour\n");
+}
+
+
+// ---- 8. 对抗性 fuzz 抓取的修复 ---------------------------------------------
+
+/// `db` 在行首：b 跨到上一行行尾，exclusive + 列 1 + 起点在首个非空白
+/// 之前 → linewise 删除**上一行**（vim 9.1 探针：['abc','def'] → ['def']）。
+/// 旧实现 `target_line - 1` 在向上跨行时 usize 下溢 panic。
+#[test]
+fn db_at_line_start_deletes_previous_line_linewise() {
+    let mut f = Fixture::new("abc\ndef\n");
+    f.vim.cursor.offset = f.buf.line_start(1);
+    f.feed(["d", "b"]);
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "def\n",
+        "db 在行首 = linewise 删上一行（vim 探针）"
+    );
+}
+
+/// `gn` 选中的匹配以多字节字符结尾时，光标必须落在末字符**起点**，
+/// 不能用 `end - 1` 字节算术落进字符中间（fuzz：匹配 `中` 后宿主
+/// `offset_to_line` 直接 panic）。
+#[test]
+fn gn_cursor_lands_on_multibyte_match_start() {
+    let mut f = Fixture::new("foo 中 bar\n");
+    f.feed(["/", "中", "\n"]); // 搜索 中
+    f.feed(["g", "g"]); // 回到开头（pattern 仍在）
+    f.feed(["g", "n"]); // 选中匹配
+    let co = f.vim.cursor_offset();
+    let text = f.buf.slice(0..f.buf.len());
+    assert!(
+        text.is_char_boundary(co),
+        "gn 后光标 {co} 必须在字符边界（text {text:?}）"
+    );
+    let sel = f.vim.visual_selection().expect("gn 应进入 visual");
+    assert_eq!(sel.0, 4, "选区起点 = 中 的起点");
 }
 
 // ---- harness 辅助 -----------------------------------------------------------

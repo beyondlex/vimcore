@@ -1225,6 +1225,35 @@ impl VimState {
                 *b = range.start;
             }
         }
+        // Relative shifts keep offsets on char boundaries of the OLD text,
+        // but two shapes can still leave them unaddressable: a deletion
+        // reaching the buffer end shifts offsets past the NEW end, and an
+        // equal-length replace redraws the byte grid under inner offsets
+        // (`gJ`'s `\n`→space swap strands a mark mid-`中`). Floor+clamp the
+        // stored offsets onto the current text — the engine's standing
+        // addressability invariant (fuzz-enforced).
+        self.refloor_stored_offsets(ctx);
+    }
+
+    /// Floor every stored byte offset onto the nearest char boundary of the
+    /// CURRENT text (also caps at the buffer end). Used by the edit funnels
+    /// after the relative mark adjustment.
+    fn refloor_stored_offsets(&mut self, ctx: &Ctx) {
+        let buf: &dyn crate::buffer::VimBuffer = ctx.buf;
+        let floor = |p: &mut usize| {
+            *p = crate::buffer::floor_to_char_boundary(buf, *p);
+        };
+        self.marks.for_each_pos_clamped(floor);
+        for pos in self.changes.iter_mut() {
+            floor(pos);
+        }
+        for pos in self.jumps.iter_mut() {
+            floor(pos);
+        }
+        if let Some((a, b)) = self.marks.last_visual.as_mut() {
+            floor(a);
+            floor(b);
+        }
     }
 
     pub(crate) fn edit_replace(&mut self, ctx: &mut Ctx, range: Range<usize>, text: &str) {
@@ -1265,6 +1294,7 @@ impl VimState {
             apply(a);
             apply(b);
         }
+        self.refloor_stored_offsets(ctx);
     }
 
     // ---- movement ------------------------------------------------------------
@@ -1459,6 +1489,14 @@ impl VimState {
                 rows.sort_unstable_by(|a, b| b.cmp(a)); // bottom-up inserts
                 for offset in rows {
                     self.edit_insert(ctx, offset, &block.text);
+                    // a row ABOVE the cursor shifts everything below it, the
+                    // cursor's byte offset included: edit_insert adjusts
+                    // marks/jumplist but the cursor is caller-managed, and a
+                    // stale offset points `text.len()` bytes early — mid-
+                    // character on multi-byte text (fuzz-caught)
+                    if offset < self.cursor.offset {
+                        self.cursor.offset += block.text.len();
+                    }
                 }
             }
         }
@@ -3067,7 +3105,15 @@ impl VimState {
                     return;
                 };
                 self.visual_anchor = Some(range.start);
-                self.cursor.offset = range.end.saturating_sub(1).max(range.start);
+                // cursor ON the last char of the match: `end - 1` bytes
+                // would sit INSIDE a multi-byte final char (fuzz: a `中`
+                // match parked the cursor mid-char and the next host read
+                // panicked)
+                self.cursor.offset = ctx
+                    .buf
+                    .prev_char_offset(range.end)
+                    .unwrap_or(range.start)
+                    .max(range.start);
                 self.cursor.desired_col = None;
                 if !matches!(self.mode, Mode::Visual { .. }) {
                     self.mode = Mode::Visual {
