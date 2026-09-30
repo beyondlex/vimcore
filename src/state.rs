@@ -457,6 +457,12 @@ impl VimState {
         self.macro_capture.as_ref().map(|(reg, _)| *reg)
     }
 
+    /// Number of recorded steps in a macro register (0 when unset). Status
+    /// UI / test observability: macros live as step lists, not text.
+    pub fn macro_len(&self, reg: char) -> usize {
+        self.macros.get(&reg).map_or(0, Vec::len)
+    }
+
     /// True while a visual-block `I`/`A`/`c` session is gathering text for
     /// multi-row replication (insert mode locks vertical motions then).
     pub(crate) fn in_block_insert(&self) -> bool {
