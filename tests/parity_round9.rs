@@ -261,7 +261,33 @@ fn substitute_full_spelling() {
     );
 }
 
-// ---- 9. :bfirst / :blast ---------------------------------------------------------
+// ---- 10. `:s/foo` 缺失 replacement = 空；块 p 寄存器行耗尽留空 -----------------
+
+/// vim 9.1 探针（`:s/foo` 无尾部分隔符）：等价 `:s/foo//`——删除匹配，
+/// 不是响铃也不复用上一条命令的 replacement。
+#[test]
+fn substitute_without_replacement_deletes_the_match() {
+    let mut f = Fixture::new("foo\n");
+    f.feed([":"]);
+    for c in "s/foo".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed(["<CR>"]);
+    assert_eq!(f.buf.slice(0..f.buf.len()), "\n");
+    assert_eq!(f.host.bells, 0, "不响铃（旧行为缺 replacement 直接响铃）");
+}
+
+/// vim 9.1 探针（2 行块寄存器贴到 3 行块选区）：第三行的覆盖区间**直接
+/// 删除**（空串），不循环也不重复末行。旧行为把寄存器末行贴上去。
+#[test]
+fn block_put_with_short_register_leaves_exhausted_rows_empty() {
+    let mut f = Fixture::new("aaaa\nbbbb\ncccc\n");
+    f.feed(["g", "g", "<C-v>", "j", "l", "y"]); // 2 行块 "aa"/"bb"
+    f.feed(["g", "g", "l", "l", "<C-v>", "j", "j", "l", "l", "p"]);
+    assert_eq!(f.buf.slice(0..f.buf.len()), "aaaa\nbbbb\ncc\n");
+}
+
+// ---- 11. :bfirst / :blast ---------------------------------------------------------
 
 /// NOTES.md 第八轮「悬而未决」：宿主 trait 补 `first_buffer`/`last_buffer`
 /// 后放行 `:bfirst`/`:blast`（vim 别名 `:bf`/`:bl`/`:brewind`）。

@@ -3290,7 +3290,11 @@ impl VimState {
                     if range.is_empty() {
                         continue;
                     }
-                    let text = rows.get(i).or_else(|| rows.last()).copied().unwrap_or("");
+                    // a register with FEWER rows than the selection leaves the
+                    // exhausted rows EMPTY — vim does not cycle or repeat the
+                    // last row (9.1 probe: 2-row register on a 3-row block →
+                    // the third row's covered span is just deleted)
+                    let text = rows.get(i).copied().unwrap_or("");
                     self.edit_delete(ctx, range.clone());
                     if !text.is_empty() {
                         self.edit_insert(ctx, range.start, text);
