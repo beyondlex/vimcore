@@ -759,6 +759,24 @@ fn cjk_visual_put_replace_cursor_on_last_char() {
     assert_eq!(f.cursor(), 10); // start of the pasted 文 (was 11, mid-char)
 }
 
+#[test]
+fn visual_put_selection_at_line_end_inserts_at_span_start() {
+    // clamp_cursor 停放语义回归：delete_span 把光标 clamp 到行内末字符，
+    // PutReplace 的插入位若跟着 cursor.offset 走，选区贴行尾时（v$ / viw）
+    // 会被回拉一位——粘贴插到行尾字符之前，行尾字符反落在粘贴文本之后。
+    // vim 的 {visual}p 恒落在删除区起点。
+    let f = edit("hello world", 0, 0, &["y", "i", "w", "w", "v", "$", "p"]);
+    assert_eq!(f.text(), "hello hello");
+    assert_eq!(f.cursor(), 10); // 粘贴文本末字符
+
+    let f = edit("hello world", 0, 0, &["y", "i", "w", "w", "v", "i", "w", "p"]);
+    assert_eq!(f.text(), "hello hello");
+
+    // 单行 buffer 整词替换（span.start == 0，老路径不受影响）
+    let f = edit("abc", 0, 0, &["y", "i", "w", "v", "$", "p"]);
+    assert_eq!(f.text(), "abc");
+}
+
 // ---- marks shift with edits (ROADMAP task 2) -----------------------------------
 
 #[test]

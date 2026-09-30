@@ -3204,7 +3204,12 @@ impl VimState {
                         self.edit_insert(ctx, at, &text);
                         self.cursor.offset = ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
                     } else {
-                        let at = self.cursor.offset.min(ctx.buf.len());
+                        // 插入位取删除区的真实起点，不走 cursor.offset：
+                        // delete_span 经 clamp_cursor 停放光标，而 clamp 是
+                        // 「停放」语义（offset 落在行尾时回拉到末字符）——
+                        // span.start 恰在行尾时（选区贴行尾，如 v$）粘贴会
+                        // 插到行尾字符之前，行尾字符反落在粘贴文本之后
+                        let at = span.start.min(ctx.buf.len());
                         self.edit_insert(ctx, at, &repeated);
                         // cursor on the last pasted char's START — byte - 1
                         // would sit inside a multi-byte character
