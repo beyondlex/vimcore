@@ -1460,6 +1460,11 @@ impl VimState {
             self.record_change_position(pos);
         }
         self.insert_session = None;
+        // the live `'<`/`'>` range is dead once insert mode ends: a session
+        // entered from visual (`viwc`, block `I`) leaves offsets pointing at
+        // pre-edit bytes, and `parse_range` must fall back to the `'<`/`'>`
+        // marks instead of preferring the stale live range
+        self.marks.active_visual = None;
         self.republish_search(ctx);
         self.end_edit();
         self.mode = Mode::Normal;
@@ -1878,6 +1883,11 @@ impl VimState {
             self.last_visual = Some((lo, end, kind));
         }
         self.visual_anchor = None;
+        // the selection is resolved — the live range must go, or `parse_range`
+        // keeps preferring it over the just-written `'<`/`'>` marks while the
+        // offsets are already stale (pre-edit bytes deleted out from under
+        // them, probe: `Vjd` then `:'<,'>d` emptied the whole buffer)
+        self.marks.active_visual = None;
         if !matches!(self.mode, Mode::Insert | Mode::Replace) {
             self.mode = Mode::Normal;
         }
@@ -2433,6 +2443,11 @@ impl VimState {
                             span.start
                         };
                         self.cursor.desired_col = None;
+                        // the live `'<`/`'>` range must follow the extension:
+                        // a visual `:` right after `viw`/`vi(` resolves its
+                        // range through marks.active_visual (same rule as
+                        // motion-extended selections in apply_motion_result)
+                        self.marks.active_visual = Some((span.start, span.end));
                     }
                     _ if self.op.is_some() => {
                         let Some(span) = ops::object_span(self, ctx.buf, object) else {
