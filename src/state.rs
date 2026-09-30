@@ -263,6 +263,14 @@ pub struct VimState {
     /// restore). Backspace pops this stack and restores, like vim.
     pub(crate) replace_overwritten: Vec<Option<char>>,
 
+    /// Pre-edit selection bounds of a visual change that opened the current
+    /// insert session (`viwc`, visual-block `I`/`A`/`c`). vim re-selects the
+    /// ORIGINAL selection with `gv` after such a change (9.1 probe:
+    /// `viwcX<Esc>gv` spans the original byte range; block `I` the original
+    /// block) — the stash is written back unadjusted in `exit_insert`,
+    /// because the session's edits would otherwise shift/collapse it.
+    pending_visual_marks: Option<(usize, usize, VisualKind)>,
+
     undo_seq: u64,
     open_undo: Option<u64>,
     /// Whether `open_undo` has been announced to the host (lazy group
@@ -339,6 +347,7 @@ impl VimState {
             keymaps: Keymaps::default(),
             tables: CommandTables::build(),
             replace_overwritten: Vec::new(),
+            pending_visual_marks: None,
             undo_seq: 0,
             open_undo: None,
             undo_group_announced: false,
@@ -1465,6 +1474,22 @@ impl VimState {
         // pre-edit bytes, and `parse_range` must fall back to the `'<`/`'>`
         // marks instead of preferring the stale live range
         self.marks.active_visual = None;
+        // gv after a visual change: vim re-selects the PRE-EDIT selection
+        // bounds (9.1 probe: `viwcX<Esc>gv` spans the original byte range,
+        // block `I` the original block) — write the stash here, after the
+        // session's edits, exactly as vim's marks survive them. The raw
+        // pre-edit offsets must still be floored onto the post-edit text:
+        // the session may have changed byte lengths mid-range (insert-BS
+        // line joins, <C-w>...), and stored offsets stay addressable — the
+        // engine's standing invariant (fuzz-enforced), same tradeoff as
+        // `sanitize_stored_offsets` after a host undo.
+        if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
+            let floor =
+                |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
+            let (lo, hi) = (floor(lo), floor(hi));
+            self.marks.last_visual = Some((lo.min(hi), hi.max(lo)));
+            self.last_visual = Some((lo.min(hi), hi.max(lo), kind));
+        }
         self.republish_search(ctx);
         self.end_edit();
         self.mode = Mode::Normal;
@@ -1726,6 +1751,13 @@ impl VimState {
             }
             Operator::Change => {
                 self.begin_edit();
+                // block `c` continues into insert: stash the block bounds for
+                // `gv` (see `pending_visual_marks`)
+                self.pending_visual_marks = Some((
+                    block.rows.first().map(|r| r.start).unwrap_or(0),
+                    block.rows.last().map(|r| r.end).unwrap_or(0),
+                    crate::mode::VisualKind::Block,
+                ));
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
                 self.bump(ctx);
                 self.reset_pending();
@@ -1844,6 +1876,13 @@ impl VimState {
             ctx.host.bell();
             return;
         };
+        // block `I`/`A` continue into insert: stash the block bounds for `gv`
+        // (see `pending_visual_marks`)
+        self.pending_visual_marks = Some((
+            block.rows.first().map(|r| r.start).unwrap_or(0),
+            block.rows.last().map(|r| r.end).unwrap_or(0),
+            crate::mode::VisualKind::Block,
+        ));
         self.cursor.offset = typing_offset;
         self.cursor.desired_col = None;
         self.block_insert = Some(BlockInsert {
@@ -2532,6 +2571,15 @@ impl VimState {
             ctx.host.bell();
             return;
         };
+        // `c` continues into insert: remember the selection for `gv` (see
+        // `pending_visual_marks`) before the operator's edits shift it
+        if op == Operator::Change {
+            let kind = match self.mode {
+                Mode::Visual { kind } => kind,
+                _ => crate::mode::VisualKind::Char,
+            };
+            self.pending_visual_marks = Some((span.start, span.end, kind));
+        }
         let count = self.take_total_count().max(1);
         let gen_before = self.edit_generation;
         self.begin_edit();
