@@ -733,3 +733,49 @@ fn numeric_option_values_are_capped() {
     assert_eq!(f.vim.options_mut().shiftwidth, 2);
     assert_eq!(f.text(), "  a\nb\n");
 }
+
+// ---- insert 模式编辑后的搜索缓存同步（fuzz round 10 抓到的陈旧缓存） ---------
+
+/// insert 模式的 <Del>/<BS>/<C-w>/<C-u> 过去不重跑 hlsearch 扫描：缓存的
+/// `last_matches` 留着编辑前的偏移，删除恰好让旧偏移落进多字节字符中间
+/// （"a中b" 删 'a' 后缓存的 1..4 指进 中 的字节内部）。`cancel_cmdline` 会把
+/// 这份缓存原样发布给宿主——宿主对高亮做 offset_to_line 即 panic。
+#[test]
+fn insert_mode_deletes_refresh_search_cache() {
+    // /中/ 命中 1..4；删掉 'a' 后新文本 "中b\n" 的命中是 0..3
+    let mut f = Fixture::new("a中b\n");
+    f.feed(["/", "中", "<CR>"]);
+    assert_eq!(f.vim.cursor_offset(), 1);
+    f.feed(["g", "g"]);
+    f.feed(["i"]);
+    f.feed_raw(Key::named("delete")); // <Del> 删 'a'
+    let text = f.text();
+    assert_eq!(text, "中b\n");
+    for m in &f.vim.search.last_matches {
+        assert!(
+            text.is_char_boundary(m.start) && text.is_char_boundary(m.end),
+            "stale cached match {m:?} in {text:?}"
+        );
+    }
+    assert_eq!(f.vim.search.last_matches, vec![0..3]);
+    // 宿主看到的高亮同样已刷新
+    assert_eq!(f.host.highlights, vec![0..3]);
+}
+
+/// 同类路径：行内 BS 也必须刷新缓存（修的是同一缺口，两条入口都钉住）。
+#[test]
+fn insert_mode_backspace_refreshes_search_cache() {
+    let mut f = Fixture::new("a中b\n");
+    f.feed(["/", "中", "<CR>"]); // 光标停在 中 (offset 1)
+    f.feed(["i"]);
+    f.feed_raw(Key::named("backspace")); // BS 删掉前面的 'a'
+    let text = f.text();
+    assert_eq!(text, "中b\n");
+    for m in &f.vim.search.last_matches {
+        assert!(
+            text.is_char_boundary(m.start) && text.is_char_boundary(m.end),
+            "stale cached match {m:?} in {text:?}"
+        );
+    }
+    assert_eq!(f.vim.search.last_matches, vec![0..3]);
+}
