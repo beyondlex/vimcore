@@ -150,4 +150,51 @@ impl Options {
         }
         true
     }
+
+    fn value_of(&self, canon: &str) -> usize {
+        match canon {
+            "tabstop" => self.tabstop,
+            "shiftwidth" => self.shiftwidth,
+            "textwidth" => self.textwidth,
+            "scrolloff" => self.scrolloff,
+            _ => unreachable!("VALUE_TABLE and this match are out of sync"),
+        }
+    }
+
+    /// `:set name?` feedback in vim's rendering: `ignorecase` /
+    /// `noignorecase` / `tabstop=4`. The `no` spelling queries too
+    /// (`noic?` → `noignorecase`). `None` when the name is unknown.
+    pub fn describe(&self, name: &str) -> Option<String> {
+        let (name, negated) = match name.strip_prefix("no") {
+            Some(stripped) if canonical_bool(stripped).is_some() => (stripped, true),
+            _ => (name, false),
+        };
+        if let Some(canon) = canonical_bool(name) {
+            let on = self.bool_option(name)? != negated;
+            return Some(if on {
+                canon.to_owned()
+            } else {
+                format!("no{canon}")
+            });
+        }
+        if negated {
+            return None; // `notabstop` is not a thing
+        }
+        let canon = canonical_value(name)?;
+        Some(format!("{}={}", canon, self.value_of(canon)))
+    }
+
+    /// `:set` with no arguments: every option, rendered like [`describe`].
+    pub fn describe_all(&self) -> Vec<String> {
+        let mut out: Vec<String> = BOOL_TABLE
+            .iter()
+            .filter_map(|(canon, _)| self.describe(canon))
+            .collect();
+        out.extend(
+            VALUE_TABLE
+                .iter()
+                .filter_map(|(canon, _)| self.describe(canon)),
+        );
+        out
+    }
 }

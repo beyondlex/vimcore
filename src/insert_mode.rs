@@ -151,8 +151,11 @@ impl VimState {
 
         // Replace mode: BS restores the overwritten character and steps
         // back (vim `R` + BS). `None` entries were APPENDED past the line
-        // end — there is nothing to restore, so they plain-delete.
-        if self.mode == Mode::Replace {
+        // end — there is nothing to restore, so they plain-delete. The
+        // position guard comes FIRST: at offset 0 there is nothing to
+        // restore, and consuming a stack entry there would desync the
+        // remaining entries from their positions.
+        if self.mode == Mode::Replace && at > 0 {
             if let Some(orig) = self.replace_overwritten.pop() {
                 if at > line_start {
                     if let Some(prev) = ctx.buf.prev_char_offset(at) {
@@ -164,7 +167,7 @@ impl VimState {
                         self.cursor.offset = prev;
                         ctx.host.changed();
                     }
-                } else if at > 0 {
+                } else {
                     // crossed the line start: join with the previous line
                     self.begin_edit();
                     self.edit_delete(ctx, at - 1..at);

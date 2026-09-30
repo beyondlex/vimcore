@@ -147,3 +147,87 @@ fn ex_join_cursor_on_first_non_blank_of_joined_line() {
     assert_eq!(f.text(), "    aaaa bbbb\n");
     assert_eq!(f.cursor(), 8);
 }
+
+// ---- Replace-mode backspace at the buffer start -------------------------------
+
+/// The overwrite stack must not lose entries at offset 0: cursor 0 + BS used
+/// to pop an entry without restoring anything, desyncing the later restores
+/// (End + BS then restored the WRONG character).
+#[test]
+fn replace_backspace_at_buffer_start_keeps_stack_in_sync() {
+    // R over "xy": type "ab" (stack [x, y]), Home, BS (no-op), End, BS.
+    // With the desync, the End+BS popped `x` and wrote it over `y` → "ax".
+    let mut f = Fixture::new("xy");
+    f.feed(["R"]);
+    f.type_text("ab");
+    f.feed(["<home>", "<BS>", "<end>", "<BS>"]);
+    assert_eq!(f.text(), "ay", "BS restores the char under the last typed one");
+}
+
+// ---- :set queries and listings --------------------------------------------------
+
+#[test]
+fn set_query_reports_current_value_without_changing_it() {
+    let mut f = Fixture::new("text\n");
+    ex(&mut f, "set ic?");
+    assert_eq!(f.host.statuses, vec!["ignorecase"]);
+    assert!(f.vim.options_mut().ignorecase, "query leaves the value");
+
+    let mut f = Fixture::new("text\n");
+    ex(&mut f, "set noic?");
+    assert_eq!(f.host.statuses, vec!["noignorecase"]);
+
+    let mut f = Fixture::new("text\n");
+    ex(&mut f, "set ts?");
+    assert_eq!(f.host.statuses, vec!["tabstop=4"]);
+
+    // unknown names still bell
+    let mut f = Fixture::new("text\n");
+    ex(&mut f, "set nope?");
+    assert_eq!(f.host.bells, 1);
+}
+
+#[test]
+fn bare_set_lists_every_option() {
+    let mut f = Fixture::new("text\n");
+    ex(&mut f, "set");
+    assert!(
+        f.host.statuses.contains(&"ignorecase".to_owned()),
+        "booleans listed"
+    );
+    assert!(
+        f.host.statuses.contains(&"tabstop=4".to_owned()),
+        "numerics listed"
+    );
+    assert_eq!(f.host.bells, 0, "bare :set is no longer a bell-only no-op");
+}
+
+// ---- :registers / :marks listings ----------------------------------------------
+
+#[test]
+fn registers_command_lists_populated_registers() {
+    let mut f = Fixture::new("alpha\nbeta\n");
+    f.feed(["y", "y"]);
+    ex(&mut f, "reg");
+    assert!(
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s.contains('"') && s.contains("alpha")),
+        "unnamed register listed with its text, got {:?}",
+        f.host.statuses
+    );
+    // linewise marker
+    assert!(f.host.statuses.iter().any(|s| s.contains('l')));
+}
+
+#[test]
+fn marks_command_lists_named_and_special_marks() {
+    let mut f = Fixture::new("alpha\nbeta\n");
+    f.feed(["m", "a", "G"]);
+    ex(&mut f, "marks");
+    let joined = f.host.statuses.join("\n");
+    assert!(joined.contains("line 1"), "named mark with 1-based line");
+    assert!(joined.contains("alpha"), "mark line content shown");
+}
+
