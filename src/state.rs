@@ -1156,6 +1156,14 @@ impl VimState {
         for pos in self.jumps.iter_mut() {
             *pos = floor(*pos);
         }
+        // `gv` reads the ENGINE-side last_visual (kind-bearing), not the
+        // marks pair — both copies must be floored (fuzz round 8: a host
+        // undo after an equal-length replace left the engine copy mid-char
+        // while the marks copy was clean)
+        if let Some((a, b, _)) = self.last_visual.as_mut() {
+            *a = floor(*a);
+            *b = floor(*b);
+        }
     }
 
     /// Apply a mark-style offset adjustment to the changelist / jumplist.
@@ -1250,7 +1258,16 @@ impl VimState {
         for pos in self.jumps.iter_mut() {
             floor(pos);
         }
+        // BOTH last_visual copies: `'<`/`'>` resolve the marks pair, `gv`
+        // reads the engine-side (kind-bearing) one — reflooring only the
+        // marks copy let `gv` restore a mid-char anchor on multi-byte text
+        // (fuzz round 8: equal-length replaces redraw the byte grid under
+        // the engine copy)
         if let Some((a, b)) = self.marks.last_visual.as_mut() {
+            floor(a);
+            floor(b);
+        }
+        if let Some((a, b, _)) = self.last_visual.as_mut() {
             floor(a);
             floor(b);
         }
@@ -1542,6 +1559,18 @@ impl VimState {
         if !matches!(self.mode, Mode::Insert | Mode::Replace) || text.is_empty() {
             return;
         }
+        // a newline inside a block session splits the typing row the same way
+        // a locked vertical move would (replica offsets assume one line per
+        // row) — reject like the <CR> lock
+        if text.contains('\n') && self.in_block_insert() {
+            ctx.host.bell();
+            return;
+        }
+        // the replica text follows what ACTUALLY landed in the buffer
+        // (rejected text must not reach the replication on exit)
+        if let Some(block) = &mut self.block_insert {
+            block.text.push_str(text);
+        }
         self.begin_edit();
         let line_start = ctx
             .buf
@@ -1653,12 +1682,14 @@ impl VimState {
     /// Records the text as ONE Text step for `.`/macro replay — the key
     /// pipeline declines these chars, so recording them as keys too would
     /// double every typed character on replay.
+    ///
+    /// NOTE: the block-insert replica text is NOT appended here — the text
+    /// may still be REJECTED by [`VimState::insert_text_at_cursor`] (a `\n`
+    /// mid-block-session), and the replica must only carry text that actually
+    /// landed in the buffer. `insert_text_at_cursor` appends on success.
     pub fn record_typed_text(&mut self, text: &str) {
         if text.is_empty() || self.replaying || self.recording_suppressed {
             return;
-        }
-        if let Some(block) = &mut self.block_insert {
-            block.text.push_str(text);
         }
         if self.insert_session.is_some() {
             match self.recording.last_mut() {
@@ -1694,7 +1725,16 @@ impl VimState {
     /// byte position — a host translating a click can easily land inside a
     /// multi-byte char — so it is floored to a char boundary first; handing
     /// a mid-char offset onward would panic in `offset_to_line`.
+    ///
+    /// IGNORED while a visual-block insert session is open: a click mid-
+    /// session would move the typing point to another row, and the replica
+    /// offsets assume every keystroke lands on the session's typing row
+    /// (vertical moves are locked out for the same reason — fuzz round 8
+    /// caught the replication then writing past the buffer end).
     pub fn set_cursor_offset(&mut self, buf: &dyn VimBuffer, offset: usize) {
+        if self.in_block_insert() {
+            return;
+        }
         let offset = crate::buffer::floor_to_char_boundary(buf, offset);
         let offset = clamp_cursor(buf, offset);
         self.cursor.offset = offset;
@@ -1706,7 +1746,11 @@ impl VimState {
 
     /// Host-initiated visual selection (e.g. a mouse drag). Both ends are
     /// floored to char boundaries, like [`VimState::set_cursor_offset`].
+    /// Ignored mid-block-insert-session, same as clicks.
     pub fn set_visual_range(&mut self, buf: &dyn VimBuffer, anchor: usize, cursor: usize) {
+        if self.in_block_insert() {
+            return;
+        }
         let anchor = crate::buffer::floor_to_char_boundary(buf, anchor);
         let cursor = crate::buffer::floor_to_char_boundary(buf, cursor);
         self.visual_anchor = Some(clamp_cursor(buf, anchor));
@@ -3203,7 +3247,13 @@ impl VimState {
             // gv: re-select the last visual range (its kind, too)
             NormalCmd::RestoreVisual => {
                 if let Some((lo, hi, kind)) = self.last_visual {
-                    self.visual_anchor = Some(lo);
+                    // floor the anchor too (defensive: the stored span is
+                    // refloored on every edit, but a host text swap between
+                    // engines must not resurrect a mid-char offset)
+                    self.visual_anchor = Some(crate::buffer::floor_to_char_boundary(
+                        ctx.buf,
+                        lo.min(ctx.buf.len()),
+                    ));
                     // hi is the exclusive end; floor(hi-1) is the START of
                     // the last covered char, boundary-safe for multi-byte
                     self.cursor.offset =

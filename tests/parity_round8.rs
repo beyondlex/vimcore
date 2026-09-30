@@ -165,3 +165,83 @@ fn amp_skips_substitute_with_invalid_pattern() {
         "& 重放最近一条编译成功的 :s，非法模式不得顶替"
     );
 }
+
+// ---- 6. 块插入会话的跨行封锁（fuzz round8 抓取） -------------------------------
+
+/// 块会话中行首退格会把上一行合并进来，打飞复制偏移（fuzz：复制在缓冲
+/// 末尾之外 insert）。修复后响铃拒绝，退出时复制依然落到正确的行上。
+#[test]
+fn block_session_rejects_backspace_line_join() {
+    let mut f = Fixture::new("ab\ncd\nef\n");
+    f.feed(["j"]); // 光标行 = line 1（打字行；行首 BS 才会触发并线）
+    f.feed(["<C-v>", "j", "I"]);
+    f.type_text("X"); // line1 = "Xcd"，block.text = "X"
+                      // <Left> + <Del> 删掉缓冲里的 X 但复制文本仍含 X（typed_end 之外）
+    f.feed(["<Left>", "<Del>"]);
+    assert_eq!(f.buf.slice(0..f.buf.len()), "ab\ncd\nef\n");
+    // 行首 BS：旧行为并线 ab/cd 打飞复制偏移；现在拒绝
+    f.feed(["<BS>"]);
+    f.feed(["escape"]);
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "ab\nXcd\nef\n",
+        "行首 BS 被拒绝，复制仍落到其余块行（打字行 = 光标行 line 2）"
+    );
+}
+
+/// 块会话中 <Del> 删除换行同样会并线——拒绝。
+#[test]
+fn block_session_rejects_delete_newline() {
+    let mut f = Fixture::new("ab\ncd\n");
+    f.feed(["<C-v>", "j", "I"]); // 打字行 = 光标行 line 1，复制目标 = line 0
+    f.type_text("X"); // line1 = "Xcd"，block.text = "X"
+                      // 打字行末 <Del>：旧行为删掉 \n 并线
+    f.feed(["<End>", "<Del>"]);
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "ab\nXcd\n",
+        "跨行 <Del> 被拒绝"
+    );
+    f.feed(["escape"]);
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "Xab\nXcd\n",
+        "复制不受 <Del> 影响，仍落到其余块行"
+    );
+}
+
+/// 块会话中含换行的 IME 文本会拆开打字行——整体拒绝（与 <CR> 锁同款），
+/// 且被拒绝的文本不得进入退出时的复制（record 与 insert 的契约）。
+#[test]
+fn block_session_rejects_newline_in_typed_text() {
+    let mut f = Fixture::new("ab\ncd\n");
+    f.feed(["<C-v>", "j", "I"]);
+    f.type_text("x\ny"); // 含换行：整体拒绝
+    assert_eq!(f.buf.slice(0..f.buf.len()), "ab\ncd\n", "含 \\n 文本被拒绝");
+    f.type_text("z"); // 拒绝后正常打字仍然生效
+    f.feed(["escape"]);
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "zab\nzcd\n",
+        "只有真正落进缓冲的文本参与复制"
+    );
+}
+
+/// 块会话中的宿主点击不得移动打字点（fuzz：点击把光标甩到另一行，
+/// 复制偏移写出缓冲末尾）。
+#[test]
+fn block_session_ignores_host_click() {
+    let mut f = Fixture::new("ab\ncd\nef\n");
+    f.feed(["<C-v>", "j", "I"]);
+    f.type_text("X");
+    // 宿主点击缓冲末尾（line 2）：会话期间必须被忽略
+    let len = f.buf.len();
+    f.vim.set_cursor_offset(&f.buf, len);
+    f.type_text("Y");
+    f.feed(["escape"]);
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "XYab\nXYcd\nef\n",
+        "点击不移动打字点，复制完整落在块行上"
+    );
+}

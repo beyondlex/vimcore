@@ -55,6 +55,13 @@ impl VimState {
                     "delete" => {
                         let at = self.cursor.offset;
                         if let Some(c) = ctx.buf.char_at(at) {
+                            // deleting the newline would merge the typing row
+                            // into its neighbor — same corruption as a
+                            // vertical move (block session invariants)
+                            if c == '\n' && self.in_block_insert() {
+                                ctx.host.bell();
+                                return ProcessOutcome::Consumed;
+                            }
                             self.begin_edit();
                             self.edit_delete(ctx, at..at + c.len_utf8());
                             ctx.host.changed();
@@ -155,6 +162,16 @@ impl VimState {
     fn insert_backspace(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
+
+        // A block session's replica offsets assume every line of the block
+        // stays a separate line: a BS that JOINS the typing row with its
+        // neighbor invalidates `typing_line`/`rows` (fuzz round 8: the
+        // replication then inserts past the buffer end). Bell like the
+        // locked vertical moves.
+        if self.in_block_insert() && at <= line_start && at > 0 {
+            ctx.host.bell();
+            return;
+        }
 
         // Replace mode: BS restores the overwritten character and steps
         // back (vim `R` + BS). `None` entries were APPENDED past the line
