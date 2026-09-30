@@ -118,6 +118,10 @@ pub struct HostView {
     pub actions: Vec<String>,
     /// bell() counter (operator/parity tests assert the engine stays quiet).
     pub bells: usize,
+    /// :bfirst/:blast calls in order (true = first, false = last).
+    pub first_last_calls: Vec<bool>,
+    /// What first_buffer/last_buffer return (false = nothing to switch to).
+    pub first_last_result: bool,
     undo_stack: Vec<(String, usize)>,
     redo_stack: Vec<(String, usize)>,
     open_group: Option<u64>,
@@ -172,6 +176,16 @@ impl VimHost for HostView {
         self.actions.push(id.to_owned());
     }
 
+    fn first_buffer(&mut self) -> bool {
+        self.first_last_calls.push(true);
+        self.first_last_result
+    }
+
+    fn last_buffer(&mut self) -> bool {
+        self.first_last_calls.push(false);
+        self.first_last_result
+    }
+
     fn begin_undo_group(&mut self, id: u64, cursor: usize) {
         if self.open_group != Some(id) {
             self.undo_stack.push((self.text.borrow().clone(), cursor));
@@ -222,6 +236,8 @@ impl Fixture {
                 statuses: Vec::new(),
                 actions: Vec::new(),
                 bells: 0,
+                first_last_calls: Vec::new(),
+                first_last_result: true,
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
                 open_group: None,
@@ -240,6 +256,9 @@ impl Fixture {
 
     pub fn feed<I: AsRef<str>>(&mut self, keys: impl IntoIterator<Item = I>) -> &mut Self {
         for k in keys {
+            // Key::parse (NOT parse_key_sequence): the test domain names KEYS
+            // — "up" is the arrow key, "dd" would be a Named key. Ex command
+            // lines must be fed one char per item (or via <...> notation).
             let key = Key::parse(k.as_ref());
             let mut ctx = Ctx {
                 buf: &mut self.buf,

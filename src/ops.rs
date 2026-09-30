@@ -515,8 +515,17 @@ pub fn format_lines(vim: &mut VimState, ctx: &mut Ctx, start: usize, last_line: 
         let text = ctx.buf.slice(ls..le);
         let (ind, blank) = ctx.buf.line_indent(line);
         if blank || text.trim().is_empty() {
-            flush_paragraph(&mut paragraph, &indent, width, &mut out);
-            out.push('\n'); // keep the blank separator line
+            // the separator terminates the preceding paragraph — but an EMPTY
+            // paragraph must not flush (an empty flush still emits one line,
+            // and a run of blank lines then DOUBLES: vim 9.1 keeps blank
+            // lines 1:1 through gq). The separator line itself is kept
+            // verbatim — vim preserves whitespace-only lines too (probe:
+            // `gq` over ["para", "   ", "tail"] keeps the three spaces).
+            if !paragraph.is_empty() {
+                flush_paragraph(&mut paragraph, &indent, width, &mut out);
+            }
+            out.push_str(&text);
+            out.push('\n');
         } else {
             if paragraph.is_empty() {
                 indent = text[..ind].to_owned();
@@ -526,10 +535,12 @@ pub fn format_lines(vim: &mut VimState, ctx: &mut Ctx, start: usize, last_line: 
             }
         }
     }
-    flush_paragraph(&mut paragraph, &indent, width, &mut out);
-
-    // each flushed paragraph ends with one newline; drop only the final
-    // terminator (it belongs to the buffer structure, not the text)
+    // the last paragraph flushes with its terminating newline; a span that
+    // ENDED on a blank line already has it — either way exactly one trailing
+    // '\n' belongs to the buffer structure and is dropped
+    if !paragraph.is_empty() {
+        flush_paragraph(&mut paragraph, &indent, width, &mut out);
+    }
     if out.ends_with('\n') {
         out.pop();
     }
@@ -840,7 +851,14 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
         o = next;
     }
     vim.edit_replace(ctx, start..o, &replacements);
-    vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len() - ch.len_utf8());
+    if ch == '\n' {
+        // `r<CR>` splits the line: vim parks the cursor on the FIRST
+        // character of the new next line (9.1 probe: 'abc' + r<CR> → cursor
+        // (2,1)) — there is no replaced char to sit on
+        vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len());
+    } else {
+        vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len() - ch.len_utf8());
+    }
     vim.cursor.desired_col = None;
 }
 
