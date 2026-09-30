@@ -345,6 +345,29 @@ impl VimState {
                 ctx.host.request_close_forced(true);
                 return;
             }
+            // :reg[isters] — one status line per populated register
+            "reg" | "registers" => {
+                for (name, reg) in self.registers.items() {
+                    ctx.host.status_message(&Self::register_line(name, &reg));
+                }
+                return;
+            }
+            // :marks — named marks plus the specials, `mark  line  col  text`
+            "marks" => {
+                for (name, offset) in self.marks.items() {
+                    ctx.host
+                        .status_message(&Self::mark_line(ctx.buf, name, offset));
+                }
+                if let Some((lo, _)) = self.marks.last_visual {
+                    ctx.host
+                        .status_message(&Self::mark_line(ctx.buf, '<', lo));
+                }
+                if let Some(offset) = self.marks.last_jump {
+                    ctx.host
+                        .status_message(&Self::mark_line(ctx.buf, '\'', offset));
+                }
+                return;
+            }
             _ => {}
         }
         if let Some(rest) = line
@@ -444,6 +467,36 @@ impl VimState {
     fn boundary_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
         line.strip_prefix(cmd)
             .filter(|rest| rest.is_empty() || rest.starts_with(' ') || rest.starts_with('!'))
+    }
+
+    /// One `:registers` listing line: `"x  c|l|b  text` with embedded
+    /// newlines shown as `^J` (vim's rendering) and the tail elided.
+    fn register_line(name: char, reg: &crate::registers::Register) -> String {
+        const MAX_TEXT: usize = 50;
+        let kind = match reg.kind {
+            crate::registers::RegisterKind::Charwise => "c",
+            crate::registers::RegisterKind::Linewise => "l",
+            crate::registers::RegisterKind::Blockwise => "b",
+        };
+        let mut shown: String = reg
+            .text
+            .trim_end_matches('\n')
+            .replace('\n', "^J")
+            .chars()
+            .take(MAX_TEXT)
+            .collect();
+        if reg.text.trim_end_matches('\n').replace('\n', "^J").chars().count() > MAX_TEXT {
+            shown.push('…');
+        }
+        format!("\"{name}  {kind}  {shown}")
+    }
+
+    /// One `:marks` listing line: `mark  line  col  text`.
+    fn mark_line(buf: &dyn crate::buffer::VimBuffer, name: char, offset: usize) -> String {
+        let line = buf.offset_to_line(offset);
+        let col = crate::buffer::display_column(buf, offset) + 1;
+        let text: String = buf.line_content(line).trim().chars().take(40).collect();
+        format!("{name}  line {}  col {}  {}", line + 1, col, text)
     }
 
     /// Parse an Ex range prefix: `%`, `.`, `$`, `'`, numbers, each with an
@@ -728,15 +781,29 @@ impl VimState {
     }
 
     /// `:set` with space-separated items: `name`, `noname`, `name!`,
-    /// `name=value`. Stops at the first unknown item (bell).
+    /// `name=value`, `name?` (report the current value on the status
+    /// channel). Stops at the first unknown item (bell).
     fn ex_set(&mut self, ctx: &mut Ctx, args: &str) {
         if args.is_empty() {
-            // vim lists all options here; we have no message channel yet
-            ctx.host.bell();
+            // vim lists all options here — report ours line by line
+            for line in self.options.describe_all() {
+                ctx.host.status_message(&line);
+            }
             return;
         }
         let mut applied = false;
         for arg in args.split_whitespace() {
+            // `name?` is a query: report and move on, values untouched
+            if let Some(name) = arg.strip_suffix('?') {
+                match self.options.describe(name) {
+                    Some(text) => ctx.host.status_message(&text),
+                    None => {
+                        ctx.host.bell();
+                        return;
+                    }
+                }
+                continue;
+            }
             let ok = if let Some(name) = arg.strip_suffix('!') {
                 match self.options.bool_option(name) {
                     Some(current) => self.options.set_boolean(name, !current),
