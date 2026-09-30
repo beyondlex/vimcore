@@ -620,7 +620,11 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         // buffer's trailing newline, where insert_at lands ON the separator
         // `\n` (still the old last line) and the paste starts one byte later
         // (vim probe: `yy p` on the single line "abc" parks on line 2).
-        let cursor_at = if after && !has_newline { insert_at + 1 } else { insert_at };
+        let cursor_at = if after && !has_newline {
+            insert_at + 1
+        } else {
+            insert_at
+        };
         let cursor_line = ctx
             .buf
             .offset_to_line(cursor_at)

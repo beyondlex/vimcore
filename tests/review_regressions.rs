@@ -3,9 +3,8 @@
 //! Every test here pins a behavior that was verified against real vim 9.1
 //! (macOS) before the fix, so the vim-parity contract stays executable.
 
-// type_text and a few harness helpers are exercised by the other test
-// targets that share this module
-#[allow(dead_code)]
+// (unused-harness-helper noise is silenced inside common/mod.rs — each
+// test target compiles a different subset of it)
 mod common;
 
 use common::{edit, Fixture};

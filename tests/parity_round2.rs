@@ -8,7 +8,6 @@
 //! 注意：`Fixture::feed` 的每个元素经 `Key::parse` 解析——多字符字符串会
 //! 变成 `Named` 键！单字符与 `<CR>` 之类记号之外，必须逐字符喂。
 
-#[allow(dead_code)]
 mod common;
 
 use common::{edit, Fixture};

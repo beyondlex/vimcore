@@ -359,8 +359,7 @@ impl VimState {
                         .status_message(&Self::mark_line(ctx.buf, name, offset));
                 }
                 if let Some((lo, _)) = self.marks.last_visual {
-                    ctx.host
-                        .status_message(&Self::mark_line(ctx.buf, '<', lo));
+                    ctx.host.status_message(&Self::mark_line(ctx.buf, '<', lo));
                 }
                 if let Some(offset) = self.marks.last_jump {
                     ctx.host
@@ -485,7 +484,14 @@ impl VimState {
             .chars()
             .take(MAX_TEXT)
             .collect();
-        if reg.text.trim_end_matches('\n').replace('\n', "^J").chars().count() > MAX_TEXT {
+        if reg
+            .text
+            .trim_end_matches('\n')
+            .replace('\n', "^J")
+            .chars()
+            .count()
+            > MAX_TEXT
+        {
             shown.push('…');
         }
         format!("\"{name}  {kind}  {shown}")

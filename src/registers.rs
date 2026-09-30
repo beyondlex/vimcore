@@ -59,11 +59,8 @@ impl Registers {
     /// `(name, register)` pairs for `:registers` listings: the unnamed
     /// register first (when set), then the named ones sorted by name.
     pub fn items(&self) -> Vec<(char, Register)> {
-        let mut out: Vec<(char, Register)> = self
-            .named
-            .iter()
-            .map(|(c, r)| (*c, r.clone()))
-            .collect();
+        let mut out: Vec<(char, Register)> =
+            self.named.iter().map(|(c, r)| (*c, r.clone())).collect();
         out.sort_by_key(|(c, _)| *c);
         if let Some(r) = &self.last {
             out.insert(0, (UNNAMED, r.clone()));
