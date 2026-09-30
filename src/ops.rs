@@ -615,11 +615,15 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         vim.edit_insert(ctx, insert_at, &text);
         // vim leaves the cursor on the FIRST line of the put text, at its
         // first non-blank (verified against vim 9.1 for `p`/`P` with 1..4
-        // pasted lines). After the insert, `insert_at` is the start of the
-        // first pasted line. The old code parked the cursor on the last one.
+        // pasted lines). After the insert, `insert_at` normally IS the start
+        // of the first pasted line — except `p` opening a line past the
+        // buffer's trailing newline, where insert_at lands ON the separator
+        // `\n` (still the old last line) and the paste starts one byte later
+        // (vim probe: `yy p` on the single line "abc" parks on line 2).
+        let cursor_at = if after && !has_newline { insert_at + 1 } else { insert_at };
         let cursor_line = ctx
             .buf
-            .offset_to_line(insert_at)
+            .offset_to_line(cursor_at)
             .min(ctx.buf.line_count() - 1);
         vim.cursor.offset = ctx.buf.first_non_blank(cursor_line);
     } else {

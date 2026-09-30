@@ -2162,6 +2162,11 @@ impl VimState {
             "end" => Motion::LineEnd,
             "pageup" => Motion::PageUp,
             "pagedown" => Motion::PageDown,
+            // visual <Del> is vim's `d` (delete the whole selection, probe:
+            // `viw<Del>` removes the word) — it must fall through to the
+            // visual command table's Operator(Delete) row, not delete one
+            // char at the cursor while the selection stays alive
+            "delete" if matches!(self.mode, Mode::Visual { .. }) => return None,
             "delete" => {
                 let count = self.count.take().unwrap_or(1);
                 let gen = self.edit_generation;
@@ -2445,8 +2450,12 @@ impl VimState {
                 if matches!(self.mode, Mode::Visual { .. }) {
                     self.apply_visual_operator(ctx, op);
                 } else {
+                    // the prefix count becomes the OPERATOR count (`2d3w` =
+                    // 6 words, vim 9.1): leaving it in `count` would let the
+                    // motion's digit run concatenate onto it (2 then 3
+                    // reading as 23). take_total_count multiplies the two.
+                    self.op_count = self.count.take();
                     self.op = Some(op);
-                    self.op_count = None;
                 }
                 ProcessOutcome::Consumed
             }
@@ -2708,13 +2717,16 @@ impl VimState {
                 self.start_insert(ctx, InsertKind::Change);
                 self.bump_if_edited(ctx, gen);
             }
-            // S: clear the whole line's content but keep the line itself
-            // (linewise `cc` — ops::apply preserves the indent)
+            // S: clear [count] lines' content but keep the lines themselves
+            // (linewise `cc` — ops::apply preserves the indent; vim 9.1
+            // probe: `3S` on lines 2-4 clears exactly those three)
             NormalCmd::SubstituteLine => {
+                let count = self.take_total_count();
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
+                let last = (line + count - 1).min(ctx.buf.line_count() - 1);
                 let span = ops::OpSpan {
                     start: ctx.buf.line_start(line),
-                    end: ctx.buf.line_range(line).end,
+                    end: ctx.buf.line_range(last).end,
                     linewise: true,
                 };
                 let gen = self.edit_generation;
