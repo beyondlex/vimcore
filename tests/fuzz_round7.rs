@@ -75,7 +75,7 @@ fn fuzz_multi_seed_holds_invariants() {
                         "seed {seed} round {round} step {step} key {k}: mark {name} {off} bad in {text:?}"
                     );
                 }
-                if let Some((lo, hi)) = f.vim.marks.last_visual {
+                if let Some((lo, hi, _)) = f.vim.marks.last_visual {
                     assert!(
                         lo <= text.len()
                             && (lo == text.len() || text.is_char_boundary(lo))

@@ -678,7 +678,7 @@ fn fuzz_random_key_sequences_hold_invariants() {
                     "mark {name} at {off} invalid in round {round} after {k} (text {text:?})"
                 );
             }
-            if let Some((lo, hi)) = f.vim.marks.last_visual {
+            if let Some((lo, hi, _)) = f.vim.marks.last_visual {
                 assert!(
                     lo <= text.len()
                         && (lo == text.len() || text.is_char_boundary(lo))

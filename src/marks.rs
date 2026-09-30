@@ -1,5 +1,6 @@
 //! Marks: user marks `a-z`, special marks (` ^ . < >), and jump helpers.
 
+use crate::mode::VisualKind;
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -7,8 +8,13 @@ use std::ops::Range;
 #[derive(Clone, Debug, Default)]
 pub struct Marks {
     offsets: HashMap<char, usize>,
-    /// Range of the last visual selection (`< .. >`).
-    pub last_visual: Option<(usize, usize)>,
+    /// Range + kind of the last visual selection (`< .. >`, `gv`/`'<`/`'>`).
+    /// THE single source of truth: `gv` reads the kind, the edit funnels
+    /// shift it like every other stored offset, and `:marks` lists it. (It
+    /// used to exist twice — a kind-less pair here and a kind-bearing copy
+    /// on the engine — and the copies drifted apart under byte-grid-redrawing
+    /// edits, letting `gv` restore a mid-char anchor; fuzz round 8 caught it.)
+    pub last_visual: Option<(usize, usize, VisualKind)>,
     /// Live `(anchor, cursor_end)` of the current visual selection, kept in
     /// sync by the engine (used for `'<`/`'>` inside visual mode).
     pub(crate) active_visual: Option<(usize, usize)>,
@@ -52,8 +58,8 @@ impl Marks {
     /// last insert exit — beyond the plain named marks.
     pub fn resolve(&self, name: char) -> Option<usize> {
         match name {
-            '<' => self.last_visual.map(|(a, _)| a),
-            '>' => self.last_visual.map(|(_, b)| b),
+            '<' => self.last_visual.map(|(a, _, _)| a),
+            '>' => self.last_visual.map(|(_, b, _)| b),
             // `''` (linewise) and `` `` `` (exact) share the jump origin
             '\'' | '`' => self.last_jump,
             '.' => self.last_change.or_else(|| self.get('.')),
@@ -121,7 +127,7 @@ impl Marks {
         for pos in self.offsets.values_mut() {
             f(pos);
         }
-        if let Some((a, b)) = self.last_visual.as_mut() {
+        if let Some((a, b, _)) = self.last_visual.as_mut() {
             f(a);
             f(b);
         }

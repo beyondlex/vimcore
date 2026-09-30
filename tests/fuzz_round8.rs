@@ -88,7 +88,7 @@ fn fuzz_round8_holds_invariants() {
                 for (name, off) in f.vim.marks.items() {
                     assert_addressable(&format!("mark {name}"), off, &text, &ctx);
                 }
-                if let Some((lo, hi)) = f.vim.marks.last_visual {
+                if let Some((lo, hi, _)) = f.vim.marks.last_visual {
                     assert_addressable("last_visual.lo", lo, &text, &ctx);
                     assert_addressable("last_visual.hi", hi, &text, &ctx);
                 }
