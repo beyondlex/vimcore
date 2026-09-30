@@ -225,8 +225,11 @@ impl VimState {
     fn insert_tab(&mut self, ctx: &mut Ctx) {
         if self.options.expandtab {
             let sw = self.options.tabstop.max(1);
-            let line = ctx.buf.offset_to_line(self.cursor.offset);
-            let col = self.cursor.offset - ctx.buf.line_start(line);
+            // align by DISPLAY column (wide chars cover two cells): vim pads
+            // to the next multiple of 'tabstop' of the virtual column (9.1
+            // probe: '中文' + Tab at display col 4, ts=4 → four spaces; the
+            // old BYTE-column math (6 % 4) gave two and broke the grid)
+            let col = crate::buffer::display_column(ctx.buf, self.cursor.offset);
             let spaces = sw - (col % sw);
             self.insert_text_at_cursor(ctx, &" ".repeat(spaces));
         } else {
@@ -236,16 +239,37 @@ impl VimState {
 
     /// `<C-w>`: delete the word before the cursor, like typing `b` then
     /// deleting. Word classes follow normal mode (`(`, `bar`, `)` are three
-    /// separate words), and the deletion never crosses back over the line
-    /// start.
+    /// separate words). A deletion that would cross the line start JOINS the
+    /// line with its predecessor instead — vim deletes exactly the newline
+    /// (9.1 probe: `i<C-w>` at (2,1) of ['aaaa','bbbb'] → ['aaaabbbb'] and
+    /// ['aaaa','  bbbb','cc'] at (3,1) keeps both lines' text). The block-
+    /// session lock: replica offsets assume every row stays a row, so the
+    /// join is refused with a bell (the same rule as the line-start BS).
     fn insert_delete_word_before(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
-        let target = word::prev_word_start(ctx.buf, at, false).max(line_start);
-        if target < at {
+        let target = word::prev_word_start(ctx.buf, at, false);
+        if target >= line_start {
+            if target < at {
+                // words/indent on THIS row only — the row survives as a row,
+                // so block sessions are unaffected
+                self.begin_edit();
+                self.edit_delete(ctx, target..at);
+                self.cursor.offset = target;
+                ctx.host.changed();
+            }
+            return;
+        }
+        if self.in_block_insert() {
+            ctx.host.bell();
+            return;
+        }
+        if at > 0 {
+            // join with the previous line: delete the newline (the same edit
+            // the line-start BS does)
             self.begin_edit();
-            self.edit_delete(ctx, target..at);
-            self.cursor.offset = target;
+            self.edit_delete(ctx, at - 1..at);
+            self.cursor.offset = at - 1;
             ctx.host.changed();
         }
     }
