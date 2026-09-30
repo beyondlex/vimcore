@@ -4,6 +4,10 @@
 //! `VimBuffer(Mut)` and a [`HostView`] implementing `VimHost` — so a `Ctx`
 //! can hold disjoint `&mut`s, exactly like a real host integration.
 
+// every test target compiles this module separately and each uses a
+// different subset of the helpers
+#![allow(dead_code)]
+
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -248,7 +252,6 @@ impl Fixture {
 
     /// Feed one pre-built `Key` (control chars the notation parser can't
     /// spell). Not every test crate uses it.
-    #[allow(dead_code)]
     pub fn feed_raw(&mut self, key: Key) -> KeyResult {
         let mut ctx = Ctx {
             buf: &mut self.buf,

@@ -769,7 +769,12 @@ fn visual_put_selection_at_line_end_inserts_at_span_start() {
     assert_eq!(f.text(), "hello hello");
     assert_eq!(f.cursor(), 10); // 粘贴文本末字符
 
-    let f = edit("hello world", 0, 0, &["y", "i", "w", "w", "v", "i", "w", "p"]);
+    let f = edit(
+        "hello world",
+        0,
+        0,
+        &["y", "i", "w", "w", "v", "i", "w", "p"],
+    );
     assert_eq!(f.text(), "hello hello");
 
     // 单行 buffer 整词替换（span.start == 0，老路径不受影响）

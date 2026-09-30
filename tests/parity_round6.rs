@@ -38,7 +38,12 @@ fn visual_delete_key_deletes_the_selection() {
 /// following lines.
 #[test]
 fn operator_and_motion_counts_multiply() {
-    let f = edit("aa bb cc dd ee ff gg\nnext\nline\n", 0, 0, &["2", "d", "3", "w"]);
+    let f = edit(
+        "aa bb cc dd ee ff gg\nnext\nline\n",
+        0,
+        0,
+        &["2", "d", "3", "w"],
+    );
     // 6 words: aa bb cc dd ee ff (each word's trailing blank goes with it)
     assert_eq!(f.text(), "gg\nnext\nline\n");
 
@@ -161,7 +166,11 @@ fn replace_backspace_at_buffer_start_keeps_stack_in_sync() {
     f.feed(["R"]);
     f.type_text("ab");
     f.feed(["<home>", "<BS>", "<end>", "<BS>"]);
-    assert_eq!(f.text(), "ay", "BS restores the char under the last typed one");
+    assert_eq!(
+        f.text(),
+        "ay",
+        "BS restores the char under the last typed one"
+    );
 }
 
 // ---- :set queries and listings --------------------------------------------------
@@ -230,4 +239,3 @@ fn marks_command_lists_named_and_special_marks() {
     assert!(joined.contains("line 1"), "named mark with 1-based line");
     assert!(joined.contains("alpha"), "mark line content shown");
 }
-
