@@ -25,6 +25,7 @@
 | 5 | **`/<CR>` 无前次模式静默**、**`:s//x/` 无前次模式哑铃** | vim 探针 `/<CR>` → v:errmsg = E35。两处都补 `E35: No previous regular expression` + bell |
 | 6 | **`:1y a 2` 忽略 count** | vim 探针：寄存器后的数字参数是 count（两行进 `"a`）。`:y` 参数解析改为「首参数字=count；字母=寄存器+可选第二 count」 |
 | 7 | **TCK 参考实现违反自身 `char_at` 契约**：裸切片在非边界偏移 panic | 引擎的 `floor_to_char_boundary` 刻意探测非边界；宿主照抄参考实现会从合法路径吃 panic（`"中文"` offset 1 实测复现）。补 `is_char_boundary` 守卫，并从测试模块提升为公共 `tck::TckStrBuf`（宿主可直接复用） |
+| 8 | **visual `p` 选区贴行尾时插到行尾字符之前**（下游 crossterm-vim 集成测试发现，非探针轮） | `PutReplace` 的插入位走了 `cursor.offset`，而 `delete_span` 经 `clamp_cursor` 停放光标——clamp 是「停放」语义，offset 落在行尾时回拉到末字符。span.start 恰在行尾时（`v$`/`viw`）粘贴提前一字节：`"hello world"` 上 `yiw w viwp` → `"hellohello "`。插入位改取删除区真实起点 `span.start`，clamp 只留给最终光标停放；回归测试 `visual_put_selection_at_line_end_inserts_at_span_start`（`v$`/`viw`/单行整词三形）。引擎自家测试未拦住的原因：既有 visual put 用例的 span.start 都在行首，`end > line_start` 守卫使 clamp 恒等 |
 
 ### 新功能
 
