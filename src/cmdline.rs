@@ -137,7 +137,7 @@ impl VimState {
     /// to the pre-prompt set — incremental highlighting is preview-only and
     /// must not leak as an accepted pattern.
     fn cancel_cmdline(&mut self, ctx: &mut Ctx) {
-        if let Some((kind, anchor)) = self.cmdline_visual.take() {
+        if let Some((kind, anchor, _prompt_cursor)) = self.cmdline_visual.take() {
             self.mode = Mode::Visual { kind };
             self.visual_anchor = Some(anchor);
         } else {
@@ -145,9 +145,17 @@ impl VimState {
         }
         self.discard_change_record();
         self.cmdline.buffer.clear();
-        // restore the previous highlight set
-        let matches = self.search.last_matches.clone();
-        ctx.host.set_search_highlights(&matches, None);
+        // restore the previous highlight set — but only when `hlsearch` may
+        // show one at all: with hlsearch OFF the pre-prompt set is empty,
+        // and republishing `last_matches` here would leave permanent
+        // highlights behind an incsearch-only preview (hlsearch=false +
+        // incsearch=true: cancel must clear, like vim)
+        if self.options.hlsearch {
+            let matches = self.search.last_matches.clone();
+            ctx.host.set_search_highlights(&matches, None);
+        } else {
+            ctx.host.set_search_highlights(&[], None);
+        }
         ctx.host.changed();
     }
 
@@ -200,8 +208,10 @@ impl VimState {
                         self.execute_ex(ctx, &entry);
                         // executing a visual `:` command ends visual mode
                         // (marks written, anchor cleared), like vim
-                        if let Some((_kind, anchor)) = self.cmdline_visual.take() {
-                            self.close_visual_after_cmdline(ctx.buf, anchor);
+                        if let Some((kind, anchor, prompt_cursor)) =
+                            self.cmdline_visual.take()
+                        {
+                            self.close_visual_after_cmdline(ctx.buf, kind, anchor, prompt_cursor);
                         }
                     } else {
                         self.execute_search(ctx, entry, prompt == '/');
@@ -264,12 +274,19 @@ impl VimState {
     }
 
     /// Close out a visual selection after its `:'<,'>` command ran: write
-    /// the `<`/`>` marks from the final cursor position, drop the anchor and
-    /// return to normal mode. The cursor is NOT moved here (contrast
-    /// `cancel_cmdline`, which restores the selection untouched — vim lets
-    /// the executed command decide where the cursor ends up).
-    fn close_visual_after_cmdline(&mut self, buf: &dyn crate::buffer::VimBuffer, anchor: usize) {
-        let cursor = self.cursor.offset;
+    /// the `<`/`>` marks from the PROMPT-TIME selection (vim keeps the
+    /// executed range — marks written from the post-command cursor would
+    /// rewrite `'<`/`'>` wherever the command left the cursor and break a
+    /// later `gv`), drop the anchor and return to normal mode. The engine
+    /// cursor is NOT moved here — vim lets the executed command decide.
+    fn close_visual_after_cmdline(
+        &mut self,
+        buf: &dyn crate::buffer::VimBuffer,
+        kind: crate::mode::VisualKind,
+        anchor: usize,
+        prompt_cursor: usize,
+    ) {
+        let cursor = prompt_cursor;
         let (lo, hi) = if anchor <= cursor {
             (anchor, cursor)
         } else {
@@ -282,6 +299,10 @@ impl VimState {
         // `exit_visual`; consumers floor it, but stored bounds stay clean)
         let end = buf.next_char_offset(hi).unwrap_or(hi);
         self.marks.last_visual = Some((lo, end));
+        // `gv` reads the engine-level span (kind included), not just the
+        // marks — without this a visual `:` command never becomes the
+        // "last visual area"
+        self.last_visual = Some((lo, end, kind));
         self.visual_anchor = None;
         self.marks.active_visual = None;
         self.mode = Mode::Normal;
@@ -411,19 +432,14 @@ impl VimState {
         if self.ex_substitute(ctx, line, range) {
             return;
         }
-        // :{range}d[elete] [x] [count] — delete the range's lines; a numeric
-        // argument is a COUNT that starts at the range's LAST line (vim:
-        // `:1,2d 3` deletes lines 2-4, probe — the engine used to extend the
-        // range to 1-4), an alphabetic one names the register (unsupported,
-        // ignored)
+        // :{range}d[elete] [x] [count] — delete the range's lines; the first
+        // argument may name a REGISTER (`:1,2d a` stores into `"a`, vim) or
+        // be a COUNT that starts at the range's LAST line (vim: `:1,2d 3`
+        // deletes lines 2-4 — the engine used to extend the range to 1-4)
         if let Some(rest) =
             Self::boundary_cmd(line, "d").or_else(|| Self::boundary_cmd(line, "delete"))
         {
-            let rest = rest.trim();
-            let count = match rest.chars().next() {
-                Some(c) if c.is_ascii_digit() => rest.parse::<usize>().unwrap_or(1),
-                _ => 1,
-            };
+            let (register, count) = Self::parse_reg_count(rest.trim());
             let (mut first, last) = range;
             if count > 1 {
                 first = last;
@@ -431,7 +447,7 @@ impl VimState {
             let last = last
                 .saturating_add(count.saturating_sub(1))
                 .min(ctx.buf.line_count().saturating_sub(1));
-            self.ex_delete_lines(ctx, (first, last));
+            self.ex_delete_lines(ctx, (first, last), register);
             return;
         }
         // :{range}y[ank] [x] [count] — yank the range's lines into a register
@@ -682,9 +698,11 @@ impl VimState {
         let reverse = flags.contains('!');
         let ignore_case = flags.contains('i');
         let unique = flags.contains('u');
-        if first == last && !unique {
-            // a one-line range has nothing to reorder (vim: `:sort` on one
-            // line is a no-op)
+        if first == last {
+            // a one-line range has nothing to reorder OR dedupe (`:sort u`
+            // on a single line can't drop a consecutive duplicate either) —
+            // and the replace below must not run: it would announce an undo
+            // group for a no-op edit, burning one `u` on unchanged text
             return;
         }
         let mut lines: Vec<String> = (first..=last).map(|l| ctx.buf.line_content(l)).collect();
@@ -727,13 +745,11 @@ impl VimState {
         self.commit_change_record();
     }
 
-    /// `:{range}y[ank] [x] [count]` — yank the range's lines into a register
-    /// (default: the unnamed/yank path like `yy`). The second argument is a
-    /// COUNT of lines starting at the range's LAST line (`:2y a 3` = three
-    /// lines into `"a`, `:1,2y 3` = lines 2-4, vim 9.1 probe — the engine
-    /// used to extend the range instead); a lone numeric first argument is a
-    /// count (`:2y 3`). The buffer is untouched.
-    fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
+    /// Parse the `:d` / `:y` argument list: a lone numeric first argument is
+    /// a COUNT (`:2y 3`), an alphabetic one names a REGISTER with an
+    /// optional count after it (`:y a 2`). Returns `(register, count)`,
+    /// count 0 = absent.
+    fn parse_reg_count(args: &str) -> (Option<char>, usize) {
         let mut register = None;
         let mut count = 0usize;
         let mut parts = args.split_whitespace();
@@ -750,6 +766,17 @@ impl VimState {
                 }
             }
         }
+        (register, count)
+    }
+
+    /// `:{range}y[ank] [x] [count]` — yank the range's lines into a register
+    /// (default: the unnamed/yank path like `yy`). The second argument is a
+    /// COUNT of lines starting at the range's LAST line (`:2y a 3` = three
+    /// lines into `"a`, `:1,2y 3` = lines 2-4, vim 9.1 probe — the engine
+    /// used to extend the range instead); a lone numeric first argument is a
+    /// count (`:2y 3`). The buffer is untouched.
+    fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
+        let (register, count) = Self::parse_reg_count(args);
         let (mut first, last) = (first, last);
         if count > 1 {
             first = last;
@@ -767,8 +794,15 @@ impl VimState {
     }
 
     /// `:{range}d` — delete the lines of the range (single undo step),
-    /// cursor to the first non-blank of the line that took their place.
-    fn ex_delete_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize)) {
+    /// storing them into `register` when named (`:1,2d a`, vim 9.1), else
+    /// the normal delete registers. Cursor to the first non-blank of the
+    /// line that took their place.
+    fn ex_delete_lines(
+        &mut self,
+        ctx: &mut Ctx,
+        (first, last): (usize, usize),
+        register: Option<char>,
+    ) {
         let last = last.min(ctx.buf.line_count().saturating_sub(1));
         let start = ctx.buf.line_start(first);
         let end = ctx.buf.line_range(last).end;
@@ -777,7 +811,18 @@ impl VimState {
             return;
         }
         self.begin_edit();
-        self.edit_delete(ctx, start..end);
+        // delete_span (not the raw buffer write) routes the deleted lines
+        // through the register file — the whole point of `:d a`
+        crate::ops::delete_span(
+            self,
+            ctx,
+            &crate::ops::OpSpan {
+                start,
+                end,
+                linewise: true,
+            },
+            register,
+        );
         self.bump(ctx);
         let below = ctx.buf.line_count().saturating_sub(1);
         let line = first.min(below);

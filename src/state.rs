@@ -219,10 +219,11 @@ pub struct VimState {
     /// For the `gq`/`gw` spellings of Operator::Format: the trigger letter
     /// (`q` or `w`) to match in the linewise doubling.
     format_trigger: Option<char>,
-    /// Visual state to restore when the visual `:` prompt is cancelled:
-    /// (kind, anchor). While the prompt is open the selection keeps its
-    /// original shape for rendering.
-    pub(crate) cmdline_visual: Option<(crate::mode::VisualKind, usize)>,
+    /// Visual state while the visual `:` prompt is open: (kind, anchor,
+    /// cursor-at-prompt). Cancel restores the selection intact; on execute
+    /// the `'<`/`'>` marks are written from the PROMPT-TIME range — vim
+    /// keeps the executed range, not "anchor..post-command cursor".
+    pub(crate) cmdline_visual: Option<(crate::mode::VisualKind, usize, usize)>,
     /// `:action <unknown-id>` is silently ignored instead of reported.
     /// Hosts sharing one rc file across apps set this while applying the
     /// user layer (mappings aimed at other apps are expected to miss).
@@ -2028,6 +2029,20 @@ impl VimState {
     }
 
     fn normal_key(&mut self, ctx: &mut Ctx, key: Key) -> ProcessOutcome {
+        // 0. escape clears pending state FIRST — before the `"{reg}` prefix
+        //    or a partial trie walk can swallow it: `3"<Esc>` must cancel
+        //    the count (not leave it armed for the next command), and
+        //    `g<Esc>` must cancel QUIETLY (routing it through the trie-miss
+        //    retry rang the bell; vim cancels silently)
+        if key == Key::escape() || key == Key::ctrl_char('[') {
+            self.reset_pending();
+            self.discard_change_record();
+            if !self.search.last_matches.is_empty() {
+                crate::search::clear_highlights(self, ctx);
+            }
+            return ProcessOutcome::Consumed;
+        }
+
         // 1. complete a pending char-argument
         if self.char_arg_cmd.is_some() {
             return self.complete_char_arg(ctx, key);
@@ -2133,19 +2148,7 @@ impl VimState {
             return ProcessOutcome::Consumed;
         }
 
-        // 6. escape clears pending state; with search highlights showing it
-        //    also dismisses them (`:noh` semantics) — the next search or
-        //    `n`/`N` re-publishes them
-        if key == Key::escape() || key == Key::ctrl_char('[') {
-            self.reset_pending();
-            self.discard_change_record();
-            if !self.search.last_matches.is_empty() {
-                crate::search::clear_highlights(self, ctx);
-            }
-            return ProcessOutcome::Consumed;
-        }
-
-        // 7. search prompts & the Ex command line
+        // 6. search prompts & the Ex command line
         if key.modifiers.is_plain() {
             match &key.kind {
                 KeyKind::Char('/') => {
@@ -2164,12 +2167,12 @@ impl VimState {
             }
         }
 
-        // 8. arrow / navigation keys
+        // 7. arrow / navigation keys
         if let Some(outcome) = self.navigation_key(ctx, &key) {
             return outcome;
         }
 
-        // 9. the command trie
+        // 8. the command trie
         let phase = if self.op.is_some() {
             Phase::Pending
         } else {
@@ -2301,7 +2304,11 @@ impl VimState {
                 Mode::Visual { kind } => kind,
                 _ => crate::mode::VisualKind::Char,
             };
-            self.cmdline_visual = Some((kind, self.visual_anchor.unwrap_or(self.cursor.offset)));
+            self.cmdline_visual = Some((
+                kind,
+                self.visual_anchor.unwrap_or(self.cursor.offset),
+                self.cursor.offset,
+            ));
             self.begin_cmdline(':');
             self.cmdline.buffer.push_str("'<,'>");
             return ProcessOutcome::Consumed;
