@@ -1523,8 +1523,7 @@ impl VimState {
         // engine's standing invariant (fuzz-enforced), same tradeoff as
         // `sanitize_stored_offsets` after a host undo.
         if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
-            let floor =
-                |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
+            let floor = |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
             let (lo, hi) = (floor(lo), floor(hi));
             self.marks.last_visual = Some((lo.min(hi), hi.max(lo)));
             self.last_visual = Some((lo.min(hi), hi.max(lo), kind));
@@ -1820,6 +1819,35 @@ impl VimState {
                 // the recorded keys cannot reproduce (the typed text is applied
                 // as one inline step) — keep it out of `.`
                 self.recording_blocked = true;
+            }
+            // blockwise case flip: every row's covered span maps per char
+            // (vim 9.1: `<C-v>jllU` uppercases the block, cursor parks at the
+            // block's start). Bottom-up so earlier rows survive the byte-
+            // length changes multi-char case mappings (ß→SS) make below.
+            Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
+                let gen = self.edit_generation;
+                self.begin_edit();
+                for range in block.rows.iter().rev() {
+                    if range.is_empty() {
+                        continue;
+                    }
+                    let text = ctx.buf.slice(range.clone());
+                    let mapped: String = text
+                        .chars()
+                        .map(|c| match op {
+                            Operator::Lowercase => c.to_lowercase().collect::<String>(),
+                            Operator::Uppercase => c.to_uppercase().collect::<String>(),
+                            _ => crate::ops::toggle_case(c),
+                        })
+                        .collect();
+                    self.edit_replace(ctx, range.clone(), &mapped);
+                }
+                self.end_edit();
+                self.cursor.offset =
+                    clamp_cursor(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
+                self.cursor.desired_col = None;
+                self.bump_if_edited(ctx, gen);
+                self.finish_visual_op(ctx);
             }
             _ => ctx.host.bell(),
         }
@@ -3328,7 +3356,20 @@ impl VimState {
                         } else {
                             format!("{repeated}\n")
                         };
-                        let at = self.cursor.offset;
+                        // A LINEWISE selection pastes at the start of the line
+                        // where the selection began — NOT at the post-delete
+                        // cursor: delete_span parks it on the surviving line's
+                        // first non-blank, and inserting there shreds that line
+                        // (vim 9.1 probe: `Vp` with "XY" over ['abc'] when
+                        // ' ghi' survives → ['XY', ' ghi', …], indent intact).
+                        // span_from_visual clamps a Line-kind span.start to its
+                        // line start; the murky charwise-selection case keeps
+                        // the cursor anchor (documented divergence).
+                        let at = if span.linewise {
+                            span.start.min(ctx.buf.len())
+                        } else {
+                            self.cursor.offset
+                        };
                         self.edit_insert(ctx, at, &text);
                         self.cursor.offset = ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
                     } else {

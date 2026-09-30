@@ -9,7 +9,6 @@ use common::Fixture;
 use vimcore::buffer::VimBuffer;
 use vimcore::mode::VisualKind;
 
-
 // ---- 1. active_visual 生命周期 ---------------------------------------------
 
 /// `Vjd` 后 `:'<,'>d` 必须读 `'<`/`'>` mark（最新选区），不能用算子前
@@ -80,7 +79,6 @@ fn gv_restores_block_after_block_insert() {
     assert_eq!(sel.1, 6, "块终点 = 原块末（L2 行首，编辑前偏移）");
 }
 
-
 // ---- 3. hlsearch=false 时取消提示符不得泄漏高亮 -----------------------------
 
 /// hlsearch=false + incsearch=true：`/` 预览高亮在 Esc 取消后必须清空。
@@ -150,10 +148,7 @@ fn visual_colon_keeps_prompt_time_range_in_marks() {
     let mut f = Fixture::new("hello world\nsecond\n");
     f.feed(["v", "i", "w"]); // 选 hello（anchor 0，cursor 4）
     f.feed([":", "s", "/", "h", "e", "l", "/", "H", "E", "L", "/", "\n"]);
-    assert_eq!(
-        f.buf.slice(0..f.buf.len()),
-        "HELlo world\nsecond\n"
-    );
+    assert_eq!(f.buf.slice(0..f.buf.len()), "HELlo world\nsecond\n");
     // :s 把光标留在行首（col 0）——若按执行后光标重写，'> 会塌缩到 1
     let lt = f.vim.marks.resolve('<').unwrap();
     let gt = f.vim.marks.resolve('>').unwrap();
@@ -199,7 +194,6 @@ fn ex_delete_count_semantics_unchanged() {
     let reg = f.vim.registers.get('1').expect("多行删除应进 \"1");
     assert_eq!(reg.text, "two\nthree\nfour\n");
 }
-
 
 // ---- 8. 对抗性 fuzz 抓取的修复 ---------------------------------------------
 
