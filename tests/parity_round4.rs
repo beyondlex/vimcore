@@ -17,7 +17,11 @@ use common::{edit, Fixture};
 fn dw_on_whitespace_only_line_keeps_the_newline() {
     // cursor on the first space: all three spaces go, the line survives
     let f = edit("AAAA\n   \nBBBB\n", 1, 0, &["d", "w"]);
-    assert_eq!(f.text(), "AAAA\n\nBBBB\n", "dw@0 deletes the run, not the line");
+    assert_eq!(
+        f.text(),
+        "AAAA\n\nBBBB\n",
+        "dw@0 deletes the run, not the line"
+    );
     // cursor on the last space: exactly that char goes
     let f = edit("AAAA\n   \nBBBB\n", 1, 2, &["d", "w"]);
     assert_eq!(f.text(), "AAAA\n  \nBBBB\n", "dw@2 deletes one char");
@@ -103,7 +107,11 @@ fn insert_first_non_blank_on_blank_line_appends_at_end() {
     let mut f = edit("   \nfoo\n", 0, 0, &["^", "i"]);
     f.type_text("Z");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "  Z \nfoo\n", "i after ^ inserts before the last space");
+    assert_eq!(
+        f.text(),
+        "  Z \nfoo\n",
+        "i after ^ inserts before the last space"
+    );
 }
 
 // ---- cursor placement never parks on the newline ----------------------------
@@ -176,7 +184,10 @@ fn noop_commands_open_no_undo_group() {
     // p with an empty register
     let mut f = Fixture::new("abc\n");
     f.feed(["p"]);
-    assert_eq!(f.host.group_count, 0, "p with an empty register opens no group");
+    assert_eq!(
+        f.host.group_count, 0,
+        "p with an empty register opens no group"
+    );
 }
 
 /// The wasted-undo symptom: after a no-op, ONE `u` must revert the previous
@@ -291,18 +302,18 @@ fn ex_delete_supports_count_argument() {
 #[test]
 fn increment_decrement_radix_formats() {
     for (line, keys, want) in [
-        ("x007", "2<C-a>", "x011"),      // octal
-        ("x0099", "2<C-a>", "x101"),     // 9 forces decimal, zeros dropped
-        ("v0x1f", "2<C-a>", "v0x21"),    // hex, cursor before the prefix
-        ("0XAB", "<C-a>", "0XAC"),       // uppercase preserved
-        ("v0b101", "2<C-a>", "v0b111"),  // binary
-        ("n 077", "3<C-a>", "n 0102"),   // octal carry
+        ("x007", "2<C-a>", "x011"),     // octal
+        ("x0099", "2<C-a>", "x101"),    // 9 forces decimal, zeros dropped
+        ("v0x1f", "2<C-a>", "v0x21"),   // hex, cursor before the prefix
+        ("0XAB", "<C-a>", "0XAC"),      // uppercase preserved
+        ("v0b101", "2<C-a>", "v0b111"), // binary
+        ("n 077", "3<C-a>", "n 0102"),  // octal carry
         ("-5", "<C-a>", "-4"),
         ("-5", "<C-x>", "-6"),
-        ("x-5y", "<C-x>", "x-6y"),       // cursor on the minus
-        ("0x10", "<C-x>", "0x0f"),       // hex underflow zero-pads to width
-        ("010", "<C-x>", "007"),         // octal keeps the marker and width
-        ("a1b2", "<C-a>", "a2b2"),       // first number after the cursor
+        ("x-5y", "<C-x>", "x-6y"), // cursor on the minus
+        ("0x10", "<C-x>", "0x0f"), // hex underflow zero-pads to width
+        ("010", "<C-x>", "007"),   // octal keeps the marker and width
+        ("a1b2", "<C-a>", "a2b2"), // first number after the cursor
     ] {
         let mut f = Fixture::new(line);
         for key in vimcore::key::parse_key_sequence(keys) {

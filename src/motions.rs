@@ -20,22 +20,43 @@ pub enum Motion {
     FirstNonBlank,
     LineEnd,
     LastLineNonBlank, // g_
-    WordStart { big: bool },
-    WordEnd { big: bool },
-    WordBack { big: bool },
-    WordEndBack { big: bool },
-    FindChar { forward: bool, till: bool },
-    RepeatFind { reverse: bool }, // ; ,
-    MatchBracket,                 // %
-    GoToLine { first: bool },     // gg / G
+    WordStart {
+        big: bool,
+    },
+    WordEnd {
+        big: bool,
+    },
+    WordBack {
+        big: bool,
+    },
+    WordEndBack {
+        big: bool,
+    },
+    FindChar {
+        forward: bool,
+        till: bool,
+    },
+    RepeatFind {
+        reverse: bool,
+    }, // ; ,
+    MatchBracket, // %
+    GoToLine {
+        first: bool,
+    }, // gg / G
     ParaNext,
     ParaPrev,
     SentenceNext,
     SentencePrev,
-    SearchNext { forward: bool }, // n / N
-    StarSearch { forward: bool }, // * / #
-    MarkJump { linewise: bool },  // '{char} / `{char} as operator target
-    Column,                       // | (to count column)
+    SearchNext {
+        forward: bool,
+    }, // n / N
+    StarSearch {
+        forward: bool,
+    }, // * / #
+    MarkJump {
+        linewise: bool,
+    }, // '{char} / `{char} as operator target
+    Column, // | (to count column)
     ScreenTop,
     ScreenMiddle,
     ScreenBottom,
@@ -48,7 +69,9 @@ pub enum Motion {
     /// `gn`/`gN` as an operator target (`dgn`): the span is the match
     /// itself, not cursor..target — the operator arm reads
     /// `search.last_found_match`.
-    SelectMatch { backward: bool },
+    SelectMatch {
+        backward: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
