@@ -381,6 +381,20 @@ impl VimState {
                 ctx.host.request_close_forced(true);
                 return;
             }
+            // :bf[irst]/:brewind — the host owns the buffer list (NOTES.md
+            // 第八轮「悬而未决」闭环); a refusal rings like :bN's.
+            "bfirst" | "bf" | "brewind" => {
+                if !ctx.host.first_buffer() {
+                    ctx.host.bell();
+                }
+                return;
+            }
+            "blast" | "bl" => {
+                if !ctx.host.last_buffer() {
+                    ctx.host.bell();
+                }
+                return;
+            }
             // :reg[isters] — one status line per populated register
             "reg" | "registers" => {
                 for (name, reg) in self.registers.items() {
@@ -488,12 +502,15 @@ impl VimState {
             self.ex_sort(ctx, range, rest.trim());
             return;
         }
-        // :{range}j[oin][!] — join the range's lines; a one-line range joins
-        // with the NEXT line (vim's bare `:j`), `!` removes all whitespace
+        // :{range}j[oin][!] [count] — join the range's lines; a one-line
+        // range joins with the NEXT line (vim's bare `:j`), `!` removes all
+        // whitespace. A trailing COUNT joins count lines starting at the
+        // range's LAST line (`:2j 3` joins lines 2-4, vim 9.1 probe — the
+        // engine used to ignore it and join only two).
         if let Some(rest) =
             Self::boundary_cmd(line, "join").or_else(|| Self::boundary_cmd(line, "j"))
         {
-            self.ex_join(ctx, range, rest.trim().starts_with('!'));
+            self.ex_join(ctx, range, rest.trim());
             return;
         }
         ctx.host
@@ -674,14 +691,27 @@ impl VimState {
         }
     }
 
-    /// `:{range}j[oin][!]` — join the range's lines into one (single undo
-    /// step). Without `!` the J separator logic applies (one space at the
-    /// seam); with `!` the lines are concatenated verbatim (vim's `:j!` ≈
+    /// `:{range}j[oin][!] [count]` — join the range's lines into one (single
+    /// undo step). Without `!` the J separator logic applies (one space at
+    /// the seam); with `!` the lines are concatenated verbatim (vim's `:j!` ≈
     /// `gJ`). A one-line range joins with the NEXT line, so the bare `:j`
-    /// works.
-    fn ex_join(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), bang: bool) {
+    /// works. A COUNT re-anchors the range to count lines starting at its
+    /// LAST line (`:2j 3` joins lines 2-4).
+    fn ex_join(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
+        let bang = args.starts_with('!');
+        let count = args
+            .trim_start_matches('!')
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
         let last = last.min(ctx.buf.line_count().saturating_sub(1));
-        let first = first.min(last);
+        let mut first = first.min(last);
+        if count > 1 {
+            first = last;
+        }
+        let last = last
+            .saturating_add(count.saturating_sub(1))
+            .min(ctx.buf.line_count().saturating_sub(1));
         let lines = last - first + 1;
         // a single-address range still joins one seam (`:5j` = join 5 and 6)
         let joins = if lines < 2 { 1 } else { lines - 1 };
@@ -689,12 +719,14 @@ impl VimState {
         self.begin_edit();
         crate::ops::join_lines(self, ctx, joins + 1, bang);
         self.end_edit();
-        self.bump(ctx);
         // vim parks the cursor on the joined line's FIRST NON-BLANK after
         // `:j` (probes: `:1,2j` on ['    aaaa','bbbb'] → col 5, bare `:j` →
-        // col 1) — the seam landing is normal-mode `J`'s behavior
+        // col 1) — the seam landing is normal-mode `J`'s behavior. The cursor
+        // moves BEFORE `bump` so the changelist / `.` mark record the join
+        // site, not wherever the command's cursor happened to be before.
         self.cursor.offset = ctx.buf.first_non_blank(first);
         self.cursor.desired_col = None;
+        self.bump(ctx);
         ctx.host.changed();
         self.commit_change_record();
     }
@@ -748,9 +780,11 @@ impl VimState {
         self.begin_edit();
         self.edit_replace(ctx, start..end, &new_text);
         self.end_edit();
-        self.bump(ctx);
+        // cursor BEFORE bump: the changelist / `.` mark record the sorted
+        // range's first line, not the pre-command cursor
         self.cursor.offset = ctx.buf.first_non_blank(first);
         self.cursor.desired_col = None;
+        self.bump(ctx);
         ctx.host.changed();
         self.commit_change_record();
     }
@@ -833,11 +867,13 @@ impl VimState {
             },
             register,
         );
-        self.bump(ctx);
+        // cursor BEFORE bump: the changelist / `.` mark record the line that
+        // took the deleted lines' place, not the pre-command cursor
         let below = ctx.buf.line_count().saturating_sub(1);
         let line = first.min(below);
         self.cursor.offset = ctx.buf.first_non_blank(line);
         self.cursor.desired_col = None;
+        self.bump(ctx);
         ctx.host.changed();
         self.commit_change_record();
     }
@@ -896,8 +932,26 @@ impl VimState {
     /// (default: first match per line). Replacement follows Rust regex
     /// expansion (`$1`, documented divergence from vim's `\1`). The bare
     /// `:s` repeats the last substitute (vim; same on the current line).
-    /// Returns false when `line` is not a substitute command at all.
+    /// `:[range]s[ubstitute]` — the full spelling normalizes to the `s`
+    /// spelling (vim's one-word alias). Returns false when `line` is not a
+    /// substitute command at all.
     fn ex_substitute(&mut self, ctx: &mut Ctx, line: &str, range: (usize, usize)) -> bool {
+        // `s` + rest below; `substitute` is accepted as a spelling of `s`
+        let normalized;
+        let line = if let Some(rest) = line.strip_prefix("substitute") {
+            let is_alias = match rest.chars().next() {
+                None => true,
+                Some(c) => !c.is_alphanumeric(),
+            };
+            if is_alias {
+                normalized = format!("s{rest}");
+                &normalized
+            } else {
+                return false;
+            }
+        } else {
+            line
+        };
         let Some(after_s) = line.strip_prefix('s') else {
             return false;
         };
@@ -1028,15 +1082,16 @@ impl VimState {
         let new_text = joined.join("\n");
         self.edit_replace(ctx, range_start..range_end, &new_text);
         self.end_edit();
-        self.bump(ctx);
-        // computed AFTER the edit: pre-edit match offsets would be stale
-        // wherever an earlier line's substitution changed the byte length
+        // cursor BEFORE the bump: the changelist / `.` mark must record the
+        // LAST SUBSTITUTED line (vim probe: `:4s` then g; lands on line 4),
+        // not wherever the cursor happened to sit before the command
         if let Some(line_no) = last_sub_line {
             let line = line_no.min(ctx.buf.line_count() - 1);
             self.cursor.offset =
                 crate::buffer::clamp_to_line_end(ctx.buf, ctx.buf.first_non_blank(line));
             self.cursor.desired_col = None;
         }
+        self.bump(ctx);
         ctx.host.status_message(&format!("{total} substitutions"));
         // `.` repeats the substitution at the cursor's line
         self.commit_change_record();
