@@ -132,8 +132,13 @@ impl Options {
         }
     }
 
-    /// `:set name=value` for numeric options.
+    /// `:set name=value` for numeric options. Values are capped: tabstop and
+    /// shiftwidth feed `" ".repeat(n)`-shaped indent synthesis (insert Tab,
+    /// `>>`), and a typo like `:set sw=99999999999` must not hand the host a
+    /// gigabyte allocation. 1e6 columns is far past any real use; vim caps
+    /// these options at 2^31-1 instead (documented divergence).
     pub fn set_value(&mut self, name: &str, value: &str) -> bool {
+        const MAX_OPTION_VALUE: usize = 1_000_000;
         let Some(canon) = canonical_value(name) else {
             return false;
         };
@@ -141,6 +146,7 @@ impl Options {
         let Ok(v) = value.parse::<usize>() else {
             return false;
         };
+        let v = v.min(MAX_OPTION_VALUE);
         match canon {
             "tabstop" => self.tabstop = v,
             "shiftwidth" => self.shiftwidth = v,
