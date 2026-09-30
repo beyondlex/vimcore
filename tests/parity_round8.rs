@@ -251,6 +251,7 @@ fn block_session_ignores_host_click() {
 /// vim 9.1 探针 probe10：块 anchor(2,2) cursor(3,3) 时 `O` → cursor(2,3)
 /// （同列、换到块另一行端）；`o` → cursor(2,2)（对角角，既有 SwapEnds）。
 #[test]
+#[allow(non_snake_case)] // O 是按键名
 fn block_visual_O_moves_to_other_row_same_col() {
     let mut f = Fixture::new("aaaa\nbbbb\ncccc\ndddd\n");
     f.feed(["2", "g", "g", "l"]); // line1 col1 (0-based)
@@ -280,6 +281,7 @@ fn block_visual_O_moves_to_other_row_same_col() {
 
 /// 字符/行可视模式没有 `O`（vim 仅块选支持）——响铃。
 #[test]
+#[allow(non_snake_case)] // O 是按键名
 fn char_visual_O_bells() {
     let mut f = Fixture::new("abc\n");
     f.feed(["v", "l", "O"]);
@@ -302,6 +304,7 @@ fn marks_listing_shows_change_and_insert_specials() {
 
 /// `:bN` 是 `:bprev` 的 vim 别名（旧行为 E492）。
 #[test]
+#[allow(non_snake_case)] // bN 是命令名
 fn bN_aliases_bprev() {
     let mut f = Fixture::new("text\n");
     f.feed([":", "b", "N", "\n"]);
