@@ -26,6 +26,9 @@ fn normalize_control_char(key: Key) -> Key {
     key
 }
 
+/// `parse_range` 的返回体：范围（`None` = 未写范围前缀）+ 剥离范围后的命令。
+type ParsedRange<'a> = (Option<(usize, usize)>, &'a str);
+
 /// Command-line input buffer + per-prompt history.
 #[derive(Default)]
 pub struct Cmdline {
@@ -339,9 +342,9 @@ impl VimState {
         // the range prefix is parsed off before command dispatch; `None`
         // means "no range typed" — commands then apply their own default
         let (range, line) = match Self::parse_range(self, ctx, line) {
-            Some(parsed) => parsed,
-            None => {
-                ctx.host.status_message("E16: Invalid range");
+            Ok(parsed) => parsed,
+            Err(message) => {
+                ctx.host.status_message(&message);
                 ctx.host.bell();
                 return;
             }
@@ -553,62 +556,75 @@ impl VimState {
     /// optional `+n`/`-n` offset, joined by `,` or `;`. Returns the resolved
     /// inclusive line range (`None` when no prefix was typed — the command
     /// then decides its own default) and the remainder of the line (the
-    /// command). Note: vim's `;` sets the cursor to each intermediate
-    /// address; here `,` and `;` are treated alike (documented divergence).
+    /// command), or the vim error text (`E16` syntax, `E20` unset mark —
+    /// probed: `:'<,'>d` with no prior visual is `E20: Mark '< not set`).
+    /// Note: vim's `;` sets the cursor to each intermediate address; here
+    /// `,` and `;` are treated alike (documented divergence).
     fn parse_range<'a>(
         vim: &VimState,
         ctx: &Ctx,
         line: &'a str,
-    ) -> Option<(Option<(usize, usize)>, &'a str)> {
-        fn base_line(spec: &str, vim: &VimState, ctx: &Ctx) -> Option<usize> {
+    ) -> Result<ParsedRange<'a>, String> {
+        enum Base {
+            /// `%` is unusable as a per-address base (handled by the caller).
+            Unusable,
+            Line(usize),
+        }
+        fn base_line(spec: &str, vim: &VimState, ctx: &Ctx) -> Result<Base, String> {
+            let unset_mark = |name: &str| format!("E20: Mark {name} not set");
             match spec {
-                "." | "" => Some(ctx.buf.offset_to_line(vim.cursor.offset)),
-                // "%" is handled by the caller before per-address parsing;
-                // treat it as unusable here
-                "%" => None,
-                "$" => Some(ctx.buf.line_count().saturating_sub(1)),
+                "." | "" => Ok(Base::Line(ctx.buf.offset_to_line(vim.cursor.offset))),
+                "%" => Ok(Base::Unusable),
+                "$" => Ok(Base::Line(ctx.buf.line_count().saturating_sub(1))),
                 "'<" => vim
                     .marks
                     .active_visual()
-                    .map(|(a, _)| ctx.buf.offset_to_line(a))
+                    .map(|(a, _)| Base::Line(ctx.buf.offset_to_line(a)))
                     .or_else(|| {
                         vim.marks.resolve('<').map(|off| {
                             let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
-                            ctx.buf.offset_to_line(off)
+                            Base::Line(ctx.buf.offset_to_line(off))
                         })
-                    }),
-                "'>" => vim
-                    .marks
-                    .active_visual()
-                    .map(|(_, b)| {
-                        ctx.buf
-                            .offset_to_line(crate::buffer::floor_to_char_boundary(
-                                ctx.buf,
-                                b.saturating_sub(1),
-                            ))
                     })
-                    .or_else(|| {
-                        vim.marks.resolve('>').map(|off| {
-                            // '<'> hi is exclusive; floor(hi-1) = last char
-                            let off = crate::buffer::floor_to_char_boundary(
-                                ctx.buf,
-                                off.saturating_sub(1),
-                            );
-                            ctx.buf.offset_to_line(off)
+                    .ok_or_else(|| unset_mark("'<")),
+                "'>" => {
+                    vim.marks
+                        .active_visual()
+                        .map(|(_, b)| {
+                            Base::Line(ctx.buf.offset_to_line(
+                                crate::buffer::floor_to_char_boundary(ctx.buf, b.saturating_sub(1)),
+                            ))
                         })
-                    }),
+                        .or_else(|| {
+                            vim.marks.resolve('>').map(|off| {
+                                // '<'> hi is exclusive; floor(hi-1) = last char
+                                let off = crate::buffer::floor_to_char_boundary(
+                                    ctx.buf,
+                                    off.saturating_sub(1),
+                                );
+                                Base::Line(ctx.buf.offset_to_line(off))
+                            })
+                        })
+                        .ok_or_else(|| unset_mark("'>"))
+                }
                 // `'a`-style marks: resolve through the mark table (the range
                 // scanner accepts any `'x`; dropping them here made
                 // `:'a,'b d` fail with E16 even though they parsed)
-                other if other.len() == 2 && other.starts_with('\'') => other[1..]
-                    .chars()
-                    .next()
-                    .and_then(|name| vim.marks.resolve(name))
-                    .map(|off| {
-                        let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
-                        ctx.buf.offset_to_line(off)
-                    }),
-                other => other.parse::<usize>().ok().map(|n| n.saturating_sub(1)),
+                other if other.len() == 2 && other.starts_with('\'') => {
+                    let name = other[1..].chars().next().unwrap_or('\'');
+                    vim.marks
+                        .resolve(name)
+                        .map(|off| {
+                            let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
+                            Base::Line(ctx.buf.offset_to_line(off))
+                        })
+                        .ok_or_else(|| unset_mark(other))
+                }
+                other => other
+                    .parse::<usize>()
+                    .ok()
+                    .map(|n| Base::Line(n.saturating_sub(1)))
+                    .ok_or_else(|| "E16: Invalid range".to_owned()),
             }
         }
         fn with_offset(base: usize, spec: &str) -> usize {
@@ -646,11 +662,11 @@ impl VimState {
         let (range_part, rest) = line.split_at(range_end);
         if range_part.is_empty() {
             // no prefix: the command applies its own default
-            return Some((None, line));
+            return Ok((None, line));
         }
         if range_part.trim_end() == "%" {
             let last = ctx.buf.line_count().saturating_sub(1);
-            return Some((Some((0, last)), rest.trim_start()));
+            return Ok((Some((0, last)), rest.trim_start()));
         }
         let last = ctx.buf.line_count().saturating_sub(1);
         let mut first: Option<usize> = None;
@@ -667,14 +683,13 @@ impl VimState {
                 .unwrap_or((part, ""));
             // a bare `+n` / `-n` offsets the PREVIOUS address (vim: `.,+1`
             // is two addresses); an absent previous defaults to the cursor
-            let value = match base_line(base_str, vim, ctx) {
-                Some(base) => with_offset(base, off_str),
-                None if base_str.is_empty() => {
+            let value = match base_line(base_str, vim, ctx)? {
+                Base::Line(base) => with_offset(base, off_str),
+                Base::Unusable => {
                     let base =
                         previous.unwrap_or_else(|| ctx.buf.offset_to_line(vim.cursor.offset));
                     with_offset(base, off_str)
                 }
-                None => return None,
             };
             let value = value.min(last);
             previous = Some(value);
@@ -685,9 +700,9 @@ impl VimState {
         }
         match (first, last_line) {
             (Some(first), Some(last)) => {
-                Some((Some((first.min(last), first.max(last))), rest.trim_start()))
+                Ok((Some((first.min(last), first.max(last))), rest.trim_start()))
             }
-            _ => None,
+            _ => Err("E16: Invalid range".to_owned()),
         }
     }
 
@@ -1050,13 +1065,14 @@ impl VimState {
             let text = ctx.buf.slice(ls..le);
             let mut hits = 0usize;
             // one counting replacer serves both modes: `replace` stops after
-            // the first match, `replace_all` runs to the end of the line
+            // the first match, `replace_all` runs to the end of the line.
+            // Zero-width matches (`` :s/^/x/ ``, `` :s/$/x/ ``, `a*` on
+            // "bbb") count and expand like any other — vim substitutes at
+            // them (row-prefix/suffix insertion idiom); treating them as
+            // no-ops made those commands falsely report E486. The regex
+            // crate advances past empty matches itself, so replace_all
+            // cannot loop on them.
             let count_replacements = |caps: &regex::Captures| -> String {
-                let m = caps.get(0).unwrap();
-                if m.is_empty() {
-                    // empty matches would be counted once per position
-                    return m.as_str().to_owned();
-                }
                 hits += 1;
                 let mut out = String::new();
                 caps.expand(replacement, &mut out);

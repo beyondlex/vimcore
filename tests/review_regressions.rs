@@ -726,10 +726,15 @@ fn count_insert_repeat_volume_is_byte_capped() {
 #[test]
 fn numeric_option_values_are_capped() {
     let mut f = Fixture::new("a\nb\n");
-    f.feed([":", "s", "e", "t", " ", "s", "w", "=", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "<CR>"]);
+    f.feed([
+        ":", "s", "e", "t", " ", "s", "w", "=", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9",
+        "9", "<CR>",
+    ]);
     assert_eq!(f.vim.options_mut().shiftwidth, 1_000_000);
     // 缩进本身可用：1e6 以内的值原样生效（>> 只缩进当前行，vim 同款）
-    f.feed([":", "s", "e", "t", " ", "s", "w", "=", "2", "<CR>", ">", ">"]);
+    f.feed([
+        ":", "s", "e", "t", " ", "s", "w", "=", "2", "<CR>", ">", ">",
+    ]);
     assert_eq!(f.vim.options_mut().shiftwidth, 2);
     assert_eq!(f.text(), "  a\nb\n");
 }
@@ -778,4 +783,54 @@ fn insert_mode_backspace_refreshes_search_cache() {
         );
     }
     assert_eq!(f.vim.search.last_matches, vec![0..3]);
+}
+
+// ---- 零宽替换（:s/^/x/ 家族）------------------------------------------------
+
+/// 零宽匹配过去被当作"无替换"跳过且不计入 hits：`` :s/^/>/ `` 静默不动还误报
+/// E486。vim 里这是行首/行尾插入的标准惯用法，必须照常替换。
+#[test]
+fn substitute_at_caret_prepends_to_the_line() {
+    let mut f = Fixture::new("hello\nworld\n");
+    f.feed([":", "s", "/", "^", "/", ">", "/", "<CR>"]);
+    assert_eq!(f.text(), ">hello\nworld\n");
+    assert_eq!(f.host.statuses, ["1 substitutions"]);
+}
+
+#[test]
+fn substitute_dollar_appends_across_range() {
+    let mut f = Fixture::new("hello\nworld\n");
+    f.feed([":", "%", "s", "/", "$", "/", "<", "/", "<CR>"]);
+    assert_eq!(f.text(), "hello<\nworld<\n");
+    assert_eq!(f.host.statuses, ["2 substitutions"]);
+}
+
+/// `a*` 在无 `a` 文本上每处都是零宽匹配：vim `:s/a*/-/` 得 "-bbb"。
+#[test]
+fn substitute_star_pattern_replaces_empty_match() {
+    let mut f = Fixture::new("bbb\n");
+    f.feed([":", "s", "/", "a", "*", "/", "-", "/", "<CR>"]);
+    assert_eq!(f.text(), "-bbb\n");
+    assert_eq!(f.host.statuses, ["1 substitutions"]);
+}
+
+// ---- 未设置 mark 的范围报错（vim 实证 E20）-----------------------------------
+
+/// `:'<,'>d` 在从未进过 visual 的缓冲上：vim 报 `E20: Mark '< not set`，
+/// 引擎过去一律 E16（把"mark 未设置"和"范围语法错误"混为一谈）。
+#[test]
+fn range_with_unset_visual_marks_reports_e20() {
+    let mut f = Fixture::new("abc\n");
+    f.feed([":", "'", "<", ",", "'", ">", "d", "<CR>"]);
+    assert_eq!(f.host.statuses, ["E20: Mark '< not set"]);
+    assert_eq!(f.text(), "abc\n"); // 缓冲不动
+}
+
+/// 普通命名 mark 同理（vim: E20: Mark 'a not set）。
+#[test]
+fn range_with_unset_named_mark_reports_e20() {
+    let mut f = Fixture::new("abc\ndef\n");
+    f.feed([":", "'", "a", ",", "$", "d", "<CR>"]);
+    assert_eq!(f.host.statuses, ["E20: Mark 'a not set"]);
+    assert_eq!(f.text(), "abc\ndef\n");
 }
