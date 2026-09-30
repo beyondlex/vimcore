@@ -493,14 +493,16 @@ pub fn shift_line(vim: &mut VimState, ctx: &mut Ctx, line: usize, right: bool) {
 pub fn format_lines(vim: &mut VimState, ctx: &mut Ctx, start: usize, last_line: usize) {
     let width = vim.options.textwidth.max(1);
     let span_end = ctx.buf.line_end(last_line);
+    // gq formats WHOLE lines (vim 9.1 probe: `gq}` with the cursor mid-line
+    // reformats from column 0). The raw span start may sit mid-line (charwise
+    // motions like `gq}`, a charwise visual selection) — replacing from there
+    // would keep the pre-cursor text in place AND repeat it inside the
+    // reflowed paragraph. Anchor the edit at the first line's start.
+    let start = ctx.buf.line_start(ctx.buf.offset_to_line(start));
     if start >= span_end {
         vim.cursor.offset = clamp_cursor(ctx.buf, start);
         return;
     }
-    // `start` is a byte offset, but the loop below walks LINE indices: the
-    // first line must be derived. (Feeding the raw offset into the loop made
-    // `gqq` on any line past the first iterate an empty range and REPLACE the
-    // whole paragraph with nothing.)
     let first_line = ctx.buf.offset_to_line(start);
 
     let mut out = String::new();

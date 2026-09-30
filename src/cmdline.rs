@@ -205,12 +205,21 @@ impl VimState {
                         if !entry.is_empty() {
                             self.cmdline.last_command = Some(entry.clone());
                         }
+                        let gen_before = self.edit_generation;
                         self.execute_ex(ctx, &entry);
+                        // A non-mutating Ex command (`:5`, `:noh`, `:reg`,
+                        // E492…) must not glue itself onto the NEXT change's
+                        // `.` recording: vim repeats only the change (9.1
+                        // probe: `:2` `x` `gg` `.` repeats just the `x` at the
+                        // current line, not "jump to line 2 then delete").
+                        // Mutating commands (`:s`/`:d`/`:j`/`:sort`) commit
+                        // inside execute_ex — their edit generation moved.
+                        if self.edit_generation == gen_before {
+                            self.discard_change_record();
+                        }
                         // executing a visual `:` command ends visual mode
                         // (marks written, anchor cleared), like vim
-                        if let Some((kind, anchor, prompt_cursor)) =
-                            self.cmdline_visual.take()
-                        {
+                        if let Some((kind, anchor, prompt_cursor)) = self.cmdline_visual.take() {
                             self.close_visual_after_cmdline(ctx.buf, kind, anchor, prompt_cursor);
                         }
                     } else {
@@ -956,9 +965,6 @@ impl VimState {
             ctx.host.bell();
             return true;
         };
-        // remember for `&` / bare `:s` — even on E486, vim retries the same
-        // command and reports the same miss
-        self.cmdline.last_substitute = Some(line.to_owned());
         // `i` forces case-insensitive for this substitution, `I` forces
         // case-sensitive (overriding ignorecase/smartcase, like vim)
         if flags.contains('i') {
@@ -970,6 +976,10 @@ impl VimState {
             ctx.host.bell();
             return true;
         };
+        // remember for `&` / bare `:s` — only after the pattern COMPILED, or
+        // `&` would re-run a command that never worked (and even on a later
+        // E486, vim retries the same command and reports the same miss)
+        self.cmdline.last_substitute = Some(line.to_owned());
         let global = flags.contains('g');
 
         let (first_line, last_line) = range;
