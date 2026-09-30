@@ -5,6 +5,57 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺、第六轮检视增补（2026-09-30，回归测试在 `tests/parity_round6.rs`）
+
+本轮通读全部 `src/`（约 8k 行），先读码列可疑点、再 vim 9.1 探针逐例
+实证。两条读码怀疑被探针**证伪**（行为本就正确，未改动）：`5s` 在字符
+不足的行上 vim 同样只删到行尾再进 insert（钳制一致，非「整条取消」）；
+`:sort u` 无 `i` 时不做大小写折叠去重（`[foo,FOO,bar]` → 全保留，字节
+序），引擎的原 dedup 语义即对——只有 `i` 参与时才需折叠。
+
+### 新修复（语义类均先跑 vim 9.1 探针）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **visual `<Del>` 只删光标处一个字符** | vim 探针 `viw<Del>` 删整个选区（`hello world` → `hello `）。`navigation_key` 在命令表之前拦截 `Named("delete")`，visual 模式下抢走了命令表里 `<Del>`→`Operator(Delete)` 那一行。修复：visual 模式该键放行给命令表 |
+| 2 | **`2d3w` 删 23 个词**（count 跨算子串接） | vim 探针 6 词（2×3 相乘）。算子键按下时前缀 count 停在 `count` 里，motion 的数字继续 `×10+d` 拼上去。`op_count` 字段原本是死状态（无人写入）——现在算子 arm 里 `op_count = count.take()`，`take_total_count` 相乘。连带 `2gUU` 等前缀 count 到行级双写全部经此通路 |
+| 3 | **`3S` 只清一行** | vim 探针 `3S` 清 lines 2-4（['l1','X','l5']）。`SubstituteLine` 忽略 count。修复：取 count、行区间展开后走既有的 linewise Change |
+| 4 | **末行无尾换行时 linewise `p` 光标落原行** | vim 探针 `yy p` on "abc" 落第 2 行。`p` 的「末行后新开一行」分支插在 `buf.len()`，插入位指向新加的分隔 `\n`（仍是旧行），`offset_to_line(insert_at)` 差一行。修复：该分支光标位 +1 |
+| 5 | **`:1,2d 3` 删 L1-L4**（count 扩了范围） | vim 探针删 L2-L4：`{count}` 从范围**末行**起算（help: "starting with the LAST line in [range]"）；`:1,2y 3` 同理拈 L2-L4。`:d`/`:y` 都改为 count>1 时 `first = range.last` |
+| 6 | **`:sort iu` 不折叠大小写去重** | vim 探针 `[foo,FOO,bar]` → `[bar,foo]`（稳定 i 排序后原序在前的变体存活，与 Rust 稳定排序 + `dedup_by(lower)` 恰好一致；`u` 无 `i` 仍大小写敏感） |
+| 7 | **`:j` 光标落在接缝** | vim 探针：`:1,2j` on `['    aaaa','bbbb']` 光标 col 5（合并行首非空白），裸 `:j` col 1；普通模式 `J` 才落接缝（对照探针 col 9）。ex_join 现落 `first_non_blank(first)` |
+| 8 | **Replace 模式 BS 在 offset 0 吞栈项**（读码发现，非探针轮） | 位置守卫先行：`at > 0` 才 pop。旧行为在缓冲起点 BS 白白消耗一个覆盖栈项，后续 BS 恢复到错位字符（测试：`R ab Home BS End BS` → `ay` 而非 `ax`） |
+
+### 新功能
+
+- **`:set name?`**：按 vim 渲染报告当前值（`ignorecase` / `noignorecase`
+  / `tabstop=4`），`no` 前缀拼写可查询（`noic?`）；查询不改值。
+  裸 **`:set`** 逐行列出全部选项（旧实现只响铃）。
+  `Options::describe` / `describe_all` 是新增只读查询面。
+- **`:reg[isters]`**：非空寄存器逐行列出（unnamed 优先、命名按序；`^J`
+  表示换行，超长省略）。**`:marks`**：命名 mark 加 `<` `'` 特殊 mark
+  （`mark  line  col  text`）。`Registers::items` 新增。
+  两者都走既有 `status_message` 通道，宿主零改动可见。
+
+### 新增已知分歧（接续前表编号）
+
+26. `:ju`（join 的缩写歧义）报 E492 而非 join（`:j` 与 `:join` 可用）。
+27. `:sort` 的 `u` 去重代表元与 vim 在「多个变体 + 非稳定排序」的边角
+    上可能不同——稳定排序下已对齐（见修复 #6），仅极端输入存疑。
+28. Replace 模式 BS 的恢复栈按「逐字符 LIFO」建模：会话中做过纵向移动
+    后，BS 会把上一行的恢复项用到当前行（vim 的恢复历史含行移动）。需
+    位置感知栈才能对齐，暂缓。
+
+### 悬而未决（本轮记录、未改动）
+
+- **块寄存器行数与选区行数不齐**的 `p` 语义：vim 探针在 `-es` 下块选
+  失真（四轮用过的方法本轮复现失败），`rows.get(i).or(last)` 与 vim 的
+  「循环重复寄存器行」孰对孰错未实证，暂不动。
+- **`:s` 空匹配**（如 `s/x*/-/`）逐位置展开的行为与 vim 的推进规则是
+  否一致未探针；Rust regex `replace_all` 对空匹配每位置各展开一次，
+  vim 有自己的跳步规则。罕见，暂缓。
+- `parse_range` 对负行号（`:-5`）饱和到 0，vim 报 E16。无害分歧。
+
 ## 〇⁺、第五轮检视增补（2026-09-30，回归测试在 `tests/parity_round5.rs`）
 
 本轮以「探针先行」推进：所有语义改动先用 vim 9.1 无头脚本（`-es` +
@@ -228,3 +279,6 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
 - `q` 未开始时响铃；`@@` 无上次寄存器时响铃；都有对应测试。
 - 未知 Ex 命令报 `E492` 文本 + bell，`:action` 未命中按 strict/lenient
   分流（宿主决定是否提示）。
+- `:set` 三种只读形态（第六轮）：`name?` 查询单项、裸 `:set` 列出全部、
+  `:reg[isters]`/`:marks` 列表——此前 `:set` 无参数只响铃，寄存器/mark
+  状态对用户完全不可见。反馈统一走 `status_message`，宿主零改动。

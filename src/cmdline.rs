@@ -290,11 +290,12 @@ impl VimState {
     // ---- `:` Ex commands ---------------------------------------------------
 
     /// Execute a `:` command line. Supported in v1: `:noh[lsearch]`,
-    /// `:set` (booleans, `no`/`!` forms, `name=value` numerics),
-    /// `:[%]s/pat/rep/[g]`, `:[range]d[elete]`, `:w`, `:q`/`:q!`, `:wq`/`:x`,
-    /// `:bn[ext]`/`:bp[revious]`, and IdeaVim's `:action <id>` bridge.
-    /// Unknown commands get E492 and return to normal mode (mode is already
-    /// Normal here).
+    /// `:set` (booleans, `no`/`!`/`name?` forms, `name=value` numerics, bare
+    /// listing), `:[%]s/pat/rep/[g]`, `:[range]d[elete]`, `:[range]y[ank]`,
+    /// `:[range]sor[t]`, `:[range]j[oin]`, `:reg[isters]`, `:marks`,
+    /// `:w`, `:q`/`:q!`, `:wq`/`:x`, `:bn[ext]`/`:bp[revious]`, and
+    /// IdeaVim's `:action <id>` bridge. Unknown commands get E492 and return
+    /// to normal mode (mode is already Normal here).
     pub(crate) fn execute_ex(&mut self, ctx: &mut Ctx, line: &str) {
         let line = line.trim();
         if line.is_empty() {
