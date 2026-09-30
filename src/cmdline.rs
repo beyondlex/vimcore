@@ -982,10 +982,14 @@ impl VimState {
             return false;
         }
         let mut parts = after_s[sep.len_utf8()..].split(sep);
-        let (Some(pattern), Some(replacement)) = (parts.next(), parts.next()) else {
+        let Some(pattern) = parts.next() else {
             ctx.host.bell();
             return true;
         };
+        // a MISSING replacement (`:s/foo`, nothing after the pattern) is an
+        // EMPTY one — vim deletes the match (9.1 probe), it does not reuse
+        // the last command's replacement
+        let replacement = parts.next().unwrap_or("");
         let flags = parts.next().unwrap_or("");
         if parts.next().is_some() {
             ctx.host.bell();
