@@ -389,19 +389,24 @@ impl VimState {
             return;
         }
         // :{range}d[elete] [x] [count] — delete the range's lines; a numeric
-        // argument extends the range that many lines down (vim's `:2d 3`),
-        // an alphabetic one names the register (unsupported, ignored)
+        // argument is a COUNT that starts at the range's LAST line (vim:
+        // `:1,2d 3` deletes lines 2-4, probe — the engine used to extend the
+        // range to 1-4), an alphabetic one names the register (unsupported,
+        // ignored)
         if let Some(rest) =
             Self::boundary_cmd(line, "d").or_else(|| Self::boundary_cmd(line, "delete"))
         {
             let rest = rest.trim();
-            let extra_lines = match rest.chars().next() {
+            let count = match rest.chars().next() {
                 Some(c) if c.is_ascii_digit() => rest.parse::<usize>().unwrap_or(1),
                 _ => 1,
             };
-            let (first, last) = range;
+            let (mut first, last) = range;
+            if count > 1 {
+                first = last;
+            }
             let last = last
-                .saturating_add(extra_lines.saturating_sub(1))
+                .saturating_add(count.saturating_sub(1))
                 .min(ctx.buf.line_count().saturating_sub(1));
             self.ex_delete_lines(ctx, (first, last));
             return;
@@ -599,6 +604,10 @@ impl VimState {
         crate::ops::join_lines(self, ctx, joins + 1, bang);
         self.end_edit();
         self.bump(ctx);
+        // vim parks the cursor on the joined line's FIRST NON-BLANK after
+        // `:j` (probes: `:1,2j` on ['    aaaa','bbbb'] → col 5, bare `:j` →
+        // col 1) — the seam landing is normal-mode `J`'s behavior
+        self.cursor.offset = ctx.buf.first_non_blank(first);
         self.cursor.desired_col = None;
         ctx.host.changed();
         self.commit_change_record();
@@ -627,7 +636,13 @@ impl VimState {
             }
         };
         lines.sort_by_key(|s| lower(s));
-        if unique {
+        if unique && ignore_case {
+            // vim folds the dedup when `i` is set (`%sort iu` on
+            // [foo,FOO,bar] → [bar,foo], probe). The stable case-insensitive
+            // sort puts the original-first variant ahead, so plain dedup_by
+            // keeps exactly the survivor vim keeps.
+            lines.dedup_by(|a, b| lower(a) == lower(b));
+        } else if unique {
             lines.dedup();
         }
         if reverse {
@@ -654,29 +669,33 @@ impl VimState {
 
     /// `:{range}y[ank] [x] [count]` — yank the range's lines into a register
     /// (default: the unnamed/yank path like `yy`). The second argument is a
-    /// COUNT that extends the range that many lines down whether or not a
-    /// register named it (`:2y a 3` = three lines into `"a`, vim 9.1 probe);
-    /// a lone numeric first argument is a count (`:2y 3`). The buffer is
-    /// untouched.
+    /// COUNT of lines starting at the range's LAST line (`:2y a 3` = three
+    /// lines into `"a`, `:1,2y 3` = lines 2-4, vim 9.1 probe — the engine
+    /// used to extend the range instead); a lone numeric first argument is a
+    /// count (`:2y 3`). The buffer is untouched.
     fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
         let mut register = None;
-        let mut extra_lines = 0usize;
+        let mut count = 0usize;
         let mut parts = args.split_whitespace();
         if let Some(head) = parts.next() {
             if let Some(c) = head.chars().next() {
                 if c.is_ascii_digit() {
-                    extra_lines = head.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                    count = head.parse::<usize>().unwrap_or(1);
                 } else if c.is_ascii_alphanumeric() {
                     register = Some(c);
                     // the count may follow the register (`:y a 2`)
-                    if let Some(count) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
-                        extra_lines = count.saturating_sub(1);
+                    if let Some(n) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                        count = n;
                     }
                 }
             }
         }
+        let (mut first, last) = (first, last);
+        if count > 1 {
+            first = last;
+        }
         let last = last
-            .saturating_add(extra_lines)
+            .saturating_add(count.saturating_sub(1))
             .min(ctx.buf.line_count().saturating_sub(1));
         let first = first.min(last);
         let span = crate::ops::OpSpan {
