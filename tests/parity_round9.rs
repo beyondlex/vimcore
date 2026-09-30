@@ -287,6 +287,40 @@ fn block_put_with_short_register_leaves_exhausted_rows_empty() {
     assert_eq!(f.buf.slice(0..f.buf.len()), "aaaa\nbbbb\ncc\n");
 }
 
+// ---- 12. insert_change_pos 跨行移动后 floor（fuzz round9 抓取） -----------------
+
+/// fuzz round9（seed 7）抓取：insert 会话首敲位置（insert_change_pos）是
+/// 裸 offset，编辑漏斗不调整——会话中 BS 并线把文本挪动后，exit 记进
+/// changelist 的偏移落在多字节字符中间，`:marks` 列 `.` 行时宿主
+/// offset_to_line panic。修复：exit 时 floor 到当前文本的字符边界。
+#[test]
+fn insert_change_pos_floored_after_mid_session_line_join() {
+    // "中文\nab\n"：行 1 首敲位置 = offset 5；BS 并线删掉 \n(4) 后文本变
+    // "中文zab\n"，offset 5 落在 '文'（3..6）中间——旧行为把它原样记进
+    // changelist，`:marks` 列 `.` 行时宿主 offset_to_line panic。
+    let mut f = Fixture::at("中文\nab\n", 1, 0);
+    f.feed(["i"]);
+    f.type_text("z"); // insert_change_pos = 5
+    f.feed(["<left>", "<BS>"]); // 并线：文本变 "中文zab\n"
+    f.feed(["<Esc>"]); // exit_insert 记 changelist
+    let text = f.text();
+    assert_eq!(text, "中文zab\n");
+    match f.vim.marks.last_change {
+        Some(o) => assert!(
+            o <= text.len() && (o == text.len() || text.is_char_boundary(o)),
+            "changelist 记位必须在字符边界上（fuzz round9 抓到 mid-char），got {o}"
+        ),
+        None => panic!("changelist 应有记录"),
+    }
+    // `:marks` 列出 `.` 不得 panic
+    f.feed([":"]);
+    for c in "marks".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed(["<CR>"]);
+    assert_eq!(f.buf.slice(0..f.buf.len()), "中文zab\n");
+}
+
 // ---- 11. :bfirst / :blast ---------------------------------------------------------
 
 /// NOTES.md 第八轮「悬而未决」：宿主 trait 补 `first_buffer`/`last_buffer`

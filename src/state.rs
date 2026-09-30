@@ -1465,8 +1465,14 @@ impl VimState {
         self.commit_change_record();
         // a plain insert session never ran a command `bump`: its first typed
         // position is the changelist entry (vim probe: `i`-typing at col 2
-        // then `g;` lands on that exact offset)
+        // then `g;` lands on that exact offset). The position was taken at
+        // the session's FIRST typed char and is NOT adjusted by the edit
+        // funnels — a mid-session line join (BS at line start, <C-w>) shifts
+        // the text under it, so floor it onto the CURRENT text (fuzz round
+        // 9: a stale entry landed mid-multibyte-char and `:marks`'s `.` line
+        // panicked in the host's offset_to_line)
         if let Some(pos) = self.insert_change_pos.take() {
+            let pos = crate::buffer::floor_to_char_boundary(ctx.buf, pos);
             self.record_change_position(pos);
         }
         self.insert_session = None;
