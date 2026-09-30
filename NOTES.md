@@ -45,6 +45,9 @@ insert `<C-r>`/带换行 IME 注入）并新增 `search.last_matches` 可寻址
 ### 悬而未决（本轮记录、未改动）
 
 - `g&`（`:s` 的全局重复，vim: 按 `%` 范围重放）未实现。
+- `:d`/`:y` 首参数为数字时按 COUNT 解析（`:y 1` = count 1），vim 把
+  数字也当合法寄存器名（`:1y 2` 进 `"2`）。极边缘，需区分「单参数数字
+  = count、显式第二参数数字 = 寄存器」才能对齐，暂缓。
 - `publish_incsearch` 每键全缓冲扫描不受 `set_hlsearch_live_update(false)`
   约束（那是编辑路径的开关）；巨文件宿主要自行 `set nois`。
 - Replace 模式 BS 的恢复栈在换行分割之后位置失配（第九轮悬置）；
