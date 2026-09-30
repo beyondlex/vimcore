@@ -1093,8 +1093,10 @@ fn dot_does_not_repeat_visual_block_insert() {
     assert_eq!(f.text(), "#a\n#bb\n#cc\n");
     f.feed(["."]);
     // `.` replays the earlier `x` (deletes one char under the cursor) — the
-    // block insert never became the last change
-    assert_eq!(f.text(), "#a\n#b\n#cc\n");
+    // block insert never became the last change. The cursor stays on the
+    // typing row's inserted `#` (its LOGICAL position, byte-adjusted for the
+    // replica inserts above it), so `x` deletes that `#`.
+    assert_eq!(f.text(), "#a\n#bb\ncc\n");
 }
 
 // ---- R replace mode (ROADMAP task 6) -------------------------------------------

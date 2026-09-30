@@ -34,6 +34,13 @@ impl VimState {
             if let KeyKind::Named(name) = &key.kind {
                 match name.as_str() {
                     "enter" => {
+                        // a newline mid-session moves the cursor to another
+                        // row, desyncing the block session's replica offsets
+                        // the same way a vertical move would (locked above)
+                        if self.in_block_insert() {
+                            ctx.host.bell();
+                            return ProcessOutcome::Consumed;
+                        }
                         self.insert_text_at_cursor(ctx, "\n");
                         return ProcessOutcome::Consumed;
                     }

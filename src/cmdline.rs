@@ -292,6 +292,14 @@ impl VimState {
         } else {
             (cursor, anchor)
         };
+        // the command may have shrunk the buffer: the prompt-time bounds are
+        // pre-edit bytes and must be floored/clamped onto the CURRENT text
+        // before they become stored marks (the engine's addressability
+        // invariant — fuzz caught `last_visual` past the end of an emptied
+        // buffer)
+        let lo = crate::buffer::floor_to_char_boundary(buf, lo);
+        let hi = crate::buffer::floor_to_char_boundary(buf, hi);
+        let (lo, hi) = (lo.min(hi), hi.max(lo));
         self.marks.set('<', lo);
         self.marks.set('>', hi);
         // exclusive end one CHAR past the last covered char — `hi + 1` bytes
