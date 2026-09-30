@@ -1395,14 +1395,17 @@ impl VimState {
             let ls = ctx.buf.line_start(line);
             let indent_str = ctx.buf.slice(ls..ls + ctx.buf.line_indent(line).0);
             let at = ctx.buf.line_end(line);
-            let mut extra = String::new();
-            for _ in 0..copies {
-                extra.push_str(&format!("\n{indent_str}{}", rep.text));
-            }
+            // one unit per copy; the repeat count is byte-capped like the
+            // paste path (`clamped_repeat_count`) — `99999999o` + typed text
+            // must not turn a small session into a multi-gigabyte insert
+            let unit = format!("\n{indent_str}{}", rep.text);
+            let copies = crate::ops::clamped_repeat_count(unit.len(), copies);
+            let extra = unit.repeat(copies);
             let extra_len = extra.len();
             self.edit_insert(ctx, at, &extra);
             self.cursor.offset = at + extra_len;
         } else {
+            let copies = crate::ops::clamped_repeat_count(rep.text.len(), copies);
             let extra = rep.text.repeat(copies);
             let len = extra.len();
             self.edit_insert(ctx, self.cursor.offset, &extra);

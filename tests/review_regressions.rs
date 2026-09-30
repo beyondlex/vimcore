@@ -699,3 +699,37 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     *state = x;
     x
 }
+
+// ---- unbounded-allocation guards (第十轮审查) ---------------------------------
+
+/// count-repeat insert 的复制体积必须有字节上限：`99999999i` + 长文本 + <Esc>
+/// 走 `replicate_count_insert`，过去对 `text.repeat(copies)` 不设防，一个小会话
+/// 就能让宿主吃掉数 GB（寄存器粘贴路径早有 16MB 的 `clamped_repeat` 防线）。
+#[test]
+fn count_insert_repeat_volume_is_byte_capped() {
+    let mut f = Fixture::new("x\n");
+    let payload = "abcdefghij".repeat(10); // 100 bytes typed once
+    f.feed(["9", "9", "9", "9", "9", "9", "9", "9", "i"]); // count 99999999
+    f.type_text(&payload);
+    f.feed(["<Esc>"]);
+    let len = f.text().len();
+    assert!(
+        len < 17 * 1024 * 1024,
+        "count-insert replicated {len} bytes — no cap"
+    );
+    // 复制本身仍然发生（cap 之内），不等于完全禁用
+    assert!(len > payload.len(), "replication should still happen");
+}
+
+/// `:set sw=` 巨值曾被原样接受，随后 `>>` 用 `" ".repeat(sw)` 生成缩进——
+/// 现在数值选项在 set_value 边界截到 1e6。
+#[test]
+fn numeric_option_values_are_capped() {
+    let mut f = Fixture::new("a\nb\n");
+    f.feed([":", "s", "e", "t", " ", "s", "w", "=", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "<CR>"]);
+    assert_eq!(f.vim.options_mut().shiftwidth, 1_000_000);
+    // 缩进本身可用：1e6 以内的值原样生效（>> 只缩进当前行，vim 同款）
+    f.feed([":", "s", "e", "t", " ", "s", "w", "=", "2", "<CR>", ">", ">"]);
+    assert_eq!(f.vim.options_mut().shiftwidth, 2);
+    assert_eq!(f.text(), "  a\nb\n");
+}
