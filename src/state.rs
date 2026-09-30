@@ -3368,6 +3368,42 @@ impl VimState {
                     self.cursor.offset = anchor;
                 }
             }
+            // O (block mode): swap the two ROW-ends, each side keeping its
+            // own column — the rectangle stays on screen, the cursor lands
+            // on the anchor's row at the cursor's column (vim 9.1 probe:
+            // anchor (2,2) cursor (3,3) → O puts the cursor at (2,3)). Not
+            // applicable outside block mode — bell like vim's unmapped keys.
+            VisualCmd::SwapEndsKeepCol => {
+                let is_block = matches!(
+                    self.mode,
+                    Mode::Visual {
+                        kind: crate::mode::VisualKind::Block
+                    }
+                );
+                let Some((anchor, cursor, _)) = self.visual_selection() else {
+                    return;
+                };
+                if !is_block {
+                    ctx.host.bell();
+                    return;
+                }
+                let (a_line, c_line) = (
+                    ctx.buf.offset_to_line(anchor),
+                    ctx.buf.offset_to_line(cursor),
+                );
+                if a_line == c_line {
+                    return; // single-row block: nothing to swap
+                }
+                let (a_col, c_col) = (
+                    crate::buffer::display_column(ctx.buf, anchor),
+                    crate::buffer::display_column(ctx.buf, cursor),
+                );
+                self.visual_anchor =
+                    Some(crate::buffer::offset_for_display_column(ctx.buf, c_line, a_col));
+                self.cursor.offset =
+                    crate::buffer::offset_for_display_column(ctx.buf, a_line, c_col);
+                self.cursor.desired_col = None;
+            }
             VisualCmd::PutReplace => {
                 if matches!(
                     self.mode,

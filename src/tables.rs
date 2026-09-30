@@ -77,6 +77,9 @@ pub enum VisualCmd {
         to: char,
     }, // v / V
     SwapEnds, // o
+    /// `O` (block mode only): cursor to the same column on the block's other
+    /// row-end (vim: "same column, but cursor at the other end").
+    SwapEndsKeepCol, // O
     PutReplace, // p / P replace selection
     Join {
         literal: bool,
@@ -545,6 +548,7 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
         CmdKind::Visual(VisualCmd::ToggleKind { to: 'b' }),
     );
     b.visual(&["o"], CmdKind::Visual(VisualCmd::SwapEnds));
+    b.visual(&["O"], CmdKind::Visual(VisualCmd::SwapEndsKeepCol));
     b.visual(&["d"], CmdKind::Operator(Operator::Delete));
     b.visual(&["x"], CmdKind::Operator(Operator::Delete));
     b.visual(&["<Del>"], CmdKind::Operator(Operator::Delete));

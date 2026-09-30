@@ -5,6 +5,64 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺、第八轮检视增补（2026-09-30，回归测试在 `tests/parity_round8.rs`、
+fuzz 在 `tests/fuzz_round8.rs`）
+
+本轮通读全部 `src/`，读码列可疑点 → vim 9.1 探针实证 → 修复；随后把
+fuzz 键表扩到本轮修复路径并注入宿主点击，64 种子×150 轮×200 步离线
+轰炸抓到三个引擎不变量违规。两条读码怀疑被探针**证伪**未改动：
+`:j` 在 EOF 的空操作 vim 也会记 changelist + undo 条目（引擎的
+`bump()` 反而一致）；`dip` 单空行后 vim 的 `"` 寄存器确实被写入空行。
+
+### 新修复（1-4 语义类均先跑 vim 9.1 探针；5-7 为 fuzz 抓取）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **`gq` charwise 起点复制光标前文本** | 探针：光标在 'bb' 上 `gq}`，vim 从 column 0 整行重排；引擎替换区间从 `span.start`（行中）开始而重排文本含整行 → "aaaa " 出现两份。`format_lines` 现把起点锚到首行行首（charwise visual `v$gq` 同款） |
+| 2 | **`.` 重放被无变更 Ex 命令污染** | 探针：`:2` `x` `gg` `.`，vim 只重放 `x`（"one"→"ne"）；引擎把 `:2<CR>` 留在录制里，`.` 变成「跳 L2 再删」。`cmdline_key` 的 enter 分支在 `execute_ex` 后按 `edit_generation` 判定：无变更（`:5`/`:noh`/`:reg`/E492/…）即丢弃录制；变更类（`:s`/`:d`/`:j`/`:sort`）在 execute_ex 内已 commit |
+| 3 | **`Vp` 行级粘贴破坏存活的缩进行** | 探针：`"XY`（linewise）+ `V` 选 'abc' + `p`，存活的 ' ghi' 完好。引擎 `PutReplace` 的 linewise 分支在 delete_span 停放的光标（first_non_blank，可能行中）插入 → `" XY"` 且缩进丢失。现在行级选区从 `span.start`（行首）插入；charwise 选区 + linewise 寄存器的组合仍悬置（见第七轮） |
+| 4 | **`:s` 非法模式顶掉 `last_substitute`** | 编译失败的 `:s/(/x/` 曾在 `build()` 之前记入 `last_substitute`，`&` 会重放一条从未成功过的命令。改为 build 成功后记录 |
+| 5 | **`gv` 恢复 mid-char 锚点**（fuzz） | `last_visual` 有两份：`marks.last_visual`（`'<`/`'>` 读）与引擎侧 `VimState.last_visual`（`gv` 读，带 kind）。第七轮 #11 的 refloor 只盖了 marks 副本——等长替换重画字节网格后引擎副本留在字符中间，`gv` 恢复出非法选区。`refloor_stored_offsets`/`sanitize_stored_offsets` 补 floor 引擎副本，`RestoreVisual` 读路径再防御一层 |
+| 6 | **块插入会话三条跨行漏洞**（fuzz） | 第七轮只锁了纵向移动/回车；行首 BS 并线、`<Del>` 删 `\n`、含 `\n` 的 IME 文本同样打飞复制偏移（fuzz 复现：复制在缓冲末尾之外 insert）。三者现在响铃拒绝。连带修复：`record_typed_text` 在 `insert_text_at_cursor` **拒绝文本之前**就把内容推进 `block.text`——被拒绝的换行仍参与退出复制；改由 insert 落盘成功后追加 |
+| 7 | **块会话中宿主点击甩走光标**（fuzz） | 点击注入把光标移到另一行后，复制偏移假设（所有键入落在打字行）崩坏。`set_cursor_offset`/`set_visual_range` 在块会话期间忽略移动——真实 gpui/crossterm 宿主打字中点击同样会触发 |
+
+### 新功能
+
+- **块选 `u`/`U`/`~`**（`gu`/`gU`/`g~` 同款）：逐行大小写翻转，光标落
+  块起点（vim 9.1 探针：`<C-v>jllU` → ABC/DEF，光标 line 1 col 1）。
+  旧行为响铃。多字节行按显示列解析块区间，替换走 `edit_replace`。
+- **块选 `O`**：行端交换、两侧各自保持列——选区矩形在屏幕上不变，
+  光标落到 anchor 行的光标列（vim 9.1 探针：anchor(2,2) cursor(3,3)
+  → `O` 后 cursor(2,3)）。char/line 模式的 `O` 响铃（vim 仅块选支持）。
+  既有 `o` = 对角角交换不变。
+- **`:marks` 列出 `.` 与 `^`**：最后变更位与最后插入退出位（vim 列出）。
+- **`:bN`**：`:bprev` 的 vim 别名。
+
+### 悬而未决（本轮记录、未改动）
+
+- `:bfirst`/`:blast` 未支持——`VimHost::cycle_buffer` 只有 forward 参数；
+  未知命令走 E492 可见。
+- visual **charwise** 选区 + linewise 寄存器的 `p` 精确语义仍悬置
+  （第七轮遗留；本轮对齐的是 V/V 行级选区，探针明确）。
+- `parse_range` 对**越界正行号**（`:5,10y` 于 3 行缓冲）饱和到边界，
+  vim 报 E16——第七轮记录的负行号分歧的同族，无害。
+
+### 体验备注（本轮）
+
+- 块插入会话的跨行封锁清单至此完整：纵向移动、回车、行首 BS、
+  `<Del>` 换行、含 `\n` 文本、宿主点击/拖拽——全部响铃或忽略。
+- `:reg` 渲染去掉了一次冗余的全文 `replace` 计算（每寄存器两次 → 一次）。
+
+### 性能备注（本轮复核）
+
+- bench_probe 全量复跑：`w` 2.1µs/键（11KB）、hlsearch 重扫 0.25ms/次、
+  `:%s` 600KB 5.0ms、`n` 连跳 3.7µs/键（ropey）——与第七轮同量级。
+- 1MB 单行 `w` 109µs/键的大头是朴素 String 宿主 `offset_to_line` 的
+  O(n) 扫描（每次键 3-4 次调用），ropey 宿主 3.7µs——引擎侧无新热点；
+  `x` 232µs/键仍由宿主 String memmove 主导。
+- 新增的 last_visual 双副本 refloor 是每次删除/替换 O(存储偏移数)，
+  在 bench 量级不可见。
+
 ## 〇⁺⁺⁺、第七轮检视增补（2026-09-30，回归测试在 `tests/parity_round7.rs`、
 fuzz 在 `tests/fuzz_round7.rs`）
 
