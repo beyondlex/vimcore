@@ -2797,6 +2797,18 @@ impl VimState {
         }
     }
 
+    /// The span END for `D`/`C` with a count: the covered lines disappear
+    /// whole, but the LAST covered line keeps its trailing newline unless the
+    /// count reached the buffer end (vim 9.1: `3D` from line 1 on a 4-line
+    /// buffer → ['a','dddd']; `99D` on a 2-line buffer → ['a']).
+    fn delete_to_end_span(ctx: &Ctx, line: usize, count: usize, last: usize) -> usize {
+        if line + count > ctx.buf.line_count() - 1 {
+            ctx.buf.line_range(last).end
+        } else {
+            ctx.buf.line_end(last)
+        }
+    }
+
     /// Execute a resolved Normal-mode command (the `CmdKind::Normal` arms of
     /// the command table). Conventions across the arms:
     /// * `take_total_count` collapses `[3]d[d]`-style prefix counts into the
@@ -2856,13 +2868,21 @@ impl VimState {
                 ops::apply(self, ctx, Operator::Change, &span, self.register);
                 self.bump_if_edited(ctx, gen);
             }
-            // C: change to end of line; on an empty tail (`C` at line end)
-            // there is nothing to delete — behave like `A`
+            // C: change to end of line; a count changes through the END of
+            // the count-th line down. vim's model is "delete [count] lines,
+            // at least to end of line" (9.1 probes: `2C` from (1,2) on
+            // ['aaaa','bbbb','cccc','dddd'] → ['anew','cccc','dddd'] — the
+            // covered lines vanish whole, the LAST covered line keeps its
+            // trailing newline so the following line survives; only when the
+            // count reaches the buffer end does that newline go too, `99D`
+            // on a 2-line buffer → ['a']). Count 1 never joins, like d$.
             NormalCmd::ChangeToEnd => {
+                let count = self.take_total_count();
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
+                let last = (line + count - 1).min(ctx.buf.line_count() - 1);
                 let span = ops::OpSpan {
                     start: self.cursor.offset,
-                    end: ctx.buf.line_end(line),
+                    end: Self::delete_to_end_span(ctx, line, count, last),
                     linewise: false,
                 };
                 if span.end > span.start {
@@ -2873,12 +2893,15 @@ impl VimState {
                     self.start_insert(ctx, InsertKind::AppendLineEnd);
                 }
             }
-            // D: delete to end of line (no-op when already at it)
+            // D: delete to end of line; a count deletes the covered lines
+            // whole (same end rules as `C` above)
             NormalCmd::DeleteToEnd => {
+                let count = self.take_total_count();
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
+                let last = (line + count - 1).min(ctx.buf.line_count() - 1);
                 let span = ops::OpSpan {
                     start: self.cursor.offset,
-                    end: ctx.buf.line_end(line),
+                    end: Self::delete_to_end_span(ctx, line, count, last),
                     linewise: false,
                 };
                 if span.end > span.start {
@@ -3081,7 +3104,15 @@ impl VimState {
                         false
                     };
                     if !moved {
-                        ctx.host.status_message("E662: At start of changelist");
+                        // vim separates the two dead ends: E662 walking
+                        // backward past the oldest entry, E663 forward past
+                        // the newest (the engine used to report E662 both ways)
+                        let message = if older {
+                            "E662: At start of changelist"
+                        } else {
+                            "E663: At end of changelist"
+                        };
+                        ctx.host.status_message(message);
                         ctx.host.bell();
                         break;
                     }
