@@ -22,43 +22,49 @@ pub enum Phase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NormalCmd {
-    DeleteCharForward,           // x
-    DeleteCharBackward,          // X
-    SubstituteChar,              // s
-    SubstituteLine,              // S
-    ChangeToEnd,                 // C
-    DeleteToEnd,                 // D
-    YankLine,                    // Y
-    ReplaceChar,                 // r{char}
-    ToggleChar,                  // ~
-    PutAfter,                    // p
-    PutBefore,                   // P
-    Join,                        // J
-    JoinLiteral,                 // gJ
-    Undo,                        // u
-    Redo,                        // <C-r>
-    MarkSet,                     // m{char}
-    RecordMacro,                 // q{reg}
-    PlayMacro,                   // @{reg} / @@
-    JumpMark { linewise: bool }, // '{char} / `{char
-    LinewiseOp(Operator),        // guu / gUU / g~~ / gugu ...
-    ScrollCenter,                // zz
-    ScrollTop,                   // zt
-    ScrollBottom,                // zb
-    RestoreVisual,               // gv
-    RepeatChange,                // .
-    JumpBackward,                // C-o
-    JumpForward,                 // C-i
-    OlderChange,                 // g;
-    NewerChange,                 // g,
+    DeleteCharForward,  // x
+    DeleteCharBackward, // X
+    SubstituteChar,     // s
+    SubstituteLine,     // S
+    ChangeToEnd,        // C
+    DeleteToEnd,        // D
+    YankLine,           // Y
+    ReplaceChar,        // r{char}
+    ToggleChar,         // ~
+    PutAfter,           // p
+    PutBefore,          // P
+    Join,               // J
+    JoinLiteral,        // gJ
+    Undo,               // u
+    Redo,               // <C-r>
+    MarkSet,            // m{char}
+    RecordMacro,        // q{reg}
+    PlayMacro,          // @{reg} / @@
+    JumpMark {
+        linewise: bool,
+    }, // '{char} / `{char
+    LinewiseOp(Operator), // guu / gUU / g~~ / gugu ...
+    ScrollCenter,       // zz
+    ScrollTop,          // zt
+    ScrollBottom,       // zb
+    RestoreVisual,      // gv
+    RepeatChange,       // .
+    JumpBackward,       // C-o
+    JumpForward,        // C-i
+    OlderChange,        // g;
+    NewerChange,        // g,
     /// gn / gN: select the next match (enter visual; reshape an existing
     /// selection). With an operator (`dgn`) the span is the match itself.
-    SelectMatch { backward: bool },
-    IncrementNumber,             // C-a
-    DecrementNumber,             // C-x
-    WriteQuit,                   // ZZ
-    QuitNoSave,                  // ZQ
-    ScrollLines { down: bool },  // C-e / C-y: scroll the view one line
+    SelectMatch {
+        backward: bool,
+    },
+    IncrementNumber, // C-a
+    DecrementNumber, // C-x
+    WriteQuit,       // ZZ
+    QuitNoSave,      // ZQ
+    ScrollLines {
+        down: bool,
+    }, // C-e / C-y: scroll the view one line
     /// `&`: repeat the last `:s` on the current line (the stored command
     /// line re-runs through `execute_ex`).
     RepeatSubstitute,
@@ -488,10 +494,7 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["<C-a>"], CmdKind::Normal(NormalCmd::IncrementNumber));
     b.normal(&["<C-x>"], CmdKind::Normal(NormalCmd::DecrementNumber));
     // &: repeat the last :s on the current line (vim)
-    b.normal(
-        &["&"],
-        CmdKind::Normal(NormalCmd::RepeatSubstitute),
-    );
+    b.normal(&["&"], CmdKind::Normal(NormalCmd::RepeatSubstitute));
     b.normal(&["@"], CmdKind::Normal(NormalCmd::PlayMacro));
     b.normal(&["z", "z"], CmdKind::Normal(NormalCmd::ScrollCenter));
     b.normal(&["z", "t"], CmdKind::Normal(NormalCmd::ScrollTop));

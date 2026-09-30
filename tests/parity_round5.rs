@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Fixture, edit};
+use common::{edit, Fixture};
 
 // ---- visual mode: counts and feedback ---------------------------------------
 
@@ -22,7 +22,12 @@ fn visual_indent_applies_the_count() {
     );
     // in NORMAL mode the count means LINES, not shiftwidths (vim `3<<`
     // outdents three lines by one shiftwidth each)
-    let f = edit("        l1\n        l2\n        l3\n", 0, 0, &["3", "<", "<"]);
+    let f = edit(
+        "        l1\n        l2\n        l3\n",
+        0,
+        0,
+        &["3", "<", "<"],
+    );
     assert_eq!(
         f.text(),
         "    l1\n    l2\n    l3\n",
@@ -91,12 +96,10 @@ fn search_enter_without_a_pattern_reports_e35() {
     // the same for the :s empty-pattern reuse
     let mut f = Fixture::new("abc\n");
     f.feed([":", "s", "/", "/", "x", "/", "<CR>"]);
-    assert!(f
-        .host
-        .statuses
-        .iter()
-        .any(|s| s.contains("E35")),
-        ":s//x/ without a previous pattern reports E35");
+    assert!(
+        f.host.statuses.iter().any(|s| s.contains("E35")),
+        ":s//x/ without a previous pattern reports E35"
+    );
 }
 
 // ---- :yank with a register AND a count -----------------------------------------
@@ -154,8 +157,16 @@ fn mapping_fires_when_its_keys_arrive_mid_queue() {
         .keymaps_mut()
         .map_str(vimcore::keymap::ModeClass::Insert, "q", "ax");
     f.feed(["i", "q"]);
-    assert_eq!(f.vim.mode(), vimcore::mode::Mode::Normal, "the a→<Esc> mapping fired mid-queue");
-    assert_eq!(f.text(), "bc\n", "the trailing x ran as a normal-mode command");
+    assert_eq!(
+        f.vim.mode(),
+        vimcore::mode::Mode::Normal,
+        "the a→<Esc> mapping fired mid-queue"
+    );
+    assert_eq!(
+        f.text(),
+        "bc\n",
+        "the trailing x ran as a normal-mode command"
+    );
 }
 
 /// The leaf rule must not hijack the tuned builtin-vs-mapping ambiguity: a
@@ -211,11 +222,19 @@ fn ex_sort_sorts_reverses_and_dedupes() {
 
     let mut f = Fixture::new("pear\napple\nbanana\n");
     f.feed([":", "2", ",", "3", "s", "o", "r", "t", "!", "<CR>"]);
-    assert_eq!(f.text(), "pear\nbanana\napple\n", ":2,3sort! reverses lines 2-3");
+    assert_eq!(
+        f.text(),
+        "pear\nbanana\napple\n",
+        ":2,3sort! reverses lines 2-3"
+    );
     // a single-line range has nothing to reorder (vim same)
     let mut f = Fixture::new("pear\napple\nbanana\n");
     f.feed([":", "2", "s", "o", "r", "t", "!", "<CR>"]);
-    assert_eq!(f.text(), "pear\napple\nbanana\n", ":2sort! is a no-op on one line");
+    assert_eq!(
+        f.text(),
+        "pear\napple\nbanana\n",
+        ":2sort! is a no-op on one line"
+    );
 
     let mut f = Fixture::new("b\na\nb\n");
     f.feed([":", "%", "s", "o", "r", "t", " ", "u", "<CR>"]);

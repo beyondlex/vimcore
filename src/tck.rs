@@ -280,7 +280,6 @@ impl VimBufferMut for TckStrBuf {
 #[derive(Default)]
 pub struct TckHost;
 
-
 impl VimHost for TckHost {
     fn viewport(&self) -> (usize, usize) {
         (0, 24)

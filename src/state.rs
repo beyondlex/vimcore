@@ -953,15 +953,12 @@ impl VimState {
             }
         }
         // decimal (possibly octal): a leading 0 with only 0-7 digits is octal
-        let radix = if radix == 10
-            && run.len() > 1
-            && run.starts_with('0')
-            && run.bytes().all(is_oct)
-        {
-            8
-        } else {
-            radix
-        };
+        let radix =
+            if radix == 10 && run.len() > 1 && run.starts_with('0') && run.bytes().all(is_oct) {
+                8
+            } else {
+                radix
+            };
         // a directly attached minus is part of the number (vim: `-99` + 1
         // turns into `-98`, `ab-99` with the cursor before it increments to
         // `-98` as well)
@@ -1694,8 +1691,7 @@ impl VimState {
                 self.end_edit();
                 self.bump(ctx);
                 self.reset_pending();
-                self.cursor.offset =
-                    clamp_cursor(ctx.buf, adjusted.first().copied().unwrap_or(0));
+                self.cursor.offset = clamp_cursor(ctx.buf, adjusted.first().copied().unwrap_or(0));
                 self.cursor.desired_col = None;
                 self.finish_visual_op(ctx);
             }
@@ -2369,8 +2365,7 @@ impl VimState {
                     // gn as an operator target covers exactly the match
                     // (cursor..target would drag in the gap before it)
                     let mut span = match motion {
-                        Motion::SelectMatch { .. } => match self.search.last_found_match.clone()
-                        {
+                        Motion::SelectMatch { .. } => match self.search.last_found_match.clone() {
                             Some(range) => ops::OpSpan {
                                 start: range.start,
                                 end: range.end,
@@ -2530,8 +2525,7 @@ impl VimState {
                 }
             }
             if self.edit_generation != gen_before {
-                self.cursor.offset =
-                    ctx.buf.first_non_blank(first.min(ctx.buf.line_count() - 1));
+                self.cursor.offset = ctx.buf.first_non_blank(first.min(ctx.buf.line_count() - 1));
                 self.cursor.desired_col = None;
             }
         } else {
