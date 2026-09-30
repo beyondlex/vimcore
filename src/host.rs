@@ -103,6 +103,17 @@ pub trait VimHost {
         true
     }
 
+    /// `:bfirst`/`:brewind` — jump to the FIRST buffer in the host's list.
+    /// Returns false when there is nothing to switch to.
+    fn first_buffer(&mut self) -> bool {
+        true
+    }
+
+    /// `:blast` — jump to the LAST buffer in the host's list.
+    fn last_buffer(&mut self) -> bool {
+        true
+    }
+
     /// Bridge for `:map <Leader>x :action SomeAction<CR>` — dispatch a
     /// HOST application action by id (IdeaVim's `:action` bridge).
     /// `strict` is true for host-specific config layers (a miss is worth
