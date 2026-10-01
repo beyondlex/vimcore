@@ -369,9 +369,11 @@ fn count_repeat_insert() {
     assert_eq!(f.text(), "\thello\n\tx\n\tx\n");
 }
 
-/// Sessions that navigated (cursor left the typed-text end) or typed a
-/// newline don't replicate — vim repeats literal input, we approximate by
-/// only repeating plain type-then-escape.
+/// Sessions that navigated (cursor left the typed-text end) don't
+/// replicate. 【第十四轮修正】换行会话现在**会**复制：vim 9.1 探针 P24
+/// 实证 `3ifoo<CR>bar<Esc>`（autoindent 开）得三组 foo/bar——旧断言
+/// 「newline → 不复制」是当时的近似，第十四轮以展开文本为复制单元后
+/// 与 vim 对齐（round14 parity 有 autoindent 版本的完整探针断言）。
 #[test]
 fn count_repeat_insert_skips_navigated_sessions() {
     // cursor moved off the typed-text end: no replication
@@ -381,13 +383,13 @@ fn count_repeat_insert_skips_navigated_sessions() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "ahello\n");
 
-    // newline inside the session: no replication
+    // newline inside the session: replicates the full typed unit (vim P24)
     let mut f = edit("x\n", 0, 0, &["3", "i"]);
     f.type_text("a");
     f.feed(["<Enter>"]);
     f.type_text("b");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "a\nbx\n");
+    assert_eq!(f.text(), "a\nba\nba\nbx\n");
 
     // count with c belongs to the motion (2cw changes two words), and the
     // cw trim still keeps trailing whitespace out
