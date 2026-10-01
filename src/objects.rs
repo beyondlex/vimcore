@@ -250,8 +250,13 @@ fn quote_range(
     // Quotes have no nesting, so occurrences pair up in order (1st-2nd,
     // 3rd-4th, ...). An ODD tail occurrence has no partner and is dropped
     // by `chunks(2)` — vim behaves the same for an unmatched quote.
-    // Preference: the pair containing the cursor, else the next pair
-    // starting after it (so `ci"` outside a string opens the following one).
+    //
+    // Preference (9.1 probes on `say "hi" then "bye"`):
+    //   - the pair containing the cursor (cursor on/inside a string);
+    //   - else the quote LEFT of the cursor acts as an opener and pairs
+    //     with the next quote — `ci"` at `the|n` replaces ` then ` →
+    //     `say "hi"X"bye"` (NOT a no-op, NOT the following string);
+    //   - else (no quote left of the cursor) the first pair after it.
     let mut chosen: Option<(usize, usize)> = None;
     for pair in positions.chunks(2) {
         if pair.len() < 2 {
@@ -262,12 +267,30 @@ fn quote_range(
             chosen = Some((open, close));
             break;
         }
-        if open > offset {
-            chosen = Some((open, close));
-            break;
+    }
+    if chosen.is_none() {
+        let left = positions.iter().rev().find(|&&p| p < offset).copied();
+        match left {
+            Some(l) => {
+                let right = positions.iter().copied().find(|&p| p > l);
+                chosen = right.map(|r| (l, r));
+            }
+            None => {
+                for pair in positions.chunks(2) {
+                    if pair.len() < 2 {
+                        break;
+                    }
+                    if pair[0] > offset {
+                        chosen = Some((pair[0], pair[1]));
+                        break;
+                    }
+                }
+            }
         }
     }
-    let (open, close) = chosen?;
+    let Some((open, close)) = chosen else {
+        return None;
+    };
     let range = if inner {
         ObjectRange::charwise(open + quote.len_utf8(), close)
     } else {
