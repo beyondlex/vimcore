@@ -161,7 +161,16 @@ pub fn span_from_motion(
         (target, start)
     };
     let end = match result.kind {
-        MotionKind::Inclusive => hi + buf.char_at(hi).map(|c| c.len_utf8()).unwrap_or(0),
+        MotionKind::Inclusive => {
+            // an inclusive span must never swallow the newline itself —
+            // `hi` pointing at `\n` would otherwise delete the line break;
+            // vim's charwise operators stop at the last character
+            if buf.char_at(hi) == Some('\n') {
+                hi
+            } else {
+                hi + buf.char_at(hi).map(|c| c.len_utf8()).unwrap_or(0)
+            }
+        }
         _ => hi,
     };
     OpSpan {

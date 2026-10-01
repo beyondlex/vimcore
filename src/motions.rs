@@ -233,7 +233,12 @@ impl Motion {
                     (buf.offset_to_line(vim.cursor.offset) + count - 1).min(buf.line_count() - 1);
                 let end = buf.line_end(line);
                 if end == buf.line_start(line) {
-                    MotionResult::new(end, MotionKind::Inclusive)
+                    // EMPTY line: no last char to be inclusive of. Returning
+                    // the newline position with Inclusive made `d$` swallow
+                    // the line break and merge two lines (9.1 probe: `d$` on
+                    // an empty line is a no-op). Park at the line start with
+                    // an empty exclusive span instead.
+                    MotionResult::new(buf.line_start(line), MotionKind::Exclusive)
                 } else {
                     // start of the LAST character: byte arithmetic `end - 1`
                     // lands mid-char when the line ends with a multibyte
@@ -266,7 +271,14 @@ impl Motion {
                         _ => o = prev,
                     }
                 }
-                MotionResult::new(o, MotionKind::Inclusive)
+                if o == end {
+                    // whitespace-only line: no non-blank to land on; an
+                    // Inclusive span at the newline position would swallow
+                    // the line break (same hazard as `d$` on an empty line)
+                    MotionResult::new(buf.line_start(line), MotionKind::Exclusive)
+                } else {
+                    MotionResult::new(o, MotionKind::Inclusive)
+                }
             }
             // w / W: start of the next word run
             Motion::WordStart { big } => {
