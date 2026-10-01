@@ -3415,7 +3415,11 @@ impl VimState {
                     ctx.buf.offset_to_line(cursor),
                 );
                 if a_line == c_line {
-                    return; // single-row block: nothing to swap
+                    // single-row block: "other corner, same column" is the
+                    // identity (each end recomputes to its own position) —
+                    // the block rectangle is unchanged either way, so take
+                    // the cheap path
+                    return;
                 }
                 let (a_col, c_col) = (
                     crate::buffer::display_column(ctx.buf, anchor),
