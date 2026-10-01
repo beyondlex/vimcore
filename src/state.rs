@@ -280,11 +280,16 @@ pub struct VimState {
     /// undo/redo, option changes through `:set`). Lets `n`/`N` tell whether
     /// the cached match list still describes the current text.
     pub(crate) edit_generation: u64,
-    /// Platform plumbing (gpui-vim): the last printable char the key
-    /// interceptor declined in insert mode. On Linux/Windows the platform
-    /// delivers that same char again through the text-input path, where it
-    /// must be placed without re-running the pipeline.
-    pub(crate) pending_unknown_char: Option<char>,
+    /// Platform plumbing (gpui-vim): printable chars the key interceptor
+    /// declined in insert mode. On Linux/Windows the platform delivers that
+    /// same char again through the text-input path, where it must be placed
+    /// without re-running the pipeline. A QUEUE, not a slot: a mapping
+    /// prefix can hold several printables in one `handle_key` call
+    /// (`:imap jk <Esc>` then typing `jx` — the `j` was answered Consumed
+    /// while it was a mapping prefix, and the `x` breaks the prefix in the
+    /// same walk; a single Option overwrote the `j` and the character was
+    /// lost from the buffer).
+    pub(crate) pending_unknown_chars: Vec<char>,
 }
 
 impl Default for VimState {
@@ -351,7 +356,7 @@ impl VimState {
             open_undo: None,
             undo_group_announced: false,
             edit_generation: 0,
-            pending_unknown_char: None,
+            pending_unknown_chars: Vec::new(),
         }
     }
 
@@ -474,6 +479,12 @@ impl VimState {
         self.block_insert.is_some()
     }
 
+    /// The end offset of the block session's typed text, if any (for the
+    /// block-session BS rule: only the last typed char deletes).
+    pub(crate) fn block_typed_end(&self) -> Option<usize> {
+        self.block_insert.as_ref().and_then(|b| b.typed_end)
+    }
+
     /// Remember where the block session's typed text ends (its cursor after
     /// an append), so a backspace there can shrink the replica text.
     pub(crate) fn block_note_typed_end(&mut self, at: usize) {
@@ -505,16 +516,27 @@ impl VimState {
         self.recording_suppressed = suppressed;
     }
 
-    /// Platform plumbing (see [`VimState::take_pending_unknown_char`]).
+    /// Platform plumbing (see [`VimState::take_pending_unknown_chars`]).
     pub fn set_pending_unknown_char(&mut self, c: Option<char>) {
-        self.pending_unknown_char = c;
+        self.pending_unknown_chars = c.into_iter().collect();
     }
 
-    /// Platform plumbing: the printable char the key interceptor declined in
-    /// insert mode and which the platform will deliver a second time through
-    /// the text-input path.
+    /// Platform plumbing: printable chars the key interceptor declined in
+    /// insert mode and which the platform will deliver again through the
+    /// text-input path, in order. Drained by the host as the platform
+    /// replays them.
+    pub fn take_pending_unknown_chars(&mut self) -> Vec<char> {
+        std::mem::take(&mut self.pending_unknown_chars)
+    }
+
+    /// Single-char spelling of [`VimState::take_pending_unknown_chars`] for
+    /// hosts that place one char per event.
     pub fn take_pending_unknown_char(&mut self) -> Option<char> {
-        self.pending_unknown_char.take()
+        if self.pending_unknown_chars.is_empty() {
+            None
+        } else {
+            Some(self.pending_unknown_chars.remove(0))
+        }
     }
 
     /// Column helper for vertical motions.
@@ -1534,10 +1556,19 @@ impl VimState {
         // all). Rows BELOW the typing row shift by that row's exact byte
         // delta (see `BlockInsert::typing_line_len`); rows above don't move.
         if let Some(block) = self.block_insert.take() {
-            if !block.text.is_empty() {
-                let cur_len =
-                    ctx.buf.line_end(block.typing_line) - ctx.buf.line_start(block.typing_line);
-                let shift = cur_len as isize - block.typing_line_len as isize;
+            // The replica model's own premise: the typing row grew by EXACTLY
+            // `block.text.len()` bytes (the same delta the row offsets below
+            // are shifted by). A session that navigated (<Left>+BS, <C-w>)
+            // edited the row in ways `block.text` didn't track — delta and
+            // text disagree — and replicating it gave the OTHER rows text the
+            // typing row no longer corresponds to. On divergence keep the
+            // typing row's edits and skip replication.
+            let cur_len =
+                ctx.buf.line_end(block.typing_line) - ctx.buf.line_start(block.typing_line);
+            let delta = (cur_len as isize - block.typing_line_len as isize) as usize;
+            let pure_typing = delta == block.text.len();
+            if !block.text.is_empty() && pure_typing {
+                let shift = delta as isize;
                 let mut rows: Vec<usize> = block
                     .rows
                     .into_iter()

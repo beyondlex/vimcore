@@ -176,7 +176,9 @@ fn block_session_rejects_backspace_line_join() {
     f.feed(["j"]); // 光标行 = line 1（打字行；行首 BS 才会触发并线）
     f.feed(["<C-v>", "j", "I"]);
     f.type_text("X"); // line1 = "Xcd"，block.text = "X"
-                      // <Left> + <Del> 删掉缓冲里的 X 但复制文本仍含 X（typed_end 之外）
+    // <Left> + <Del> 删掉缓冲里的打字 X：vim 9.1 实证（block-insert 探针）
+    // 该会话的副本随打字文本一起消失，退出后不复製——round 8 当时的预期
+    // 「X 仍复制」与 vim 相反，本轮（13）按探针改正
     f.feed(["<Left>", "<Del>"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "ab\ncd\nef\n");
     // 行首 BS：旧行为并线 ab/cd 打飞复制偏移；现在拒绝
@@ -184,9 +186,28 @@ fn block_session_rejects_backspace_line_join() {
     f.feed(["escape"]);
     assert_eq!(
         f.buf.slice(0..f.buf.len()),
-        "ab\nXcd\nef\n",
-        "行首 BS 被拒绝，复制仍落到其余块行（打字行 = 光标行 line 2）"
+        "ab\ncd\nef\n",
+        "打字文本已被删，会话发散——vim 探针：不复製任何行"
     );
+}
+
+/// round13：块会话的 BS 只在打字末尾删最后一个打字字符（vim 9.1 实证
+/// `ab<BS>` → "a"+副本"a"；`ab<Left><BS>` 中 BS 是空操作，绝不啃行内容）。
+#[test]
+fn block_session_bs_only_deletes_typed_tail() {
+    // 末尾 BS：删 b，副本缩短为 "a"
+    let mut f = Fixture::new("cd\nef\n");
+    f.feed(["<C-v>", "j", "I"]);
+    f.type_text("ab");
+    f.feed(["<BS>", "escape"]);
+    assert_eq!(f.text(), "acd\naef\n", "末尾 BS 删打字字符并同步缩短副本");
+
+    // Left 后 BS：空操作（不删行内容），副本保持 "ab"
+    let mut f2 = Fixture::new("cd\nef\n");
+    f2.feed(["<C-v>", "j", "I"]);
+    f2.type_text("ab");
+    f2.feed(["<Left>", "<BS>", "escape"]);
+    assert_eq!(f2.text(), "abcd\nabef\n", "中途 BS 空操作，副本保持完整打字文本");
 }
 
 /// 块会话中 <Del> 删除换行同样会并线——拒绝。
