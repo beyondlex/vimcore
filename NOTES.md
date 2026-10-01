@@ -5,6 +5,71 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十三轮检视增补（2026-10-02，回归测试在
+`tests/parity_round13.rs`（30 例）、fuzz 在 `tests/fuzz_round13.rs`）
+
+本轮三个独立读码 agent 扫 cmdline/config、ops/motions/objects/word、
+insert_mode/keymap/tables/tck，加上自读 state.rs 全管线；fuzz 首次把
+宿主鼠标事件（`set_cursor_offset` 点击、`set_visual_range` 拖选）与大写
+mark、宏字符面纳入键表——五个新 bug 全部由这轮 fuzz 的新不变量抓出。
+所有语义声称均先在本机 vim 9.1 探针复核（含块插入 BS 的 5 连探针，
+推翻了第八轮的一条既定预期）。
+
+### fuzz 抓取的引擎不变量 bug（5+1）
+
+| # | 问题 | 根因 |
+|---|------|------|
+| 1 | **块复制落进多字节字符**（宿主 insert_str panic） | `3o` 残留的 count-repeat 曾在块会话 `exit_insert` 时先插 83 字节，块复制偏移只按打字行增量平移、漏掉这 83 字节。三层修：`begin_insert` 清残留 repeat；`replicate_count_insert` 对块会话退出；复制偏移落地到字符边界兜底 |
+| 2 | **visual 模式宿主点击塌缩选区** | `set_cursor_offset` 曾把锚点也改成点击点，选区变零宽、`d` 只删一个字符。现按 `:h visual-use` 只移光标并同步活动选区 |
+| 3 | **`cmdline_visual` 快照泄漏** | visual `:` 的执行/取消之外的关闭路径（如 `@:` 重放间接退出）不消费快照，宿主经 `visual_selection` 看到陈旧冻结选区。快照只由 prompt 消费 + `handle_key` 末尾清扫 |
+| 4 | **`visual_selection` 在 cmdline 模式回报活锚点** | 应回报 prompt 时刻的冻结对（活动锚点可能已被后续编辑顶坏）；快照对已纳入落地清理 |
+| 5 | **`marks.active_visual` 不随编辑调整** | 活动选区不在 `for_each_pos` 行走里——visual `:` 下执行 Ex 删改文本后它完全未平移，`parse_range` 拿到中间字符偏移 |
+| 6 | **`refresh_highlights` 是死代码** | 大文件宿主 API 被自己的 `hlsearch_live_update` 守卫短路：关闭逐编辑重扫后，显式刷新永远空操作、匹配缓存永不更新。守卫只留在逐编辑路径 |
+
+### 读码+fuzz 修复（均 vim 9.1 探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 7 | **`~` 删组合符与 ZWJ 家族尾巴** | 消费整个字素簇只写回基字符映射——`e`+U+0301 变 `E`（3 字符变 2）、emoji 家族掉成员。簇尾切片原样带回；`gu`/`gU` 本就正确（不对称已消除） |
+| 8 | **linewise 粘贴丢尾部空行** | `trim_end_matches('\n')` 吞掉全部分隔换行：寄存器 `"a\n\n`（行 a、""）粘出一行。改 `strip_suffix` 只消费一个 |
+| 9 | **visual Y/D/X/C/S 是字符语义** | 探针：v_D/v_X 删覆盖**行**、v_Y 行复制、v_C=v_S 行修改（v_x/v_s 保持字符）。新增 `VisualCmd::LinewiseOp` 走覆盖行跨度 |
+| 10 | **块 `A` 中带行不补齐** | 探针 `"123456"/"12"` 块列 0-2 → `"123 X456"/"12  X"`：短行补齐到**追加列**（col_hi 排他端点），旧过滤只补 col_lo 之前的行。附带修 `then_some` 急切求值的减法溢出 |
+| 11 | **`ap` 只吞一个空行** | 方向化：文本行吞**全部**后续连续空行；空行会话吞**整个下一段落**（不含它的尾随空行）——三个探针形态全对齐 |
+| 12 | **块会话 BS/发散语义与 vim 相反** | 5 连探针：BS 只在打字末尾删最后一个打字字符（中途 BS 空操作，绝不啃行内容）；打字被 `<Del>`/`<C-w>` 删掉的发散会话**不复製**。退出侧 delta 守卫（打字行增量 ≠ 副本长度 → 跳过复制）+ BS 限位。第八轮「发散仍复制」的预期按探针改正 |
+| 13 | **`:1,2d 3x` 删错行集** | 尾参垃圾 `unwrap_or(1)` 把 typed range 重锚到末行。0 = 无 count |
+| 14 | **`:w!`/`:wq!`/`:x!`/`:noh!` E492** | bang 形式缺失（最常打的命令之一）；`:x` 未修改不写留给宿主（注释契约） |
+| 15 | **Ex 缩写缺失** | `:de/:del/:dele/:delet`、`:ya/:yan`、`:jo/:joi`、`:su…:substitute`（静态拼写表；`:ju` 是别的命令，见分歧 #26） |
+| 16 | **空操作顶掉 `.` 的重放记录** | `begin_edit` 推测性置位 `recording_mutated`：空行 `x`、空寄存器 `p` 后 `.` 重放空操作而非上一个真修改。置位点移进三个 `edit_*` 漏斗 |
+| 17 | **visual `3"<Esc>` 后 count 存活** | Esc 检查移到 `"` 寄存器前缀之前（normal 模式的次序本来就对） |
+| 18 | **`q`/`q{reg}` 的 count 泄漏** | 录制开始/停止不清 count，`2q…q` 后 `x` 删两个字符 |
+| 19 | **`q/` 劫持宏槽** | `q{reg}` 只收 a-zA-Z0-9；`qA` 追加录制（vim 语义，旧版开独立 A 槽） |
+| 20 | **`:5 +2d` E16 / mid-range `%` 语义反转** | 地址内空白跳过（vim get_address 同）；`%` 中段展开为 `1,$`（旧版当 cursor line） |
+| 21 | **行首 `"` 注释 E492；`:set ts=4 " note` 误报** | 整行注释静默跳过；`:set` 参数遇 `"` 停止解析 |
+| 22 | **insert mapping 前缀吞字符** | `:imap jk <Esc>` 打 `jx`：`j` 被 mapping 前缀答 Consumed、`x` 打破前缀后单槽 IOU 只剩 `x`——j 从缓冲丢失。`pending_unknown_char` 改队列 `take_pending_unknown_chars()`（保留单字符拼写） |
+| 23 | **命令行提示符缺编辑键** | C-h=C-BS 规范化；C-w 删词、C-u 清行（cmdline window 级的完整编辑模型仍不做，见悬置）；历史去重改非连续（vim 搬旧重复到末尾） |
+| 24 | **`o`/`O`/`cc`/`S` 无视 noautoindent** | 缩进复制/保留受 `autoindent` 选项门控（引擎默认 ai=true 掩盖了这点） |
+| 25 | **`let g:mapleader` 静默失效；TAB 分隔的映射进 ignored** | `g:` 作用域拼写生效；map 命令边界与 lhs/rhs 切分接受 TAB |
+| 26 | **TCK 参考实现 offset_to_line 中间字符切片 panic** | 宿主逐字复制参考实现会在普通偏移上崩；守卫 + 契约新增「幻影行容忍」条款（`line_range(line_count)` 返回 `len..len`） |
+| 27 | **map_depth 跨调用棘轮** | Wait/Done 提前返回不重置：自引用 mapping 数十键后假阳性触发 runaway、清掉刚打的文本 |
+
+### 已证伪的审查发现（探针 vs 读码推断）
+
+- **`:actions x` 误路由进 `:action` 桥**：不成立——`strip_prefix("action")`
+  后的边界过滤器要求空格开头，`"s x"` 不匹配，走 E492。
+- **块 `A` 对「恰好在 col_hi 结束」的行也要补齐**：不成立——行宽=col_hi
+  （排他）时无需补齐，`range.end` 即追加列。
+
+### 新增已知分歧（接全局序号）
+
+35. **块 visual `l` 不越过行尾**：vim 的块可进入虚拟列（短行上 `2l` 把块
+    右缘推到 col 2，探针 `"123456"/"12"` 上 `<C-v>j2lA_X` 补齐到 col 2、
+    追加在 col 3），引擎的 `l` 停在行尾——需要虚拟列块几何，暂缓。
+36. **insert 模式左右方向键不跨行**：vim 的 `<Left>`@col0 去上一行行尾。
+    引擎保持原地（这也让块会话更安全）。
+37. **命令行提示符无光标模型**：Left/Right/Insert/Tab 补全不做；缓冲区
+    只是 append/pop。C-w/C-u/C-h/上下历史已覆盖日常。`:ju[mp]` 仍见 #26。
+
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺、第十二轮检视增补（2026-10-01，回归测试在
 `tests/parity_round12.rs`（37 例）、fuzz 在 `tests/fuzz_round12.rs`）
 
@@ -652,6 +717,14 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
 
 ## 六、性能备注
 
+- **`[profile.test] opt-level = 3`**（第十三轮）：fuzz 套件的自递归宏
+  （`qa…@a…q` 后 `@a`）会撑满 10 万键的管线预算，opt1 的调试构建要
+  ~78s；opt3 压回秒级。引擎自身的 10 万键预算不动（那是对宿主的
+  正式最坏情形承诺）。
+- fuzz_round13 的键表附带 4KB 缓冲重置：yy+p 循环能把缓冲翻倍到数 MB，
+  每步的全文件扫描是二次方成本；本 fuzz 抓到的 bug 全部在几 KB 缓冲
+  上可复现。
+
 - **hlsearch 逐编辑全量重扫**是默认行为（`hlsearch_live_update`），
   每次编辑 O(全文 scan)。大文件宿主应
   `set_hlsearch_live_update(false)` + 定时 `refresh_highlights`
@@ -675,3 +748,9 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
 - `:set` 三种只读形态（第六轮）：`name?` 查询单项、裸 `:set` 列出全部、
   `:reg[isters]`/`:marks` 列表——此前 `:set` 无参数只响铃，寄存器/mark
   状态对用户完全不可见。反馈统一走 `status_message`，宿主零改动。
+- 命令行提示符的 C-w/C-u/C-h/上下历史（第十三轮）：`:fo<C-w>` 删词、
+  `:<C-u>` 清行是 rc 训练出来的肌肉记忆；此前除字符/回车/Esc/退格/
+  上下外全部静默吞掉。
+- Ex 缩写（第十三轮）：`:de`、`:su/…/` 等 vim 拼写直接可用，不再 E492。
+- visual 点击跟随（第十三轮）：宿主在 visual 模式转发点击不再塌缩选区，
+  拖选外的一次点击像 vim 一样延伸选区。
