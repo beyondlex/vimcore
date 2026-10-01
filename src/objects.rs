@@ -325,9 +325,7 @@ fn quote_range(
             }
         }
     }
-    let Some((open, close)) = chosen else {
-        return None;
-    };
+    let (open, close) = chosen?;
     let range = if inner {
         ObjectRange::charwise(open + quote.len_utf8(), close)
     } else {

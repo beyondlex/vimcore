@@ -218,7 +218,7 @@ fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
 fn check_invariants_mode(f: &Fixture, text: &str, ctx: &str, check_matches: bool) {
     assert_addressable("cursor", f.vim.cursor_offset(), text, ctx);
     for (name, off) in f.vim.marks.items() {
-        assert_addressable(&format!("mark {name}"), off, &text, ctx);
+        assert_addressable(&format!("mark {name}"), off, text, ctx);
     }
     if let Some((lo, hi, _)) = f.vim.marks.last_visual {
         assert_addressable("last_visual.lo", lo, text, ctx);
@@ -325,7 +325,7 @@ fn fuzz_round13_holds_invariants() {
 /// 2. 空操作不顶掉 `.` 的重放记录。
 #[test]
 fn fuzz_round13_semantic_invariants() {
-    let mut state: u64 = 0xD00D_13;
+    let mut state: u64 = 0x00D0_0D13;
     let buffers = [
         "word\n\nnext\n",
         "aaa\nbbb\nccc\nddd\n",
