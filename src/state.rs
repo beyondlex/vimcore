@@ -3174,8 +3174,10 @@ impl VimState {
                 let count = self.take_total_count().max(1);
                 let mut from = self.cursor.offset;
                 let mut found = None;
-                for _ in 0..count {
-                    match crate::search::find_match_from(self, ctx.buf, from, backward) {
+                for step in 0..count {
+                    // see motions.rs SelectMatch: step > 0 is strict so the
+                    // backward iteration advances instead of re-selecting
+                    match crate::search::find_match_from(self, ctx.buf, from, backward, step > 0) {
                         Some(range) => {
                             from = if backward { range.start } else { range.end };
                             found = Some(range);

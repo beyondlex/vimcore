@@ -433,12 +433,13 @@ impl Motion {
             }
             // * / #: word under cursor becomes the pattern, then jump. No
             // word on this line → stuck (bell), NOT a jump with the stale
-            // pattern from a previous search.
+            // pattern from a previous search. `{count}*` skips count-1
+            // further matches (9.1: `2*` lands on the second next one).
             Motion::StarSearch { forward } => {
                 if !search::search_word_under_cursor(vim, buf, ctx.host, forward) {
                     return MotionResult::stuck(vim.cursor.offset);
                 }
-                match search::jump_to_match(vim, buf, forward, 1) {
+                match search::jump_to_match(vim, buf, forward, count) {
                     Some(o) => MotionResult::new(o, MotionKind::Exclusive),
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
@@ -514,8 +515,11 @@ impl Motion {
             Motion::SelectMatch { backward } => {
                 let mut from = vim.cursor.offset;
                 let mut found = None;
-                for _ in 0..count {
-                    match search::find_match_from(vim, buf, from, backward) {
+                for step in 0..count {
+                    // the first step prefers the match containing the cursor;
+                    // further counts step strictly past the one just found
+                    // (otherwise `2gN` re-selected the same match forever)
+                    match search::find_match_from(vim, buf, from, backward, step > 0) {
                         Some(range) => {
                             from = if backward { range.start } else { range.end };
                             found = Some(range);
