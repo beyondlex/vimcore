@@ -27,7 +27,11 @@ fn normalize_control_char(key: Key) -> Key {
 }
 
 /// `parse_range` 的返回体：范围（`None` = 未写范围前缀）+ 剥离范围后的命令。
-type ParsedRange<'a> = (Option<(usize, usize)>, &'a str);
+/// A parsed `[range]`: the clamped `(first, last)` lines, how many addresses
+/// the user actually TYPED (a bare `:5j` is one address and joins with the
+/// next line; `:2,2j` typed two equal ones and is a no-op — vim), and the
+/// command text that follows the range.
+type ParsedRange<'a> = (Option<(usize, usize)>, usize, &'a str);
 
 /// Command-line input buffer + per-prompt history.
 #[derive(Default)]
@@ -341,7 +345,7 @@ impl VimState {
         }
         // the range prefix is parsed off before command dispatch; `None`
         // means "no range typed" — commands then apply their own default
-        let (range, line) = match Self::parse_range(self, ctx, line) {
+        let (range, addr_count, line) = match Self::parse_range(self, ctx, line) {
             Ok(parsed) => parsed,
             Err(message) => {
                 ctx.host.status_message(&message);
@@ -465,7 +469,9 @@ impl VimState {
             }
             return;
         }
-        // `:s` without a range defaults to the current line
+        // `:s`/`:d`/`:y`/`:j` without a range default to the current line;
+        // `addr_count` is how many addresses the user typed (from the range
+        // parse above) and already carries the no-range case as 0
         let range = range.unwrap_or_else(|| {
             let current = ctx.buf.offset_to_line(self.cursor.offset);
             (current, current)
@@ -475,14 +481,15 @@ impl VimState {
         }
         // :{range}d[elete] [x] [count] — delete the range's lines; the first
         // argument may name a REGISTER (`:1,2d a` stores into `"a`, vim) or
-        // be a COUNT that starts at the range's LAST line (vim: `:1,2d 3`
-        // deletes lines 2-4 — the engine used to extend the range to 1-4)
+        // be a COUNT that re-anchors at the range's LAST line (vim: `:1,2d 3`
+        // deletes lines 2-4; an EXPLICIT `:1,2d 1` deletes just line 2 —
+        // any given count, even 1, re-anchors)
         if let Some(rest) =
             Self::boundary_cmd(line, "d").or_else(|| Self::boundary_cmd(line, "delete"))
         {
             let (register, count) = Self::parse_reg_count(rest.trim());
             let (mut first, last) = range;
-            if count > 1 {
+            if count >= 1 {
                 first = last;
             }
             let last = last
@@ -507,7 +514,7 @@ impl VimState {
             self.ex_sort(ctx, range, rest.trim());
             return;
         }
-        // :{range}j[oin][!] [count] — join the range's lines; a one-line
+        // :{range}j[oin][!] [count] — join the range's lines; a ONE-ADDRESS
         // range joins with the NEXT line (vim's bare `:j`), `!` removes all
         // whitespace. A trailing COUNT joins count lines starting at the
         // range's LAST line (`:2j 3` joins lines 2-4, vim 9.1 probe — the
@@ -515,7 +522,7 @@ impl VimState {
         if let Some(rest) =
             Self::boundary_cmd(line, "join").or_else(|| Self::boundary_cmd(line, "j"))
         {
-            self.ex_join(ctx, range, rest.trim());
+            self.ex_join(ctx, range, rest.trim(), addr_count);
             return;
         }
         ctx.host
@@ -720,11 +727,11 @@ impl VimState {
         let (range_part, rest) = line.split_at(range_end);
         if range_part.is_empty() {
             // no prefix: the command applies its own default
-            return Ok((None, line));
+            return Ok((None, 0, line));
         }
         if range_part.trim_end() == "%" {
             let last = ctx.buf.line_count().saturating_sub(1);
-            return Ok((Some((0, last)), rest.trim_start()));
+            return Ok((Some((0, last)), 1, rest.trim_start()));
         }
         let last = ctx.buf.line_count().saturating_sub(1);
         let cursor_line = ctx.buf.offset_to_line(vim.cursor.offset);
@@ -753,13 +760,13 @@ impl VimState {
         }
         match addresses.as_slice() {
             [] => Err("E16: Invalid range".to_owned()),
-            [only] => Ok((Some((*only, *only)), rest.trim_start())),
+            [only] => Ok((Some((*only, *only)), 1usize, rest.trim_start())),
             _ => {
                 let (a, b) = (
                     addresses[addresses.len() - 2],
                     addresses[addresses.len() - 1],
                 );
-                Ok((Some((a.min(b), a.max(b))), rest.trim_start()))
+                Ok((Some((a.min(b), a.max(b))), addresses.len(), rest.trim_start()))
             }
         }
     }
@@ -767,10 +774,12 @@ impl VimState {
     /// `:{range}j[oin][!] [count]` — join the range's lines into one (single
     /// undo step). Without `!` the J separator logic applies (one space at
     /// the seam); with `!` the lines are concatenated verbatim (vim's `:j!` ≈
-    /// `gJ`). A one-line range joins with the NEXT line, so the bare `:j`
-    /// works. A COUNT re-anchors the range to count lines starting at its
-    /// LAST line (`:2j 3` joins lines 2-4).
-    fn ex_join(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
+    /// `gJ`). A ONE-ADDRESS range joins with the NEXT line, so the bare `:j`
+    /// works — but a range with TWO EQUAL addresses (`:2,2j`) does nothing
+    /// (vim 9.1, `:h :j`: "If a [range] has equal start and end values, this
+    /// command does nothing"). A COUNT re-anchors the range to count lines
+    /// starting at its LAST line (`:2j 3` joins lines 2-4).
+    fn ex_join(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str, addr_count: usize) {
         let bang = args.starts_with('!');
         let count = args
             .trim_start_matches('!')
@@ -779,12 +788,16 @@ impl VimState {
             .unwrap_or(0);
         let last = last.min(ctx.buf.line_count().saturating_sub(1));
         let mut first = first.min(last);
-        if count > 1 {
+        if count >= 1 {
             first = last;
         }
         let last = last
             .saturating_add(count.saturating_sub(1))
             .min(ctx.buf.line_count().saturating_sub(1));
+        if addr_count >= 2 && first == last {
+            // `:2,2j` — vim: nothing happens, not even a seam
+            return;
+        }
         let lines = last - first + 1;
         // a single-address range still joins one seam (`:5j` = join 5 and 6)
         let joins = if lines < 2 { 1 } else { lines - 1 };
@@ -864,9 +877,12 @@ impl VimState {
 
     /// Parse the `:d` / `:y` argument list: a lone numeric first argument is
     /// a COUNT (`:2y 3`), an alphabetic one names a REGISTER with an
-    /// optional count after it (`:y a 2`). Returns `(register, count)`,
-    /// count 0 = absent.
+    /// optional count after it (`:y a 2`). Special register chars work too —
+    /// `:d _` must land in the black hole (not `"1`), `:d +` in the
+    /// clipboard (9.1 semantics). Returns `(register, count)`, count 0 =
+    /// absent.
     fn parse_reg_count(args: &str) -> (Option<char>, usize) {
+        const SPECIALS: &str = "_+\".-:%#*";
         let mut register = None;
         let mut count = 0usize;
         let mut parts = args.split_whitespace();
@@ -874,7 +890,7 @@ impl VimState {
             if let Some(c) = head.chars().next() {
                 if c.is_ascii_digit() {
                     count = head.parse::<usize>().unwrap_or(1);
-                } else if c.is_ascii_alphanumeric() {
+                } else if c.is_ascii_alphanumeric() || SPECIALS.contains(c) {
                     register = Some(c);
                     // the count may follow the register (`:y a 2`)
                     if let Some(n) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
@@ -895,7 +911,9 @@ impl VimState {
     fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
         let (register, count) = Self::parse_reg_count(args);
         let (mut first, last) = (first, last);
-        if count > 1 {
+        // any EXPLICIT count (even 1) re-anchors at the range's last line
+        // (vim: `:1,2y 1` yanks just line 2)
+        if count >= 1 {
             first = last;
         }
         let last = last
@@ -963,6 +981,7 @@ impl VimState {
             return;
         }
         let mut applied = false;
+        let mut search_rules_changed = false;
         for arg in args.split_whitespace() {
             // `name?` is a query: report and move on, values untouched
             if let Some(name) = arg.strip_suffix('?') {
@@ -975,6 +994,14 @@ impl VimState {
                 }
                 continue;
             }
+            let search_rule = arg.trim_end_matches(['!', '?', '='])
+                .split('=')
+                .next()
+                .map(|n| {
+                    let n = n.strip_prefix("no").unwrap_or(n);
+                    matches!(n, "ic" | "ignorecase" | "isc" | "smartcase" | "hls" | "hlsearch")
+                })
+                .unwrap_or(false);
             let ok = if let Some(name) = arg.strip_suffix('!') {
                 match self.options.bool_option(name) {
                     Some(current) => self.options.set_boolean(name, !current),
@@ -992,11 +1019,28 @@ impl VimState {
                 return;
             }
             applied = true;
+            if search_rule {
+                search_rules_changed = true;
+            }
         }
         // search options (ic/isd/…) change how the next scan must run: drop
-        // the cached match list so `n` re-scans under the new options
+        // the cached match list so `n` re-scans under the new options — and
+        // re-publish the LIVE highlights under the new rules (vim: `:set
+        // noic` immediately re-renders the hlsearch match set)
         if applied {
             self.search.matches_generation = None;
+        }
+        if search_rules_changed {
+            if let Some(pattern) = self.search.pattern.clone() {
+                let matches = search::all_matches(self, ctx.buf, &pattern);
+                self.search.last_matches = matches.clone();
+                self.search.matches_generation = Some(self.edit_generation);
+                if self.options.hlsearch {
+                    ctx.host.set_search_highlights(&matches, None);
+                } else {
+                    ctx.host.set_search_highlights(&[], None);
+                }
+            }
         }
     }
 
@@ -1029,12 +1073,15 @@ impl VimState {
             return false;
         };
         if after_s.is_empty() {
-            // bare `:s` = repeat the last substitute on the current line,
-            // WITHOUT the previous flags (vim 9.1; same as `&`)
+            // bare `:s` = repeat the last substitute WITHOUT the previous
+            // flags (vim 9.1; same as `&`), on the GIVEN range — the default
+            // is the current line, but `:3,4s` after `:2,4s/a/b/` re-runs it
+            // on lines 3-4 (9.1 probe; the old replay dropped the range and
+            // always landed on the cursor line)
             return match self.cmdline.last_substitute.clone() {
                 Some(last) => {
                     let last = Self::substitute_without_flags(&last);
-                    self.execute_ex(ctx, &last);
+                    self.ex_substitute(ctx, &last, range);
                     true
                 }
                 None => {
@@ -1162,6 +1209,11 @@ impl VimState {
         let new_text = joined.join("\n");
         self.edit_replace(ctx, range_start..range_end, &new_text);
         self.end_edit();
+        // the substitute pattern enters the search state (vim: after
+        // `:s/x/Y/`, `@/` is `x`, `n` finds the next one and hlsearch
+        // highlights it — 9.1 probes; the engine kept the OLD pattern).
+        // After the edit, so the published matches sit on the new text.
+        search::set_pattern(self, ctx, pattern.clone(), true);
         // cursor BEFORE the bump: the changelist / `.` mark must record the
         // LAST SUBSTITUTED line (vim probe: `:4s` then g; lands on line 4),
         // not wherever the cursor happened to sit before the command

@@ -84,11 +84,13 @@ pub fn set_pattern_inner(
     forward: bool,
 ) {
     let matches = all_matches(vim, buf, &pattern);
-    vim.search.pattern = Some(pattern);
+    vim.search.pattern = Some(pattern.clone());
     vim.search.forward = forward;
     vim.search.last_matches = matches;
     vim.search.matches_generation = Some(vim.edit_generation);
     vim.search.last_index = None;
+    // vim mirrors every search into `@/` (`<C-r>/` in insert, `:reg`)
+    vim.registers.store_search(pattern);
     if vim.options.hlsearch {
         host.set_search_highlights(&vim.search.last_matches, None);
     } else {
