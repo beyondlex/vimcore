@@ -119,7 +119,7 @@ fn probe_register_semantics() {
 /// end also takes the final newline. With the cursor ON a char (col 1) the
 /// engine's documented probe shape holds (`99D` → ['a']).
 #[test]
-fn probe_count_D_shapes() {
+fn probe_count_d_shapes() {
     let f = edit("aaaa\nbbbb\ncccc\ndddd\n", 0, 0, &["3", "D"]);
     assert_eq!(f.text(), "\ndddd\n", "3D empties line 1, keeps line 4, got {:?}", f.text());
 
