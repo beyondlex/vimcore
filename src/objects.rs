@@ -88,6 +88,12 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
     let class_of = |o: usize| word::class_at(buf, o, big);
 
     let Some(class) = class_of(offset.min(line_end.saturating_sub(1)).max(line_start)) else {
+        // EMPTY line (cursor sits on the newline): `iw`/`ip` keep the line
+        // itself, but `aw` treats it as one blank run reaching into the
+        // next line's word (9.1: `daw` on ["foo","","bar"] leaves ["foo"])
+        if !inner {
+            return Some(blank_run_plus_next_word(buf, big, line_start));
+        }
         return Some(ObjectRange::charwise(line_start, line_end));
     };
 
@@ -138,11 +144,21 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
     }
 
     // Cursor on whitespace and the object is `aw`: the whitespace run PLUS
-    // the next word — the run extends across newlines (blank lines belong
-    // to it), matching vim (9.1 probes: `yaw` on the gap of "foo   bar"
-    // yanks "   bar"; on a whitespace-only line the object reaches the
-    // next line's word).
-    let mut o = end;
+    // the next word (see [`blank_run_plus_next_word`]).
+    Some(blank_run_plus_next_word(buf, big, start))
+}
+
+/// The `aw` object when the cursor is on whitespace (or an empty line): the
+/// whitespace run PLUS the next word — the run extends across newlines
+/// (blank lines belong to it), matching vim (9.1 probes: `yaw` on the gap of
+/// "foo   bar" yanks "   bar"; on a whitespace-only/empty line the object
+/// reaches the next line's word, so `daw` merges that line away).
+fn blank_run_plus_next_word(
+    buf: &dyn VimBuffer,
+    big: bool,
+    run_start: usize,
+) -> ObjectRange {
+    let mut o = run_start;
     while let Some(c) = buf.char_at(o) {
         if c.is_whitespace() {
             o += c.len_utf8();
@@ -164,7 +180,7 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
             }
         }
     }
-    Some(ObjectRange::charwise(start, word_end))
+    ObjectRange::charwise(run_start, word_end)
 }
 
 fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {

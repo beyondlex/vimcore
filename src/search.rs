@@ -255,10 +255,21 @@ pub fn find_match_from(
     } else {
         matches.iter().find(|m| m.contains(&offset))
     };
+    // past-the-end steps wrap like vim's wrapscan (`2gN` on the FIRST
+    // match lands on the last one)
     let found = match containing {
         Some(m) => Some(m.clone()),
-        None if backward => matches.iter().rev().find(|m| m.end <= offset).cloned(),
-        None => matches.iter().find(|m| m.start > offset).cloned(),
+        None if backward => matches
+            .iter()
+            .rev()
+            .find(|m| m.end <= offset)
+            .cloned()
+            .or_else(|| matches.last().cloned()),
+        None => matches
+            .iter()
+            .find(|m| m.start > offset)
+            .cloned()
+            .or_else(|| matches.first().cloned()),
     };
     found
 }
