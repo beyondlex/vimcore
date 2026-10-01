@@ -88,6 +88,18 @@ impl Registers {
     /// only. Every write also updates the unnamed mirror (except the
     /// blackhole), matching vim. Uppercase `A`-`Z` APPEND to the lowercase
     /// register instead of writing a separate slot (vim's `"Ayy`).
+    /// Store the last search pattern into `"/` (`@/`): a plain named slot —
+    /// it must never touch the unnamed register, unlike [`Self::store`].
+    pub fn store_search(&mut self, pattern: String) {
+        self.named.insert(
+            '/',
+            Register {
+                text: pattern,
+                kind: RegisterKind::Charwise,
+            },
+        );
+    }
+
     pub fn store(&mut self, name: char, text: String, kind: RegisterKind) {
         let register = Register {
             text: text.clone(),

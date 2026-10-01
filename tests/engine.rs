@@ -868,15 +868,18 @@ fn ex_set_changes_options() {
     // search now publishes no highlights
     f.feed(["/", "f", "o", "o", "<CR>"]);
     assert!(f.host.highlights.is_empty());
-    // boolean toggle form re-enables
+    // boolean toggle form re-enables — and re-renders the live hlsearch
+    // highlights of the active pattern immediately (round12: vim refreshes
+    // the match set on `:set ic`/`:set hls` changes)
     f.feed([":", "s", "e", "t", " ", "h", "l", "s", "!", "<CR>"]);
     assert!(f.vim.options.hlsearch);
+    assert_eq!(f.host.highlights.len(), 1); // "foo" is highlighted again
     // numeric form
     f.feed([":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>"]);
     assert_eq!(f.vim.options.tabstop, 8);
     // unknown option rings the bell and stops
     f.feed([":", "s", "e", "t", " ", "f", "r", "o", "b", "<CR>"]);
-    assert_eq!(f.host.highlights.len(), 0); // no crash; hlsearch still on
+    assert_eq!(f.host.highlights.len(), 1); // no crash; hlsearch still on
     assert!(f.vim.options.hlsearch);
 }
 
