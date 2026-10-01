@@ -223,9 +223,30 @@ fn paragraph_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Ob
     while last + 1 < buf.line_count() && buf.line_is_blank(last + 1) == buf.line_is_blank(line) {
         last += 1;
     }
-    if !inner && last + 1 < buf.line_count() {
-        // `ap` swallows one following blank line
-        last += 1;
+    if !inner {
+        // `ap` extends by whitespace, directionally (vim 9.1 probes:
+        // [aaa,bbb,"","",ccc] `2Gdap` -> [ccc] — ALL trailing blanks go;
+        // [aaa,"","","bbb",ccc] `2Gdap` on a BLANK line -> [aaa] — the
+        // blank block plus the ENTIRE following paragraph, but NOT that
+        // paragraph's own trailing blanks ([aaa,"",bbb,"",x] `2Gdap` ->
+        // [aaa,"",x])). The old `last += 1` swallowed exactly one blank in
+        // both shapes, leaving stray lines behind.
+        if buf.line_is_blank(line) {
+            // blank block + the whole next paragraph (its trailing blanks
+            // stay)
+            if last + 1 < buf.line_count() {
+                let mut para_last = last + 1;
+                while para_last + 1 < buf.line_count() && !buf.line_is_blank(para_last + 1) {
+                    para_last += 1;
+                }
+                last = para_last;
+            }
+        } else {
+            // text line: swallow every following blank line
+            while last + 1 < buf.line_count() && buf.line_is_blank(last + 1) {
+                last += 1;
+            }
+        }
     }
     Some(ObjectRange {
         start: buf.line_start(first),

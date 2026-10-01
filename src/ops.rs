@@ -389,8 +389,10 @@ pub fn apply(
         }
         Operator::Yank => yank_span(vim, ctx, span, register),
         Operator::Change => {
-            // keep the indent of the first line when changing linewise
-            let indent_text = if span.linewise {
+            // keep the indent of the first line when changing linewise —
+            // gated on 'autoindent' like vim (9.1 probes: `cc` on "    abc"
+            // with `noai` starts empty at col 0, with `ai` keeps the indent)
+            let indent_text = if span.linewise && vim.options.autoindent {
                 let first = ctx.buf.offset_to_line(span.start);
                 let (indent, _) = ctx.buf.line_indent(first);
                 ctx.buf

@@ -11,6 +11,8 @@ use crate::state::{Ctx, KeyResult, VimState};
 /// Platforms may deliver Enter, Backspace and Tab as bare control characters
 /// through the text-input path (`"\n"`, `"\x7f"`, `"\t"`). Normalize them so
 /// the prompt treats them like their named keys instead of pattern text.
+/// C-h folds to Backspace too (crossterm-style hosts deliver it raw; vim
+/// binds C-h = BS at the prompt).
 fn normalize_control_char(key: Key) -> Key {
     if !key.modifiers.is_plain() {
         return key;
@@ -19,12 +21,22 @@ fn normalize_control_char(key: Key) -> Key {
         return match c {
             '\n' | '\r' => Key::enter(),
             '\x7f' => Key::backspace(),
+            '\x08' => Key::backspace(),
             '\t' => Key::tab(),
             _ => key,
         };
     }
     key
 }
+
+/// vim's Ex abbreviation rule: every unambiguous prefix of the full name is
+/// accepted. Hand-rolled static lists (greppable); `:s`/`substitute…` live in
+/// [`VimState::ex_substitute`], `:ju[mp]` is deliberately absent (a DIFFERENT
+/// vim command — NOTES 分歧 #26).
+const DELETE_SPELLINGS: &[&str] = &["d", "de", "del", "dele", "delet", "delete"];
+const YANK_SPELLINGS: &[&str] = &["y", "ya", "yan", "yank"];
+const JOIN_SPELLINGS: &[&str] = &["j", "jo", "joi", "join"];
+const SORT_SPELLINGS: &[&str] = &["sor", "sort"];
 
 /// `parse_range` 的返回体：范围（`None` = 未写范围前缀）+ 剥离范围后的命令。
 /// A parsed `[range]`: the clamped `(first, last)` lines, how many addresses
@@ -181,6 +193,27 @@ impl VimState {
             self.cancel_cmdline(ctx);
             return KeyResult::Consumed;
         }
+        // <C-w>/<C-u> edit the prompt line itself (vim's cmdline window is
+        // out of scope, but the two delete chords every rc file trains into
+        // muscle memory are not): C-w kills the last word, C-u clears.
+        if key == Key::ctrl_char('w') {
+            let no_tail_ws = self.cmdline.buffer.trim_end_matches(' ');
+            let cut = no_tail_ws
+                .char_indices()
+                .rev()
+                .take_while(|(_, c)| !c.is_whitespace())
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or_else(|| no_tail_ws.len());
+            self.cmdline.buffer.truncate(cut);
+            ctx.host.changed();
+            return KeyResult::Consumed;
+        }
+        if key == Key::ctrl_char('u') {
+            self.cmdline.buffer.clear();
+            ctx.host.changed();
+            return KeyResult::Consumed;
+        }
         match &key.kind {
             KeyKind::Char(c) if key.modifiers.is_plain() => {
                 self.cmdline.buffer.push(*c);
@@ -200,10 +233,12 @@ impl VimState {
                     // repeats; an empty entry reuses the previous value)
                     let entry = std::mem::take(&mut self.cmdline.buffer);
                     if !entry.is_empty() {
+                        // vim relocates an older duplicate to the end
+                        // (`/foo /bar /foo` browses as bar → foo, the older
+                        // "foo" is gone)
                         let history = self.cmdline.history_for(prompt);
-                        if history.last() != Some(&entry) {
-                            history.push(entry.clone());
-                        }
+                        history.retain(|h| h != &entry);
+                        history.push(entry.clone());
                     }
                     self.cmdline.history_pos = None;
                     self.cmdline.stash = None;
@@ -343,6 +378,11 @@ impl VimState {
         if line.is_empty() {
             return;
         }
+        // a leading `"` comments the whole line out (vim: `: " scratch` is a
+        // silent no-op, not E492)
+        if line.starts_with('"') {
+            return;
+        }
         // the range prefix is parsed off before command dispatch; `None`
         // means "no range typed" — commands then apply their own default
         let (range, addr_count, line) = match Self::parse_range(self, ctx, line) {
@@ -368,11 +408,12 @@ impl VimState {
             return;
         }
         match line {
-            "noh" | "nohl" | "nohlsearch" => {
+            "noh" | "nohl" | "nohls" | "nohlsearch" | "noh!" | "nohl!" | "nohls!"
+            | "nohlsearch!" => {
                 search::clear_highlights(self, ctx);
                 return;
             }
-            "w" | "write" => {
+            "w" | "write" | "w!" | "write!" => {
                 ctx.host.save();
                 return;
             }
@@ -385,7 +426,11 @@ impl VimState {
                 ctx.host.request_close_forced(true);
                 return;
             }
-            "wq" | "x" | "xit" => {
+            // `:x` writes even when the buffer is unmodified here; vim only
+            // writes when changes were made (`:h :x`). The host's `save` is
+            // free to no-op for clean buffers — the engine has no modified
+            // flag of its own, so the clean/dirty decision is the host's.
+            "wq" | "x" | "xit" | "wq!" | "x!" | "xit!" => {
                 ctx.host.save();
                 ctx.host.request_close_forced(true);
                 return;
@@ -489,8 +534,9 @@ impl VimState {
         // be a COUNT that re-anchors at the range's LAST line (vim: `:1,2d 3`
         // deletes lines 2-4; an EXPLICIT `:1,2d 1` deletes just line 2 —
         // any given count, even 1, re-anchors)
-        if let Some(rest) =
-            Self::boundary_cmd(line, "d").or_else(|| Self::boundary_cmd(line, "delete"))
+        if let Some(rest) = DELETE_SPELLINGS
+            .iter()
+            .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
             let (register, count) = Self::parse_reg_count(rest.trim());
             let (mut first, last) = range;
@@ -504,8 +550,9 @@ impl VimState {
             return;
         }
         // :{range}y[ank] [x] [count] — yank the range's lines into a register
-        if let Some(rest) =
-            Self::boundary_cmd(line, "y").or_else(|| Self::boundary_cmd(line, "yank"))
+        if let Some(rest) = YANK_SPELLINGS
+            .iter()
+            .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
             self.ex_yank_lines(ctx, range, rest.trim());
             return;
@@ -513,8 +560,9 @@ impl VimState {
         // :{range}sor[t] [!] [i] [u] — sort the range's lines (before `s`:
         // `sort` starts with an `s` and would otherwise hit the substitute
         // parser's alphanumeric-separator guard)
-        if let Some(rest) =
-            Self::boundary_cmd(line, "sort").or_else(|| Self::boundary_cmd(line, "sor"))
+        if let Some(rest) = SORT_SPELLINGS
+            .iter()
+            .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
             self.ex_sort(ctx, range, rest.trim());
             return;
@@ -523,9 +571,12 @@ impl VimState {
         // range joins with the NEXT line (vim's bare `:j`), `!` removes all
         // whitespace. A trailing COUNT joins count lines starting at the
         // range's LAST line (`:2j 3` joins lines 2-4, vim 9.1 probe — the
-        // engine used to ignore it and join only two).
-        if let Some(rest) =
-            Self::boundary_cmd(line, "join").or_else(|| Self::boundary_cmd(line, "j"))
+        // engine used to ignore it and join only two). `:ju` is NOT here:
+        // vim's `:ju[mp]` is a different command (deliberately unsupported —
+        // NOTES 分歧 #26).
+        if let Some(rest) = JOIN_SPELLINGS
+            .iter()
+            .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
             self.ex_join(ctx, range, rest.trim(), addr_count);
             return;
@@ -754,12 +805,18 @@ impl VimState {
                 .map(|i| part.split_at(i))
                 .unwrap_or((part, ""));
             // An EMPTY address defaults to the cursor line, on either side
-            // of the comma (`:,3d` = `.,3d`, `:2,d` = `2,.d` — 9.1 probes;
-            // skipping empty parts made both delete a single line). A bare
-            // `+n` / `-n` likewise offsets the previous address (vim:
-            // `.,+1` is two addresses); an absent previous is the cursor.
-            let value = match base_line(base_str, vim, ctx)? {
+            // of the comma (`:,3d` = `.,3d`, `:2,d` = `2,.d` — 9.1 probes).
+            // A LEADING `+n`/`-n` with no address bases at the CURSOR line
+            // (vim's get_address: `:5,+1d` is lines 5..cursor+1 — the old
+            // comment claimed previous-address, which would have invited a
+            // "fix" of the correct code). Whitespace before the offset
+            // (`:5 +2d`) is skipped like vim does.
+            let value = match base_line(base_str.trim_end(), vim, ctx)? {
                 Base::Line(base) => with_offset(base, off_str),
+                // mid-range `%` = `1,$` collapsed to its LAST line: only the
+                // final two addresses survive a longer chain anyway, so
+                // `:1,%d` deletes the whole file exactly like vim
+                Base::Unusable if base_str == "%" => last,
                 Base::Unusable => {
                     let base = addresses.last().copied().unwrap_or(cursor_line);
                     with_offset(base, off_str)
@@ -898,7 +955,11 @@ impl VimState {
         if let Some(head) = parts.next() {
             if let Some(c) = head.chars().next() {
                 if c.is_ascii_digit() {
-                    count = head.parse::<usize>().unwrap_or(1);
+                    // a NON-numeric tail (`:1,2d 3x`) is garbage, not a
+                    // count of 1: defaulting to 1 re-anchored the range at
+                    // its last line and deleted the WRONG line set — vim
+                    // reports E488 and deletes nothing. 0 = no count.
+                    count = head.parse::<usize>().unwrap_or(0);
                 } else if c.is_ascii_alphanumeric() || SPECIALS.contains(c) {
                     register = Some(c);
                     // the count may follow the register (`:y a 2`)
@@ -992,6 +1053,11 @@ impl VimState {
         let mut applied = false;
         let mut search_rules_changed = false;
         for arg in args.split_whitespace() {
+            // a `"` starts a comment to end of line (vim: `:set ts=4 " note`
+            // sets quietly); stop parsing so the words after it don't error
+            if arg.starts_with('"') {
+                break;
+            }
             // `name?` is a query: report and move on, values untouched
             if let Some(name) = arg.strip_suffix('?') {
                 match self.options.describe(name) {
@@ -1062,19 +1128,21 @@ impl VimState {
     /// spelling (vim's one-word alias). Returns false when `line` is not a
     /// substitute command at all.
     fn ex_substitute(&mut self, ctx: &mut Ctx, line: &str, range: (usize, usize)) -> bool {
-        // `s` + rest below; `substitute` is accepted as a spelling of `s`
+        // `s` + rest below; `substitute` and every unambiguous prefix
+        // (`:su`, `:sub`, …) are accepted spellings of `s` (vim's
+        // abbreviation rule)
+        const SUBST_ABBREVS: &[&str] = &[
+            "substitute", "substitut", "substitu", "substit", "substi", "subst", "subs", "sub",
+            "su",
+        ];
         let normalized;
-        let line = if let Some(rest) = line.strip_prefix("substitute") {
-            let is_alias = match rest.chars().next() {
-                None => true,
-                Some(c) => !c.is_alphanumeric(),
-            };
-            if is_alias {
-                normalized = format!("s{rest}");
-                &normalized
-            } else {
-                return false;
-            }
+        let line = if let Some((rest, _spelling)) = SUBST_ABBREVS.iter().find_map(|sp| {
+            line.strip_prefix(sp)
+                .filter(|r| r.is_empty() || !r.chars().next().is_some_and(char::is_alphanumeric))
+                .map(|r| (r, sp))
+        }) {
+            normalized = format!("s{rest}");
+            &normalized
         } else {
             line
         };

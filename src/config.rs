@@ -63,7 +63,14 @@ pub fn parse(text: &str) -> Config {
             continue;
         }
 
-        if let Some(rest) = line.strip_prefix("let mapleader") {
+        // `let mapleader` and the `g:`-scoped spelling common in real vimrcs
+        // both bind the leader (`let g:mapleader = ","` used to fall through
+        // to `ignored` and every `<Leader>` mapping silently kept the
+        // default `\`)
+        let let_rest = line
+            .strip_prefix("let mapleader")
+            .or_else(|| line.strip_prefix("let g:mapleader"));
+        if let Some(rest) = let_rest {
             // let mapleader = " " / "," / "<Space>" — a bare space parses to
             // Char(' ') via parse_key_sequence, and `<Space>` normalizes to
             // Char(' ') in Key::parse_angle, so both spellings converge.
@@ -132,7 +139,7 @@ pub fn parse(text: &str) -> Config {
                 continue;
             };
 
-        let (lhs_str, rhs_str) = match after_cmd.split_once(' ') {
+        let (lhs_str, rhs_str) = match split_ws2(after_cmd) {
             Some((lhs, rhs)) if !lhs.is_empty() && !rhs.trim().is_empty() => {
                 (lhs, rhs.trim_start())
             }
@@ -161,12 +168,20 @@ pub fn parse(text: &str) -> Config {
 
 fn strip_map_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
     let rest = line.strip_prefix(cmd)?;
-    // command boundary: end of line or whitespace ("map" must not match "mapping")
-    if rest.is_empty() || rest.starts_with(' ') {
+    // command boundary: end of line or whitespace ("map" must not match
+    // "mapping"). TAB is whitespace too — an rc line like `nnoremap\tx y`
+    // used to be silently dropped into `ignored`
+    if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
         Some(rest)
     } else {
         None
     }
+}
+
+/// Split `{lhs}{sep}{rhs}` on the first space OR tab (vimrcs use both).
+fn split_ws2(s: &str) -> Option<(&str, &str)> {
+    let i = s.find([' ', '\t'])?;
+    Some((&s[..i], &s[i + 1..]))
 }
 
 /// Parse a mapping side, resolving the `<Leader>`/`<leader>` token against

@@ -611,8 +611,15 @@ impl VimState {
             match self.mapping_step(ctx) {
                 MappingStep::Expanded => continue,
                 // both end the pipeline with the queue preserved for the next
-                // keystroke (a mapping or builtin still waiting for more keys)
-                MappingStep::Wait | MappingStep::Done => return KeyResult::Consumed,
+                // keystroke (a mapping or builtin still waiting for more keys).
+                // map_depth resets WITH the loop: the counter only guards
+                // runaway expansion WITHIN one walk — letting it persist
+                // across calls ratcheted it toward a false runaway abort that
+                // wiped freshly typed text
+                MappingStep::Wait | MappingStep::Done => {
+                    self.map_depth = 0;
+                    return KeyResult::Consumed;
+                }
                 MappingStep::FallThrough => {}
             }
 
@@ -2030,19 +2037,26 @@ impl VimState {
             return;
         };
         // pads for short rows under `A`, collected first and applied
-        // BOTTOM-UP so the row offsets computed below stay valid
+        // BOTTOM-UP so the row offsets computed below stay valid. vim pads
+        // any row that ends before the APPEND column (col_hi is the EXCLUSIVE
+        // end = the append column itself; 9.1 probe: block cols 0-2 on rows
+        // "123456"/"12" gives "123 X456"/"12  X" — the short row pads to the
+        // append column, not just to col_lo). The old `range.is_empty()`
+        // filter left rows ending between col_lo and col_hi unpadded, and
+        // `A` appended at the row's own end instead.
         let pads: Vec<(usize, usize)> = if append {
             block
                 .rows
                 .iter()
                 .enumerate()
-                .filter(|(_, range)| range.is_empty())
-                .map(|(i, _)| {
+                .filter_map(|(i, _)| {
                     let line = block.first_line + i;
                     let width = crate::buffer::display_column(ctx.buf, ctx.buf.line_end(line));
-                    (line, block.col_hi.saturating_sub(width))
+                    // `.then` (lazy): the subtraction must not run when the
+                    // row is LONGER than the block — `then_some` would
+                    // evaluate `col_hi - width` first and overflow
+                    (width < block.col_hi).then(|| (line, block.col_hi - width))
                 })
-                .filter(|(_, pad)| *pad > 0)
                 .collect()
         } else {
             Vec::new()
@@ -2465,20 +2479,22 @@ impl VimState {
     // ---- visual mode ---------------------------------------------------------
 
     fn visual_key(&mut self, ctx: &mut Ctx, key: Key) -> ProcessOutcome {
-        if self.char_arg_cmd.is_some() {
-            return self.complete_char_arg(ctx, key);
-        }
-        if self.register_pending {
-            return self.register_pending_key(ctx, &key);
-        }
-
-        // Esc aborts the selection unconditionally — even with a partial
-        // prefix pending (unlike normal mode, where the trie walk runs first).
+        // Esc aborts the selection unconditionally — BEFORE the `"{reg}`
+        // prefix or a partial trie walk can swallow it (`3"<Esc>` must
+        // cancel count+register AND the selection; with register_pending
+        // checked first the Esc was eaten as a register name, the count
+        // survived and silently scaled the NEXT command — vim cancels all).
         // <C-c> is vim's cancel synonym.
         if key == Key::escape() || key == Key::ctrl_char('[') || key == Key::ctrl_char('c') {
             self.reset_pending();
             self.exit_visual(ctx);
             return ProcessOutcome::Consumed;
+        }
+        if self.char_arg_cmd.is_some() {
+            return self.complete_char_arg(ctx, key);
+        }
+        if self.register_pending {
+            return self.register_pending_key(ctx, &key);
         }
 
         if !self.cmd_seq.is_empty() {
@@ -2593,6 +2609,9 @@ impl VimState {
                 // replays it right after recording
                 self.last_macro_played = Some(reg);
             }
+            // `q` takes no count (vim drops it): a count typed before the
+            // stop (`2q`) must not silently scale the NEXT command
+            self.count = None;
             return ProcessOutcome::Consumed;
         }
         // char-argument commands wait for their argument first
@@ -3655,6 +3674,52 @@ impl VimState {
             // `r{char}` waits for its argument: the replacement is applied
             // in `complete_char_arg`'s VisualReplace arm
             VisualCmd::ReplaceChar => {}
+            // Y / D / X / C / S: vim's LINEWISE visual spellings (9.1
+            // probes: `vlD` deletes the covered line whole, `vlY` yanks it
+            // linewise, `vlC`/`vlS` linewise-change it). The covered-lines
+            // span replaces the charwise selection; everything else runs
+            // the standard operator path.
+            VisualCmd::LinewiseOp(op) => {
+                let Some(span) = ops::span_from_visual(self, ctx.buf) else {
+                    return;
+                };
+                let first = ctx.buf.offset_to_line(span.start);
+                let last = ops::last_line_of_span(ctx.buf, &span);
+                let line_span = ops::OpSpan {
+                    start: ctx.buf.line_start(first),
+                    end: ctx.buf.line_range(last).end,
+                    linewise: true,
+                };
+                // `c` continues into insert: remember the covered lines for
+                // `gv` (see `pending_visual_marks`) before the edit shifts
+                if op == Operator::Change {
+                    let kind = match self.mode {
+                        Mode::Visual { kind } => kind,
+                        _ => crate::mode::VisualKind::Char,
+                    };
+                    self.pending_visual_marks = Some((line_span.start, line_span.end, kind));
+                }
+                let count = self.take_total_count();
+                let gen_before = self.edit_generation;
+                self.begin_edit();
+                if count > 1 && matches!(op, Operator::IndentLeft | Operator::IndentRight) {
+                    for _ in 0..count {
+                        for line in first..=last {
+                            ops::shift_line(self, ctx, line, matches!(op, Operator::IndentRight));
+                        }
+                    }
+                } else {
+                    ops::apply(self, ctx, op, &line_span, self.register);
+                }
+                if self.insert_session.is_none() {
+                    self.end_edit();
+                }
+                self.bump_if_edited(ctx, gen_before);
+                self.reset_pending();
+                if matches!(self.mode, Mode::Visual { .. }) {
+                    self.finish_visual_op(ctx);
+                }
+            }
             // zz / zt / zb: report the anchored scroll and KEEP the
             // selection — vim scrolls without leaving visual mode
             VisualCmd::Scroll(anchor) => {
@@ -3706,9 +3771,15 @@ impl VimState {
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
                 let line_start = ctx.buf.line_start(line);
                 // copy the line's indent VERBATIM (tabs stay tabs; the old
-                // " ".repeat(indent) silently retabbed tab-indented files)
-                let (indent, _) = ctx.buf.line_indent(line);
-                let indent_str = ctx.buf.slice(line_start..line_start + indent);
+                // " ".repeat(indent) silently retabbed tab-indented files) —
+                // gated on 'autoindent' like vim (`:set noai` + `o` starts
+                // the line at column 0)
+                let indent_str = if self.options.autoindent {
+                    let (indent, _) = ctx.buf.line_indent(line);
+                    ctx.buf.slice(line_start..line_start + indent)
+                } else {
+                    String::new()
+                };
                 if below {
                     let at = ctx.buf.line_end(line);
                     self.edit_insert(ctx, at, &format!("\n{indent_str}"));
@@ -3804,15 +3875,23 @@ impl VimState {
                 // starting `q{reg}`; the stop is handled in execute_command.
                 // vim only accepts a-zA-Z0-9 — `q/` beeps and stays idle, so
                 // a stray key can't hijack a slot the `@` lookup expects to
-                // be a real register.
-                if c.is_ascii_alphanumeric() {
-                    self.macro_capture = Some((c, Vec::new()));
-                } else {
+                // be a real register. The count before `q` is dropped too.
+                if !c.is_ascii_alphanumeric() {
                     self.char_arg = None;
                     self.reset_pending();
                     ctx.host.bell();
                     return ProcessOutcome::Consumed;
                 }
+                // `qA` APPENDS to register a's recording (vim): the capture
+                // starts from the register's existing steps and lands back
+                // in the lowercase slot on stop
+                let slot = c.to_ascii_lowercase();
+                let seed = if c.is_ascii_uppercase() {
+                    self.macros.get(&slot).cloned().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                self.macro_capture = Some((slot, seed));
             }
             CharArgCmd::MacroPlay => {
                 // `@:` repeats the last executed Ex command line
