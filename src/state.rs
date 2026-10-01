@@ -94,6 +94,15 @@ struct InsertRepeat {
     count: usize,
     linewise: bool,
     text: String,
+    /// What the session actually put in the buffer: `text` with autoindent
+    /// expanded at every newline. The exit invariant compares the cursor
+    /// against `start + expanded.len()`: with `autoindent` the buffer grows
+    /// by MORE than `text` at each `<CR>`, so the old raw-length check
+    /// failed and `3ifoo<CR>bar<Esc>` silently dropped the count (vim 9.1
+    /// probe P24: three foo/bar pairs, indent included). Keeping the
+    /// expanded text (not a buffer slice) sidesteps boundary questions —
+    /// any cursor drift (arrows, backspace) still fails the length check.
+    expanded: String,
 }
 
 /// Synthetic pending-key marker for a recorded [`RecordedStep::Text`]: when
@@ -261,7 +270,13 @@ pub struct VimState {
     /// Replace (`R`) mode: characters the typing overwrote, newest last.
     /// `None` entries mark text typed PAST the line end (no original to
     /// restore). Backspace pops this stack and restores, like vim.
-    pub(crate) replace_overwritten: Vec<Option<char>>,
+    /// Replace-mode undo stack: `(buffer offset, original char)` per typed
+    /// char (`None` = appended past the line end). The offset matters: BS
+    /// restores ONLY when the top entry IS the position being backspaced —
+    /// after a cursor move the top belongs elsewhere and vim restores
+    /// nothing (probe 9.1 matrix, round 14: `Rabc<Left><BS>` leaves the
+    /// text alone; the old bare-LIFO popped it and wrote the wrong char).
+    pub(crate) replace_overwritten: Vec<(usize, Option<char>)>,
 
     /// Pre-edit selection bounds of a visual change that opened the current
     /// insert session (`viwc`, visual-block `I`/`A`/`c`). vim re-selects the
@@ -350,7 +365,7 @@ impl VimState {
             cmdline: Cmdline::default(),
             keymaps: Keymaps::default(),
             tables: CommandTables::build(),
-            replace_overwritten: Vec::new(),
+            replace_overwritten: Vec::new(), // (offset, original) pairs — see field doc
             pending_visual_marks: None,
             undo_seq: 0,
             open_undo: None,
@@ -1519,17 +1534,24 @@ impl VimState {
         if self.block_insert.is_some() {
             return;
         }
-        if rep.text.is_empty() || rep.text.contains('\n') {
+        if rep.text.is_empty() {
             return;
         }
         let Some(start) = self.insert_change_pos else {
             return;
         };
-        if self.cursor.offset != start + rep.text.len() {
-            return; // the session moved around: no replication
+        // the cursor must sit exactly at the end of what the session wrote —
+        // any arrow move / backspace / external edit drifts it off and skips
+        // replication (the same no-move guarantee as before, now measured in
+        // EXPANDED bytes so autoindent sessions don't false-bail)
+        if self.cursor.offset != start + rep.expanded.len() {
+            return;
         }
         let copies = rep.count - 1;
         if rep.linewise {
+            if rep.text.contains('\n') {
+                return;
+            }
             let line = ctx.buf.offset_to_line(self.cursor.offset);
             let ls = ctx.buf.line_start(line);
             let indent_str = ctx.buf.slice(ls..ls + ctx.buf.line_indent(line).0);
@@ -1544,8 +1566,13 @@ impl VimState {
             self.edit_insert(ctx, at, &extra);
             self.cursor.offset = at + extra_len;
         } else {
-            let copies = crate::ops::clamped_repeat_count(rep.text.len(), copies);
-            let extra = rep.text.repeat(copies);
+            // vim repeats what LANDED in the buffer, indent included (9.1
+            // probe P24: `3ifoo<CR>bar<Esc>` under ai → three foo/bar pairs).
+            // The expanded accumulation IS that text, self-consistent by
+            // construction.
+            let segment = rep.expanded.clone();
+            let copies = crate::ops::clamped_repeat_count(segment.len(), copies);
+            let extra = segment.repeat(copies);
             let len = extra.len();
             self.edit_insert(ctx, self.cursor.offset, &extra);
             self.cursor.offset += len;
@@ -1690,35 +1717,48 @@ impl VimState {
         if self.insert_change_pos.is_none() {
             self.insert_change_pos = Some(at);
         }
-        if let Some(rep) = &mut self.insert_repeat {
-            rep.text.push_str(text);
-        }
         let expanded = if self.options.autoindent && !indent_chars.is_empty() {
             text.replace('\n', &format!("\n{indent_chars}"))
         } else {
             text.to_owned()
         };
+        if let Some(rep) = &mut self.insert_repeat {
+            rep.text.push_str(text);
+            // the buffer grows by the EXPANDED text (autoindent included) —
+            // the exit invariant must count THESE bytes
+            rep.expanded.push_str(&expanded);
+        }
         if self.mode == Mode::Replace {
             // overwrite up to the text length, then insert the remainder.
-            // Each overwritten char is stashed so Backspace can restore it
-            // (vim's Replace-mode BS); chars appended past the line end
-            // record `None` — backspacing over them plain-deletes.
+            // Each overwritten char is stashed WITH ITS OFFSET so Backspace
+            // can match the position (see the field doc); chars appended
+            // past the line end record `None` at their new offsets —
+            // backspacing over them plain-deletes.
             let mut end = at;
             let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(at));
             let mut overwritten = 0usize;
             for _ in 0..expanded.chars().count() {
                 match ctx.buf.next_char_offset(end) {
                     Some(next) if next <= line_end => {
-                        self.replace_overwritten.push(ctx.buf.char_at(end));
+                        self.replace_overwritten.push((end, ctx.buf.char_at(end)));
                         end = next;
                         overwritten += 1;
                     }
                     _ => break,
                 }
             }
-            let appended = expanded.chars().count().saturating_sub(overwritten);
-            self.replace_overwritten
-                .extend(std::iter::repeat_n(None, appended));
+            // appended chars land from `end` onward, one per char of the
+            // appended tail of `expanded`
+            let tail_bytes_start = expanded
+                .char_indices()
+                .nth(overwritten)
+                .map(|(i, _)| i)
+                .unwrap_or(expanded.len());
+            let mut pos = end;
+            for c in expanded[tail_bytes_start..].chars() {
+                self.replace_overwritten.push((pos, None));
+                pos += c.len_utf8();
+            }
             self.edit_replace(ctx, at..end.min(line_end.max(at)), &expanded);
         } else {
             self.edit_insert(ctx, at, &expanded);
@@ -2815,6 +2855,7 @@ impl VimState {
                     && self.block_insert.is_none()
                 {
                     self.insert_repeat = Some(InsertRepeat {
+                        expanded: String::new(),
                         count,
                         linewise: matches!(insert, InsertKind::OpenLine { .. }),
                         text: String::new(),

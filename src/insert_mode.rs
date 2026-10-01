@@ -190,15 +190,23 @@ impl VimState {
         }
 
         // Replace mode: BS restores the overwritten character and steps
-        // back (vim `R` + BS). `None` entries were APPENDED past the line
-        // end — there is nothing to restore, so they plain-delete. The
-        // position guard comes FIRST: at offset 0 there is nothing to
-        // restore, and consuming a stack entry there would desync the
-        // remaining entries from their positions.
+        // back — but ONLY when the top stack entry IS the position being
+        // backspaced. The vim 9.1 probe matrix (round 14) is exact:
+        //   `Rab<BS>`     → restores `x` (straight back over typing);
+        //   `Rabc<Left><BS>` / `Rab<Left><BS>` → text UNCHANGED, BS is a
+        //   total no-op (the top entry belongs to a later position; vim
+        //   neither restores nor moves).
+        // So the raw LIFO is gone: entries carry their offsets and a
+        // mismatch makes the whole keypress inert. `None` entries were
+        // APPENDED past the line end — matched, they plain-delete.
         if self.mode == Mode::Replace && at > 0 {
-            if let Some(orig) = self.replace_overwritten.pop() {
-                if at > line_start {
-                    if let Some(prev) = ctx.buf.prev_char_offset(at) {
+            if at > line_start {
+                let Some(prev) = ctx.buf.prev_char_offset(at) else {
+                    return;
+                };
+                match self.replace_overwritten.last() {
+                    Some((pos, _)) if *pos == prev => {
+                        let (_, orig) = self.replace_overwritten.pop().unwrap();
                         self.begin_edit();
                         match orig {
                             Some(c) => self.edit_replace(ctx, prev..at, &c.to_string()),
@@ -208,16 +216,22 @@ impl VimState {
                         self.cursor.offset = prev;
                         ctx.host.changed();
                     }
-                } else {
-                    // crossed the line start: join with the previous line
-                    self.begin_edit();
-                    self.edit_delete(ctx, at - 1..at);
-                    self.republish_search(ctx);
-                    self.cursor.offset = at - 1;
-                    ctx.host.changed();
+                    // position mismatch (or empty stack): vim leaves
+                    // everything alone — no restore, no cursor move
+                    _ => {}
                 }
                 return;
             }
+            // crossed the line start: join with the previous line; the top
+            // entry belongs to a position at/after the join point and is
+            // discarded to keep the remaining stack position-consistent
+            self.replace_overwritten.pop();
+            self.begin_edit();
+            self.edit_delete(ctx, at - 1..at);
+            self.republish_search(ctx);
+            self.cursor.offset = at - 1;
+            ctx.host.changed();
+            return;
         }
 
         if at > line_start {

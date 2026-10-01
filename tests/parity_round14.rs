@@ -416,3 +416,90 @@ fn buffer_command_prefix_spellings() {
         );
     }
 }
+
+// ---- Replace 模式 BS 位置栈 + count-repeat 的 autoindent（vim 9.1 探针
+//      P23 矩阵 / Q8 矩阵 / P24）----------------------------------------------
+
+/// PROBE 矩阵（Q8a）：`wxyz` 上 `Rab<BS><Esc>` → 'axyz'：BS 恢复被覆盖的
+/// 原字符。None 条目（行尾追加）匹配时按删除处理（Q8e）。
+#[test]
+fn replace_bs_restores_matching_position() {
+    let mut f = edit("wxyz\n", 0, 0, &["R"]);
+    f.type_text("ab");
+    f.feed(["<BS>"]);
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "axyz\n", "BS 恢复位置匹配的条目");
+}
+
+/// PROBE 矩阵（Q8b/Q8c/P23b/P23d）：光标移动后的 BS 是**整体 no-op**——
+/// 栈顶条目不属于当前退格位置，vim 既不恢复也不动光标。旧 LIFO 弹出后
+/// 写错位置（`Rabc<Left><Right><BS>` 曾得 'ayy'）。
+#[test]
+fn replace_bs_after_cursor_move_is_noop() {
+    // Left 一次再 BS：栈顶是 c@2，退格位是 1 → 不恢复
+    let mut f = edit("xyz\n", 0, 0, &["R"]);
+    f.type_text("abc");
+    f.feed(["<Left>"]);
+    f.feed(["<BS>"]);
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "abc\n", "P23b：移动后 BS 不改文本");
+
+    // P23d：Left Left Right BS → 同样不动
+    let mut f2 = edit("xyz\n", 0, 0, &["R"]);
+    f2.type_text("abc");
+    f2.feed(["<Left>", "<Left>", "<Right>"]);
+    f2.feed(["<BS>"]);
+    f2.feed(["<Esc>"]);
+    assert_eq!(f2.text(), "abc\n", "P23d：移动后 BS 不改文本");
+}
+
+/// PROBE（P23c）：Right 在行尾无处可去，光标仍在打字末端 → BS 照常恢复。
+#[test]
+fn replace_bs_at_stuck_right_still_restores() {
+    let mut f = edit("xyz\n", 0, 0, &["R"]);
+    f.type_text("abc");
+    f.feed(["<Right>"]);
+    f.feed(["<BS>"]);
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "abz\n", "P23c：Right 卡在行尾，BS 正常恢复");
+}
+
+/// PROBE（Q8d）：行尾追加字符 BS = 纯删除（None 条目），随后恢复被覆盖的 z。
+#[test]
+fn replace_bs_appended_char_deletes_then_restores() {
+    let mut f = edit("wxyz\n", 0, 0, &["R"]);
+    f.type_text("abcde");
+    f.feed(["<BS>"]);
+    f.feed(["<BS>"]);
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "abcz\n", "Q8d：追加字符删除、覆盖字符恢复");
+}
+
+/// PROBE（P24）：autoindent 下 `3ifoo<CR>bar<Esc>` 得三组 foo/bar——count
+/// 以**展开后**（含缩进）的文本为单元复制（原先 rep.text 原文长度不变式
+/// 失败，count 被静默丢弃）。
+#[test]
+fn count_repeat_insert_with_autoindent_newline_replicates() {
+    let mut f = Fixture::new("start\n");
+    f.vim.options.autoindent = true;
+    f.feed(["3", "i"]);
+    f.type_text("foo");
+    f.feed(["<Enter>"]);
+    f.type_text("bar");
+    f.feed(["<Esc>"]);
+    assert_eq!(
+        f.text(),
+        "foo\nbarfoo\nbarfoo\nbarstart\n",
+        "vim P24：三组 foo/bar"
+    );
+}
+
+/// 无换行的 count-repeat 行为不变（`3ix<Esc>` → 'xxx'）。
+#[test]
+fn count_repeat_insert_plain_still_works() {
+    let mut f = Fixture::new("y\n");
+    f.feed(["3", "i"]);
+    f.type_text("x");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "xxxy\n");
+}
