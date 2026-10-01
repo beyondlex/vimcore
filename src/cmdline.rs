@@ -351,10 +351,12 @@ impl VimState {
         };
         let line = line.trim();
         if line.is_empty() {
-            // a bare `:5` moves to line 5 (first non-blank); a plain `:`
-            // (no range) is a no-op
-            if let Some((first, _)) = range {
-                let line_no = first.min(ctx.buf.line_count().saturating_sub(1));
+            // a range with no command moves the cursor to the range's LAST
+            // address (`:5` = line 5, `:2,5` = line 5 — 9.1 probe: the old
+            // code jumped to `first`, so `:2,5<CR>` landed on line 1); a
+            // plain `:` (no range) is a no-op
+            if let Some((_, addr)) = range {
+                let line_no = addr.min(ctx.buf.line_count().saturating_sub(1));
                 self.cursor.offset = ctx.buf.first_non_blank(line_no);
                 self.cursor.desired_col = None;
                 ctx.host.scroll_to_line(line_no);
@@ -527,6 +529,35 @@ impl VimState {
             .filter(|rest| rest.is_empty() || rest.starts_with(' ') || rest.starts_with('!'))
     }
 
+    /// [`Self::substitute_without_flags`] for callers outside this module
+    /// (the `&` command lives in state.rs).
+    pub(crate) fn strip_substitute_flags_for_repeat(cmd: &str) -> String {
+        Self::substitute_without_flags(cmd)
+    }
+
+    /// `&` and bare `:s` repeat the last substitute WITHOUT its flags (vim
+    /// 9.1 probe: after `s/a/B/g`, both on "xaxax" replace only the first
+    /// match — the `g` is dropped; `:h :&` calls this out explicitly).
+    /// Rebuild `s{sep}pat{sep}rep{sep}` from the stored command line,
+    /// leaving a missing-replacement form (`s/pat`) as-is.
+    fn substitute_without_flags(cmd: &str) -> String {
+        let Some(after_s) = cmd.strip_prefix('s') else {
+            return cmd.to_owned();
+        };
+        let Some(sep) = after_s.chars().next() else {
+            return cmd.to_owned();
+        };
+        if sep.is_alphanumeric() {
+            return cmd.to_owned();
+        }
+        let mut parts = after_s[sep.len_utf8()..].split(sep);
+        let pattern = parts.next().unwrap_or("");
+        match parts.next() {
+            Some(rep) => format!("s{sep}{pattern}{sep}{rep}{sep}"),
+            None => format!("s{sep}{pattern}"),
+        }
+    }
+
     /// One `:registers` listing line: `"x  c|l|b  text` with embedded
     /// newlines shown as `^J` (vim's rendering) and the tail elided.
     fn register_line(name: char, reg: &crate::registers::Register) -> String {
@@ -669,40 +700,40 @@ impl VimState {
             return Ok((Some((0, last)), rest.trim_start()));
         }
         let last = ctx.buf.line_count().saturating_sub(1);
-        let mut first: Option<usize> = None;
-        let mut last_line: Option<usize> = None;
-        let mut previous: Option<usize> = None;
+        let cursor_line = ctx.buf.offset_to_line(vim.cursor.offset);
+        // vim keeps only the LAST TWO addresses of a multi-address range
+        // (9.1 probe: `:1,2,3d` on ['a','b','c','d'] deletes lines 2-3).
+        let mut addresses: Vec<usize> = Vec::new();
         for part in range_part.split([',', ';']) {
             let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
             let (base_str, off_str) = part
                 .find(['+', '-'])
                 .map(|i| part.split_at(i))
                 .unwrap_or((part, ""));
-            // a bare `+n` / `-n` offsets the PREVIOUS address (vim: `.,+1`
-            // is two addresses); an absent previous defaults to the cursor
+            // An EMPTY address defaults to the cursor line, on either side
+            // of the comma (`:,3d` = `.,3d`, `:2,d` = `2,.d` — 9.1 probes;
+            // skipping empty parts made both delete a single line). A bare
+            // `+n` / `-n` likewise offsets the previous address (vim:
+            // `.,+1` is two addresses); an absent previous is the cursor.
             let value = match base_line(base_str, vim, ctx)? {
                 Base::Line(base) => with_offset(base, off_str),
                 Base::Unusable => {
-                    let base =
-                        previous.unwrap_or_else(|| ctx.buf.offset_to_line(vim.cursor.offset));
+                    let base = addresses.last().copied().unwrap_or(cursor_line);
                     with_offset(base, off_str)
                 }
             };
-            let value = value.min(last);
-            previous = Some(value);
-            if first.is_none() {
-                first = Some(value);
-            }
-            last_line = Some(value);
+            addresses.push(value.min(last));
         }
-        match (first, last_line) {
-            (Some(first), Some(last)) => {
-                Ok((Some((first.min(last), first.max(last))), rest.trim_start()))
+        match addresses.as_slice() {
+            [] => Err("E16: Invalid range".to_owned()),
+            [only] => Ok((Some((*only, *only)), rest.trim_start())),
+            _ => {
+                let (a, b) = (
+                    addresses[addresses.len() - 2],
+                    addresses[addresses.len() - 1],
+                );
+                Ok((Some((a.min(b), a.max(b))), rest.trim_start()))
             }
-            _ => Err("E16: Invalid range".to_owned()),
         }
     }
 
@@ -971,9 +1002,11 @@ impl VimState {
             return false;
         };
         if after_s.is_empty() {
-            // bare `:s` = repeat the last substitute on the current line
+            // bare `:s` = repeat the last substitute on the current line,
+            // WITHOUT the previous flags (vim 9.1; same as `&`)
             return match self.cmdline.last_substitute.clone() {
                 Some(last) => {
+                    let last = Self::substitute_without_flags(&last);
                     self.execute_ex(ctx, &last);
                     true
                 }

@@ -3270,9 +3270,14 @@ impl VimState {
             }
             // &: repeat the last :s on the current line (the stored command
             // line re-runs through the full Ex parser, so ranges inside it
-            // behave as typed — vim repeats them relative to the cursor)
+            // behave as typed — vim repeats them relative to the cursor).
+            // Flags are dropped on this replay (`&` has none of its own,
+            // vim 9.1), like the bare `:s` repeat.
             NormalCmd::RepeatSubstitute => match self.cmdline.last_substitute.clone() {
-                Some(last) => self.execute_ex(ctx, &last),
+                Some(last) => {
+                    let last = Self::strip_substitute_flags_for_repeat(&last);
+                    self.execute_ex(ctx, &last)
+                }
                 None => {
                     // vim: E33 "No previous substitute regular expression"
                     ctx.host
