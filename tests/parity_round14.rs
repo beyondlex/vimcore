@@ -141,3 +141,82 @@ fn double_quote_register_prefix_behaves_like_no_prefix() {
     let f = edit("a\nb\n", 0, 0, &["d", "d", "\"\"", "d", "d", "g", "g", "\"", "1", "p"]);
     assert_eq!(f.text(), "\nb", "\"\"dd must rotate the numbered ring");
 }
+
+/// PROBE: vim 9.1 `:nnoremap j G` 后输入 `gj` → 光标落第 2 行（builtin gj
+/// 直接触发，续键不查映射表）。引擎原先让映射劫持续键，G 跳到了末行。
+#[test]
+fn mapping_does_not_hijack_partial_builtin_continuation() {
+    let mut f = Fixture::new("one\ntwo\nthree\n");
+    f.vim
+        .keymaps
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "j", "G", true);
+    f.feed(["g", "g"]);
+    f.feed(["g", "j"]);
+    assert_eq!(
+        f.vim.cursor_offset(),
+        4,
+        "gj 的续键 j 必须完成 builtin，映射的 G 不得触发"
+    );
+}
+
+/// `:nnoremap j gj` 后输入 `gj` 不熔断（旧引擎在展开重放里再次命中映射，
+/// map_depth 熔断、响铃、gj 完全失效）。
+#[test]
+fn noremap_self_referential_builtin_no_runaway() {
+    let mut f = Fixture::new("one\ntwo\nthree\n");
+    f.vim
+        .keymaps
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "j", "gj", true);
+    f.feed(["g", "j"]);
+    assert_eq!(f.host.bells, 0, "无 runaway 熔断");
+    assert_eq!(f.vim.cursor_offset(), 4, "builtin gj 触发一次");
+}
+
+/// 命令之间映射照常工作：`j→G` 映射下单独输入 `j` 仍然展开为 G。
+#[test]
+fn mapping_still_applies_between_commands() {
+    let mut f = Fixture::new("one\ntwo\nthree\n");
+    f.vim
+        .keymaps
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "j", "G", true);
+    f.feed(["g", "g"]);
+    f.feed(["j"]);
+    assert_eq!(
+        f.vim.cursor_offset(),
+        8,
+        "命令边界的 j 按映射展开为 G（跳到末行行首）"
+    );
+}
+
+/// 引擎不变量：互映射自引用（`:map x y` + `:map y x`）在 maxmapdepth
+/// （现与 vim 默认一致 = 1000）处熔断：响铃、清队列、不挂死。
+#[test]
+fn recursive_mapping_depth_guard_stops() {
+    let mut f = Fixture::new("abc\n");
+    f.vim.keymaps.map_str(vimcore::keymap::ModeClass::Normal, "x", "y");
+    f.vim.keymaps.map_str(vimcore::keymap::ModeClass::Normal, "y", "x");
+    f.feed(["x"]);
+    assert!(f.host.bells > 0, "互映射必须熔断响铃");
+    assert_eq!(f.text(), "abc\n", "队列被清空，缓冲不动");
+}
+
+/// 引擎不变量：流水线守卫清空队列后，剩余 no_remap 预算归零——后续
+/// 按键照常走映射解析（预算泄漏曾让之后所有按键绕过映射）。
+#[test]
+fn guard_abort_resets_noremap_budget() {
+    // 大 RHS 触发 MAX_PIPELINE_STEPS 守卫（预算 100k 键）
+    let big_rhs = "x".repeat(120_000);
+    let mut f = Fixture::new("abc\n");
+    f.vim
+        .keymaps
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "q", &big_rhs, true);
+    f.feed(["q"]); // 不挂死即通过（守卫在 100k 键处清队列）
+
+    // 守卫中止是每会话的：后续会话的映射照常解析（w→dd 删行）
+    let mut f2 = Fixture::new("abc\n");
+    f2.vim
+        .keymaps
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "w", "dd", true);
+    f2.feed(["w"]);
+    assert_eq!(f2.text(), "", "映射 w→dd 生效（若预算泄漏则 w 走词移动、缓冲不变）");
+}

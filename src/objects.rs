@@ -291,7 +291,7 @@ fn quote_positions(buf: &dyn VimBuffer, offset: usize, quote: char) -> Vec<usize
                 backslashes += 1;
                 probe = prev;
             }
-            if backslashes % 2 == 0 {
+            if backslashes.is_multiple_of(2) {
                 positions.push(o);
             }
         }
