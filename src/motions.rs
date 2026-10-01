@@ -540,15 +540,29 @@ impl Motion {
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
             }
-            // + / -: adjacent line, first non-blank char
+            // + / -: adjacent line, first non-blank char. At the buffer edge
+            // there is no adjacent line: the motion FAILS (9.1 probe: `d-`
+            // on line 1 and `d+` on the last line are no-ops, they don't
+            // delete the current line).
             Motion::LineDownFirstNonBlank => {
-                let line =
-                    (buf.offset_to_line(vim.cursor.offset) + count).min(buf.line_count() - 1);
-                MotionResult::new(buf.first_non_blank(line), MotionKind::Linewise)
+                let cur = buf.offset_to_line(vim.cursor.offset);
+                let line = cur + count;
+                if line > buf.line_count() - 1 {
+                    MotionResult::stuck(vim.cursor.offset)
+                } else {
+                    MotionResult::new(buf.first_non_blank(line), MotionKind::Linewise)
+                }
             }
             Motion::LineUpFirstNonBlank => {
-                let line = buf.offset_to_line(vim.cursor.offset).saturating_sub(count);
-                MotionResult::new(buf.first_non_blank(line), MotionKind::Linewise)
+                let cur = buf.offset_to_line(vim.cursor.offset);
+                if cur < count {
+                    MotionResult::stuck(vim.cursor.offset)
+                } else {
+                    MotionResult::new(
+                        buf.first_non_blank(cur - count),
+                        MotionKind::Linewise,
+                    )
+                }
             }
         }
     }
