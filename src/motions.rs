@@ -87,6 +87,12 @@ pub struct MotionResult {
     pub kind: MotionKind,
     /// False when the motion could not move (e.g. `h` at buffer start).
     pub moved: bool,
+    /// Till motions only: the matched target the cursor is parked against
+    /// (`offset` is the STOP — one char this side of the target). Operator
+    /// spans must END at the target, not the stop: vim `d2t3` on
+    /// `a1b2c3d3e` deletes `a1b2c3d` (span [0, target)), while a bare `t`
+    /// parks the cursor on the stop (vim 9.1 probes, round 14).
+    pub till_target: Option<usize>,
 }
 
 impl MotionResult {
@@ -95,6 +101,7 @@ impl MotionResult {
             offset,
             kind,
             moved: true,
+            till_target: None,
         }
     }
     fn stuck(offset: usize) -> Self {
@@ -102,6 +109,17 @@ impl MotionResult {
             offset,
             kind: MotionKind::Exclusive,
             moved: false,
+            till_target: None,
+        }
+    }
+    /// A till result: the cursor parks at `stop`, operators span through
+    /// `target`.
+    fn till(stop: usize, target: usize) -> Self {
+        MotionResult {
+            offset: stop,
+            kind: MotionKind::Exclusive,
+            moved: true,
+            till_target: Some(target),
         }
     }
 }
@@ -329,7 +347,10 @@ impl Motion {
                 let Some((target_char, _, _)) = vim.last_find else {
                     return MotionResult::stuck(vim.cursor.offset);
                 };
-                Self::find_from(vim, buf, target_char, forward, till, count)
+                // a fresh char-argument find never skips: the cursor may
+                // legitimately sit right before the target (`tx` with the
+                // target adjacent must still succeed and let `dx` delete it)
+                Self::find_from(vim, buf, target_char, forward, till, count, false)
             }
             // ; / ,: repeat the last find, `,` mirroring its direction
             Motion::RepeatFind { reverse } => {
@@ -341,7 +362,7 @@ impl Motion {
                 } else {
                     (forward, till)
                 };
-                Self::find_from(vim, buf, target_char, forward, till, count)
+                Self::find_from(vim, buf, target_char, forward, till, count, true)
             }
             // %: jump to the bracket matching the one under the cursor.
             // With an explicit count vim jumps to that PERCENTAGE of the
@@ -578,8 +599,78 @@ impl Motion {
         forward: bool,
         till: bool,
         count: usize,
+        is_repeat: bool,
     ) -> MotionResult {
-        let mut o = vim.cursor.offset;
+        let start = vim.cursor.offset;
+        let mut o = start;
+        // A `;`/`,` repeat of a till motion re-runs the search from the
+        // cursor — which after a `t` sits right before the target, so the
+        // scan would immediately re-hit the same character and the repeat
+        // would silently succeed without moving (vim: `tx;` advances to the
+        // NEXT x, `t,;;` walks target by target). vim skips that adjacent
+        // target ONCE, up front; the count then counts find attempts, which
+        // may re-hit (probe 9.1: `t3` then `2;` advances exactly ONE target,
+        // `t3;;;` walks one per `;`).
+        if till && is_repeat {
+            if forward {
+                if let Some(next) = buf.next_char_offset(o) {
+                    if buf.char_at(next) == Some(target) {
+                        o = next;
+                    }
+                }
+            } else if let Some(prev) = buf.prev_char_offset(o) {
+                if buf.char_at(prev) == Some(target) {
+                    o = prev;
+                }
+            }
+        }
+        if !is_repeat {
+            // A fresh char-argument find never skips (the adjacent target
+            // still counts — `t3` beside a 3 succeeds in place), and count
+            // counts DISTINCT targets: resume each find from the target
+            // itself so one occurrence is never counted twice (probe 9.1:
+            // `2t3` lands before the SECOND 3 both from beside the first
+            // and from afar). The till stop is applied once, to the final
+            // hit — the intermediate stops are irrelevant to the count.
+            let mut hit = o;
+            for _ in 0..count {
+                let found = if forward {
+                    word::find_char_forward(buf, o, target, false)
+                } else {
+                    word::find_char_backward(buf, o, target, false)
+                };
+                let Some(h) = found else {
+                    return MotionResult::stuck(start);
+                };
+                hit = h;
+                o = h;
+            }
+            if till {
+                let stop = if forward {
+                    buf.prev_char_offset(hit)
+                } else {
+                    buf.next_char_offset(hit)
+                };
+                // the stop char must sit ON the hit's line (same rule as
+                // find_char_forward/backward's till branch)
+                let on_line = match stop {
+                    Some(s) => {
+                        let line = buf.offset_to_line(hit);
+                        if forward {
+                            s >= buf.line_start(line)
+                        } else {
+                            s < buf.line_end(line)
+                        }
+                    }
+                    None => false,
+                };
+                if !on_line {
+                    return MotionResult::stuck(start);
+                }
+                return MotionResult::till(stop.unwrap(), hit);
+            }
+            return MotionResult::new(hit, MotionKind::Inclusive);
+        }
         for _ in 0..count {
             let found = if forward {
                 word::find_char_forward(buf, o, target, till)
@@ -588,8 +679,21 @@ impl Motion {
             };
             match found {
                 Some(hit) => o = hit,
-                None => return MotionResult::stuck(vim.cursor.offset),
+                None => return MotionResult::stuck(start),
             }
+        }
+        if till {
+            // the stop the loop parked on sits one char from the matched
+            // target — record it so operator spans reach the target
+            let target_offset = if forward {
+                buf.next_char_offset(o)
+            } else {
+                buf.prev_char_offset(o)
+            };
+            return match target_offset {
+                Some(t) => MotionResult::till(o, t),
+                None => MotionResult::stuck(start),
+            };
         }
         MotionResult::new(
             o,

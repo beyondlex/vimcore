@@ -46,10 +46,15 @@ pub fn span_from_motion(
 ) -> OpSpan {
     let start = vim.cursor.offset;
     let start_line = buf.offset_to_line(start);
+    // a till motion parks the cursor one char short of the match; the
+    // operator span reaches the MATCH itself (vim: `dt3` on `a1b2c3d3e`
+    // deletes `a1b2c` — through the char in front of the target — while a
+    // bare `t` parks the cursor on the stop; probe 9.1, round 14)
+    let span_target = result.till_target.unwrap_or(result.offset);
     // a motion may land past a line's trailing newline (e.g. `w` at the
     // last word of a buffer lands in the phantom final line); anchor the
     // span to the line end so `dw` etc. never swallow the newline
-    let target = crate::buffer::clamp_to_line_end(buf, result.offset);
+    let target = crate::buffer::clamp_to_line_end(buf, span_target);
     let target_line = buf.offset_to_line(target);
 
     if result.kind == MotionKind::Linewise {
@@ -844,8 +849,17 @@ fn retreat_graphemes(buf: &dyn VimBuffer, offset: usize, count: usize, limit: us
     o
 }
 
-/// `x` / `X`: delete `count` chars under/before the cursor.
-pub fn delete_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize, backward: bool) {
+/// `x` / `X` / `s` / `<Del>`: delete `count` chars under/before the cursor.
+/// `register` carries an explicit `"{reg}` prefix (vim: `"ax` deletes into
+/// register a; without one the deleted text lands in the usual delete
+/// targets via `delete_span`'s `None`).
+pub fn delete_chars(
+    vim: &mut VimState,
+    ctx: &mut Ctx,
+    count: usize,
+    backward: bool,
+    register: Option<char>,
+) {
     let start = vim.cursor.offset;
     let line = ctx.buf.offset_to_line(start);
     let line_start = ctx.buf.line_start(line);
@@ -870,7 +884,7 @@ pub fn delete_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize, backward: b
             end: hi,
             linewise: false,
         },
-        None,
+        register,
     );
 }
 

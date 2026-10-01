@@ -243,8 +243,18 @@ fn paragraph_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Ob
             }
         } else {
             // text line: swallow every following blank line
+            let before = last;
             while last + 1 < buf.line_count() && buf.line_is_blank(last + 1) {
                 last += 1;
+            }
+            // no trailing blanks to take (the paragraph runs to EOF): vim
+            // takes the LEADING blank run instead (`:h ap`; probe 9.1:
+            // [para1,"",para2] `3Gdap` -> [para1] — the separator line goes
+            // with the deleted paragraph, leaving no stray blank behind)
+            if last == before && first > 0 && buf.line_is_blank(first - 1) {
+                while first > 0 && buf.line_is_blank(first - 1) {
+                    first -= 1;
+                }
             }
         }
     }
@@ -262,10 +272,26 @@ fn quote_positions(buf: &dyn VimBuffer, offset: usize, quote: char) -> Vec<usize
     let end = buf.line_end(line);
     while o < end {
         if buf.char_at(o) == Some(quote) {
-            // an escaped quote \" is text, not a delimiter
-            let escaped =
-                o > buf.line_start(line) && buf.char_at(o.saturating_sub(1)) == Some('\\');
-            if !escaped {
+            // an escaped quote \" is text, not a delimiter — but the escape
+            // itself counts only when ODD: `\\"` is a literal backslash
+            // followed by a REAL closing quote. Walk the backslash run
+            // behind the quote and take its length mod 2 (checking just the
+            // single preceding char got `"a\\"` wrong: the closing quote was
+            // treated as escaped, the line lost its pairing entirely).
+            let line_start = buf.line_start(line);
+            let mut backslashes = 0usize;
+            let mut probe = o;
+            while probe > line_start {
+                let Some(prev) = buf.prev_char_offset(probe) else {
+                    break;
+                };
+                if buf.char_at(prev) != Some('\\') {
+                    break;
+                }
+                backslashes += 1;
+                probe = prev;
+            }
+            if backslashes % 2 == 0 {
                 positions.push(o);
             }
         }

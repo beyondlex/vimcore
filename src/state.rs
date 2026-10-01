@@ -2241,7 +2241,16 @@ impl VimState {
     fn register_pending_key(&mut self, ctx: &mut Ctx, key: &Key) -> ProcessOutcome {
         self.register_pending = false;
         if let Some(c) = key.printable_char() {
-            self.register = Some(c);
+            // `""` is vim's explicit unnamed register and behaves EXACTLY
+            // like no prefix — in particular `""dd` still rotates the
+            // numbered ring (probe 9.1: dd, ""dd, "1p pastes the SECOND
+            // deleted line). Storing Some('"') would route the delete into
+            // unnamed only and freeze the ring.
+            if c == '"' {
+                self.register = None;
+            } else {
+                self.register = Some(c);
+            }
         } else {
             self.register = None;
             ctx.host.bell();
@@ -2460,9 +2469,10 @@ impl VimState {
             "delete" if matches!(self.mode, Mode::Visual { .. }) => return None,
             "delete" => {
                 let count = self.count.take().unwrap_or(1);
+                let register = self.register.take();
                 let gen = self.edit_generation;
                 self.begin_edit();
-                ops::delete_chars(self, ctx, count, false);
+                ops::delete_chars(self, ctx, count, false, register);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
                 return Some(ProcessOutcome::Consumed);
@@ -2870,6 +2880,7 @@ impl VimState {
     pub(crate) fn complete_operator_with_span(&mut self, ctx: &mut Ctx, span: ops::OpSpan) {
         let Some(op) = self.op.take() else { return };
         self.op_count = None;
+        let gen_before = self.edit_generation;
         self.begin_edit();
         ops::apply(self, ctx, op, &span, self.register);
         // an operator that entered insert mode (cw/ciw/cc) keeps its group
@@ -2877,7 +2888,10 @@ impl VimState {
         if self.insert_session.is_none() {
             self.end_edit();
         }
-        self.bump(ctx);
+        // pure yanks and empty spans (`yw`, `d$` on an empty line) must not
+        // feed the changelist / `.` mark / host.changed — vim 9.1 keeps yank
+        // out of `:changes` (probe: yiw adds no entry)
+        self.bump_if_edited(ctx, gen_before);
         self.reset_pending();
         if self.insert_session.is_none() {
             self.commit_change_record();
@@ -3016,9 +3030,10 @@ impl VimState {
             // x: delete count chars starting at the cursor
             NormalCmd::DeleteCharForward => {
                 let count = self.take_total_count();
+                let register = self.register.take();
                 let gen = self.edit_generation;
                 self.begin_edit();
-                ops::delete_chars(self, ctx, count, false);
+                ops::delete_chars(self, ctx, count, false, register);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
             }
@@ -3026,9 +3041,10 @@ impl VimState {
             // line start)
             NormalCmd::DeleteCharBackward => {
                 let count = self.take_total_count();
+                let register = self.register.take();
                 let gen = self.edit_generation;
                 self.begin_edit();
-                ops::delete_chars(self, ctx, count, true);
+                ops::delete_chars(self, ctx, count, true, register);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
             }
@@ -3037,9 +3053,10 @@ impl VimState {
             // reuse)
             NormalCmd::SubstituteChar => {
                 let count = self.take_total_count();
+                let register = self.register.take();
                 let gen = self.edit_generation;
                 self.begin_edit();
-                ops::delete_chars(self, ctx, count, false);
+                ops::delete_chars(self, ctx, count, false, register);
                 self.start_insert(ctx, InsertKind::Change);
                 self.bump_if_edited(ctx, gen);
             }
