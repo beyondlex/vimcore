@@ -417,9 +417,14 @@ impl VimState {
                     ctx.host
                         .status_message(&Self::mark_line(ctx.buf, name, offset));
                 }
+                // items() already carries a user-set `.` mark (m.) — only
+                // append the engine-tracked row when it is not listed yet,
+                // or the listing shows two rows for one mark
                 if let Some(offset) = self.marks.last_change {
-                    ctx.host
-                        .status_message(&Self::mark_line(ctx.buf, '.', offset));
+                    if !self.marks.items().iter().any(|(n, _)| *n == '.') {
+                        ctx.host
+                            .status_message(&Self::mark_line(ctx.buf, '.', offset));
+                    }
                 }
                 if let Some(offset) = self.marks.last_insert_exit {
                     ctx.host
@@ -715,8 +720,12 @@ impl VimState {
                 range_end = i.min(line.len());
                 continue;
             }
+            // `>` is NOT a range character: `'>` arrives through the mark
+            // branch above, and letting a bare `>` into the range made
+            // `:5>` (the shift command, E492 here) parse as a bogus range
+            // and report a misleading E16
             if c.is_ascii_digit()
-                || matches!(c, '.' | '$' | '%' | ',' | ';' | '+' | '-' | '>' | ' ')
+                || matches!(c, '.' | '$' | '%' | ',' | ';' | '+' | '-' | ' ')
             {
                 i += 1;
                 range_end = i;

@@ -86,6 +86,10 @@ pub enum VisualCmd {
     }, // J / gJ
     /// `r{char}`: replace the whole selection with `char` (char-arg).
     ReplaceChar,
+    /// zz / zt / zb inside visual mode: vim scrolls the view AND keeps the
+    /// selection (round11 悬置闭环). The engine only reports the anchor;
+    /// hosts own the viewport.
+    Scroll(crate::host::ScrollAnchor),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,6 +506,10 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["z", "z"], CmdKind::Normal(NormalCmd::ScrollCenter));
     b.normal(&["z", "t"], CmdKind::Normal(NormalCmd::ScrollTop));
     b.normal(&["z", "b"], CmdKind::Normal(NormalCmd::ScrollBottom));
+    // visual 模式同款:滚动 + 保留选区(round11 悬置闭环,vim 行为)
+    b.visual(&["z", "z"], CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Center)));
+    b.visual(&["z", "t"], CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Top)));
+    b.visual(&["z", "b"], CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Bottom)));
     b.normal(&["g", "v"], CmdKind::Normal(NormalCmd::RestoreVisual));
     b.normal(&["Z", "Z"], CmdKind::Normal(NormalCmd::WriteQuit));
     b.normal(&["Z", "Q"], CmdKind::Normal(NormalCmd::QuitNoSave));
