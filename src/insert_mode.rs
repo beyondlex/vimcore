@@ -157,7 +157,7 @@ impl VimState {
         // printable text: let the host/IME decide *unless* an insert mapping
         // is interested (e.g. `jk` -> Esc)
         if let Some(c) = key.printable_char() {
-            self.pending_unknown_char = Some(c);
+            self.pending_unknown_chars.push(c);
             return ProcessOutcome::Unknown;
         }
 
@@ -174,6 +174,17 @@ impl VimState {
         // replication then inserts past the buffer end). Bell like the
         // locked vertical moves.
         if self.in_block_insert() && at <= line_start && at > 0 {
+            ctx.host.bell();
+            return;
+        }
+        // Block session BS deletes only the LAST TYPED char at the typed end
+        // (shrinking the replica with it — vim 9.1 probes: `ab<BS>` gives
+        // "a" + replica "a"; after `<Left>` the BS is a NO-OP, it never eats
+        // into the row's own content: `ab<Left><BS>` keeps "ab" everywhere).
+        // Mid-row BS would delete pre-existing text the replica can't model —
+        // the exit-side delta guard then skips replication entirely, so make
+        // the keypress match vim instead and simply refuse it.
+        if self.in_block_insert() && self.block_typed_end() != Some(at) {
             ctx.host.bell();
             return;
         }

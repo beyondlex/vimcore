@@ -662,16 +662,24 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
             };
             (at, text)
         } else if after {
-            // last line without trailing newline: open a new line for it
+            // last line without trailing newline: open a line for the FIRST
+            // pasted line and keep the register's own structure after that —
+            // only ONE trailing `\n` is consumed (the separator merging into
+            // the newline-less tail). `trim_end_matches` stripped ALL of them,
+            // so `yy` over ["a",""] (register "a\n\n") pasted just "a" and
+            // the empty line vanished (vim keeps ["a",""]).
             (
                 ctx.buf.len(),
-                format!("\n{}", repeated.trim_end_matches('\n')),
+                format!("\n{}", repeated.strip_suffix('\n').unwrap_or(&repeated)),
             )
         } else {
-            // above the current line: insert before its first byte
+            // above the current line: the register's lines go in verbatim
+            // (linewise text is newline-terminated, so it concatenates
+            // cleanly before the current line's first byte) — same one-\n
+            // rule for a malformed register that lost its final newline
             (
                 ctx.buf.line_start(line),
-                format!("{}\n", repeated.trim_end_matches('\n')),
+                format!("{}\n", repeated.strip_suffix('\n').unwrap_or(&repeated)),
             )
         };
         vim.edit_insert(ctx, insert_at, &text);
@@ -951,6 +959,13 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
 }
 
 /// `~`: toggle case of `count` chars, cursor ends on the last one.
+///
+/// Each step consumes one GRAPHEME cluster but only the base char's case is
+/// mapped — the cluster's tail (combining marks, ZWJ-joined emoji) is carried
+/// over verbatim. Writing back only `toggle_case(base)` deleted the tail
+/// silently (`"e"+U+0301` → `"E"`, the accent gone; an emoji family lost its
+/// members — vim 9.1 keeps both), so the tail is sliced out of the consumed
+/// span and re-appended.
 pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) {
     let count = count.max(1);
     let start = vim.cursor.offset;
@@ -967,6 +982,9 @@ pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) {
         if next == o {
             break;
         }
+        // the cluster tail after the base char (0 for a plain char)
+        let tail = ctx.buf.slice(o + c.len_utf8()..next);
+        mapped.push_str(&tail);
         o = next;
     }
     if mapped.is_empty() {
