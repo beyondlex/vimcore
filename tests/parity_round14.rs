@@ -263,3 +263,156 @@ fn visual_colon_drops_count() {
     let f = edit("a\nb\nc\n", 0, 0, &["V", "3", "v", ":", "escape", "j"]);
     assert_eq!(f.vim.cursor_offset(), 2, "visual : 后 count 不得漏给 j");
 }
+
+// ---- Ex 命令面（vim 9.1 探针 P13-P17/P50/P54、B1-B8）----------------------
+
+/// PROBE: `:1,2d!` / `:1,2y!` → E477 "No ! allowed"，命令不执行。
+#[test]
+fn bang_on_delete_yank_reports_e477() {
+    let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "d", "!", "<CR>"]);
+    assert_eq!(f.text(), "a\nb\nc\n", ":d! 不删除");
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E477"), "got {last:?}");
+
+    let f2 = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "y", "!", "<CR>"]);
+    assert_eq!(f2.host.statuses.last().unwrap(), "E477: No ! allowed: 1,2y!");
+    assert_eq!(
+        f2.vim.registers.get('0').map(|r| r.text.as_str()),
+        None,
+        "y! 未执行（无 yank 寄存器副作用）"
+    );
+}
+
+/// PROBE: `:y a3` 打包形式 = 寄存器 a + count 3（@a = 'b c '）。
+#[test]
+fn packed_register_count_yank() {
+    let f = edit("a\nb\nc\nd\ne\n", 0, 0, &[":", "2", "y", " ", "a", "3", "<CR>"]);
+    let reg = f.vim.registers.get('a').expect("register a");
+    assert_eq!(reg.text, "b\nc\nd\n", "a3 = 寄存器 a + 3 行");
+}
+
+/// PROBE: `:d a b` → E488 trailing 'b'，不删除。
+#[test]
+fn garbage_register_tail_reports_e488() {
+    let f = edit("a\nb\nc\n", 0, 0, &[":", "d", " ", "a", " ", "b", "<CR>"]);
+    assert_eq!(f.text(), "a\nb\nc\n");
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E488"), "got {last:?}");
+}
+
+/// PROBE: `:j 3x` 尾参垃圾同样 E488（原先静默按 0 处理照常 join）。
+#[test]
+fn join_garbage_count_reports_e488() {
+    let f = edit("a\nb\nc\n", 0, 0, &[":", "j", " ", "3", "x", "<CR>"]);
+    assert_eq!(f.text(), "a\nb\nc\n");
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E488"), "got {last:?}");
+}
+
+/// PROBE: 越界地址报 E16 且命令不执行：`:1000000d`、`:2,99999d`、
+/// `:.+99d`、裸 `:99999999`（原先静默钳制到末行并执行）。
+#[test]
+fn out_of_range_addresses_report_e16() {
+    for line in ["1000000d", "2,99999d"] {
+        let f = edit("a\nb\nc\n", 0, 0, &[":", &line[..line.len() - 1], "<CR>"]);
+        // feed 逐字符，上面的切片行不通 —— 用一条条构造
+        drop(f);
+    }
+    let f = edit("a\nb\nc\n", 0, 0, &[":", "1", "0", "0", "0", "0", "0", "0", "d", "<CR>"]);
+    assert_eq!(f.text(), "a\nb\nc\n", "越界 d 不执行");
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E16"), "got {last:?}");
+
+    let f2 = edit("a\nb\nc\n", 0, 0, &[":", "2", ",", "9", "9", "9", "9", "9", "d", "<CR>"]);
+    let last = f2.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E16"), "got {last:?}");
+    assert_eq!(f2.text(), "a\nb\nc\n");
+
+    // 地址 0 / 负数仍合法：作用在首行（vim 9.1 探针 B1/B3）
+    let f3 = edit("a\nb\nc\n", 1, 0, &[":", "0", "d", "<CR>"]);
+    assert_eq!(f3.text(), "b\nc\n");
+}
+
+/// PROBE: `:s/a\/b/x/` 匹配字面 `a/b`（转义分隔符，原先解析被切碎）。
+#[test]
+fn escaped_delimiter_in_substitute() {
+    let f = edit("a/b\n", 0, 0, &[
+        ":", "s", "/", "a", "\\", "/", "b", "/", "x", "/", "<CR>",
+    ]);
+    assert_eq!(f.text(), "x\n", "转义分隔符不切开模式");
+}
+
+/// PROBE: `:%s/foo//n` → "2 matches on 2 lines"，缓冲不动（`n` = 仅报告；
+/// 原先忽略该标志并执行破坏性替换）。
+#[test]
+fn substitute_n_flag_reports_without_modifying() {
+    let f = edit("foo bar\nx foo y\n", 0, 0, &[
+        ":", "%", "s", "/", "f", "o", "o", "/", "/", "n", "<CR>",
+    ]);
+    assert_eq!(f.text(), "foo bar\nx foo y\n", "n 标志不修改缓冲");
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert_eq!(last, "2 matches on 2 lines");
+}
+
+/// `:se` 缩写、`:setlocal`、`:set ts&` 重置到默认。
+#[test]
+fn set_spellings_and_amp_reset() {
+    let mut f = Fixture::new("a\n");
+    f.feed([":", "s", "e", " ", "t", "s", "=", "2", "<CR>"]);
+    assert_eq!(f.vim.options.tabstop, 2, ":se ts=2 生效");
+    f.feed([":", "s", "e", "t", "l", "o", "c", "a", "l", " ", "t", "s", "=", "6", "<CR>"]);
+    assert_eq!(f.vim.options.tabstop, 6, ":setlocal = :set");
+    f.feed([":", "s", "e", "t", " ", "t", "s", "&", "<CR>"]);
+    assert_eq!(f.vim.options.tabstop, 4, "ts& 重置默认");
+    f.feed([":", "s", "e", "t", " ", "t", "s", "=", "3", "<CR>"]);
+    f.feed([":", "s", "e", "t", " ", "t", "s", "&", "v", "i", "m", "<CR>"]);
+    assert_eq!(f.vim.options.tabstop, 4, "ts&vim 同样重置");
+}
+
+/// PROBE: `:set ts ?`（问号前有空格）= 查询；裸数字选项名 `:set ts` 也是
+/// 查询（原先 bell 并中止整行）。
+#[test]
+fn set_spaced_question_mark_queries() {
+    let mut f = Fixture::new("a\n");
+    f.feed([":", "s", "e", "t", " ", "t", "s", " ", "?", "<CR>"]);
+    assert_eq!(
+        f.host.statuses.last().map(String::as_str),
+        Some("tabstop=4"),
+        "ts ? 查询不响铃"
+    );
+    assert_eq!(f.host.bells, 0);
+    let mut f2 = Fixture::new("a\n");
+    f2.feed([":", "s", "e", "t", " ", "t", "s", "<CR>"]);
+    assert_eq!(
+        f2.host.statuses.last().map(String::as_str),
+        Some("tabstop=4"),
+        "裸 ts = 查询"
+    );
+    // 布尔名 + 空格问号 = 查询而非置位
+    let mut f3 = Fixture::new("a\n");
+    f3.feed([":", "s", "e", "t", " ", "n", "o", "i", "c", "<CR>"]);
+    f3.feed([":", "s", "e", "t", " ", "i", "c", " ", "?", "<CR>"]);
+    assert_eq!(
+        f3.host.statuses.last().map(String::as_str),
+        Some("noignorecase"),
+        "ic ? 是查询，不置位"
+    );
+}
+
+/// `:bn[ext]`/`:bp[revious]` 等完整 vim 前缀缩写（`:bne` 原先 E492）。
+#[test]
+fn buffer_command_prefix_spellings() {
+    for spelling in ["bn", "bne", "bnex", "bnext"] {
+        let mut f = Fixture::new("a\n");
+        let keys: Vec<&str> = std::iter::once(":")
+            .chain(spelling.chars().map(|c| c.to_string().leak() as &str))
+            .chain(std::iter::once("<CR>"))
+            .collect();
+        f.feed(keys);
+        assert!(
+            f.host.statuses.is_empty(),
+            ":{spelling} 不应报错（got {:?}）",
+            f.host.statuses.last()
+        );
+    }
+}
