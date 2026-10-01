@@ -1806,6 +1806,7 @@ impl VimState {
                     None => false,
                 },
                 crate::config::Setting::Value(name, value) => self.options.set_value(name, value),
+                crate::config::Setting::Reset(name) => self.options.reset_value(name),
             };
             if ok {
                 stats.options += 1;

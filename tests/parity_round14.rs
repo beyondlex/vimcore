@@ -503,3 +503,74 @@ fn count_repeat_insert_plain_still_works() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "xxxy\n");
 }
+
+// ---- config 解析（vimrc 面）------------------------------------------------
+
+/// `let mapleader2 = ";"` 是无关变量——不得劫持 `<Leader>`，且要有痕迹。
+#[test]
+fn mapleader_variable_requires_word_boundary() {
+    let rc = "let mapleader = \",\"\nlet mapleader2 = \";\"\nnnoremap <Leader>x ix<Esc>\n";
+    let config = vimcore::config::parse(rc);
+    // leader 仍是 ","
+    let lhs = &config.mappings[0].lhs;
+    assert_eq!(
+        lhs,
+        &vec![vimcore::key::Key::char(','), vimcore::key::Key::char('x')],
+        "<Leader> 解析为逗号 + x"
+    );
+    assert!(
+        config.ignored.iter().any(|l| l.contains("mapleader2")),
+        "mapleader2 行应进 ignored（got {:?}）",
+        config.ignored
+    );
+}
+
+/// `set\tnumber`（TAB 分隔）必须生效——旧实现静默进 ignored。
+#[test]
+fn tab_separated_set_line_applies() {
+    let config = vimcore::config::parse("set\tnumber\n");
+    assert_eq!(
+        config.settings,
+        vec![vimcore::config::Setting::On("number".to_owned())],
+        "TAB 分隔的 set 生效"
+    );
+    assert!(config.ignored.is_empty());
+}
+
+/// `set ts=4 " note`：注释尾随不产生垃圾 Setting（曾虚增 ignored 计数）。
+#[test]
+fn set_line_trailing_comment_dropped() {
+    let config = vimcore::config::parse("set ts=4 \" my preference\n");
+    assert_eq!(
+        config.settings,
+        vec![vimcore::config::Setting::Value("ts".to_owned(), "4".to_owned())],
+        "只有 ts=4 一个设置"
+    );
+}
+
+/// `set ts&` 在 rc 里重置默认；`set ic?` 查询被静默丢弃（不产生垃圾）。
+#[test]
+fn set_reset_and_query_forms_in_rc() {
+    let config = vimcore::config::parse("set ts&\nset ic?\n");
+    assert_eq!(
+        config.settings,
+        vec![vimcore::config::Setting::Reset("ts".to_owned())],
+        "ts& = Reset，ic? 被丢弃"
+    );
+}
+
+/// `<LocalLeader>` 经 `let maplocalleader` 解析（原先残留 Named 键，
+/// 映射永久无法触发）。
+#[test]
+fn local_leader_resolves_from_let_variable() {
+    let rc = "let maplocalleader = \"-\"\nnnoremap <LocalLeader>x ix<Esc>\n";
+    let config = vimcore::config::parse(rc);
+    let lhs = &config.mappings[0].lhs;
+    assert_eq!(lhs.len(), 2);
+    assert_eq!(
+        lhs[0],
+        vimcore::key::Key::char('-'),
+        "<LocalLeader> 解析为 -"
+    );
+    assert_eq!(lhs[1], vimcore::key::Key::char('x'));
+}
