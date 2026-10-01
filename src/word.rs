@@ -41,11 +41,6 @@ pub fn class_at(buf: &dyn VimBuffer, offset: usize, big: bool) -> Option<Class> 
     })
 }
 
-/// `true` when the character at `offset` is not a blank and not a newline.
-pub fn is_non_blank(buf: &dyn VimBuffer, offset: usize) -> bool {
-    matches!(buf.char_at(offset), Some(c) if !c.is_whitespace())
-}
-
 /// A truly EMPTY line (no characters before the newline). vim's `w`/`b`
 /// family parks on empty lines only — a whitespace-only line ("   ") is
 /// skipped freely (9.1 probe: `w` over `abc | "   " | def` lands on `d`).

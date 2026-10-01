@@ -469,22 +469,24 @@ fn angle_keys_accept_lowercase_modifier_prefixes() {
 
 #[test]
 fn star_without_word_bells_instead_of_reusing_stale_pattern() {
-    // `/two` arms the pattern; `*` on a punctuation-only line used to jump
-    // again with "two" instead of failing
+    // `/two` arms the pattern; `*` on a punctuation-only line must not
+    // re-search "two". 【第十四轮修正】vim 9.1 探针 Q1：光标在非词非空白
+    // 字符上时 `*` **搜该字符的字面**（`*` on '!' 的 pattern 是 `!`）——
+    // 现在引擎搜 `\.`（三个点全高亮、跳到下一个点），不再复用旧 pattern；
+    // 不变式「不复用陈旧 pattern」保持。
     let mut f = Fixture::at("one two\n...\n", 0, 0);
     f.feed(["/", "t", "w", "o", "<Enter>"]); // on line 1's "two"
     f.feed(["j"]); // line 2: "..."
-    let line_before = f.line();
     f.feed(["*"]);
     assert_eq!(
-        f.line(),
-        line_before,
-        "* must not move: no word on the line"
+        f.vim.search.pattern.as_deref(),
+        Some(r"\."),
+        "* 在 . 上搜字面点，而非复用 two"
     );
     assert_eq!(
         f.host.highlights.len(),
-        1,
-        "highlights still describe /two — no stale re-jump happened"
+        3,
+        "高亮 = 三个点（字面 .），不是 /two 的一个匹配"
     );
 }
 

@@ -186,7 +186,7 @@ pub fn span_from_motion(
 }
 
 /// Span for a text object.
-pub fn span_from_object(_buf: &dyn VimBuffer, object: ObjectRange) -> OpSpan {
+pub fn span_from_object(object: ObjectRange) -> OpSpan {
     OpSpan {
         start: object.start,
         end: object.end,
@@ -213,7 +213,7 @@ pub fn object_span(
     object: objects::TextObject,
 ) -> Option<OpSpan> {
     let range = objects::range(buf, vim.cursor.offset, object)?;
-    Some(span_from_object(buf, range))
+    Some(span_from_object(range))
 }
 
 /// Span for the current visual selection.

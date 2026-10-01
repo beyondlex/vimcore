@@ -73,17 +73,7 @@ impl<T> Trie<T> {
         }
     }
 
-    /// Is `keys` a proper prefix of at least one stored sequence?
-    pub fn is_prefix(&self, keys: &[Key]) -> bool {
-        let mut node = self;
-        for key in keys {
-            match node.children.get(key) {
-                Some(child) => node = child,
-                None => return false,
-            }
-        }
-        !node.children.is_empty()
-    }
+
 
     /// The longest PROPER prefix of `keys` that terminates on a LEAF node,
     /// with its value. A leaf cannot wait for more keys, so when the queue
