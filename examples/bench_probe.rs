@@ -1,4 +1,9 @@
-// 临时性能探针：量引擎关键路径的真实耗时
+//! 性能探针：量引擎关键路径的真实耗时（README「开发」节的基准命令）。
+//!
+//! 两类宿主对照：`B` 是朴素 `String` 宿主（`offset_to_line` O(n)——1MB 行
+//! 上的 `w` 显出宿主行查找的成本），`R` 是 ropey 宿主（O(log n)，隔离出
+//! 引擎自身开销）。`refresh_highlights`/`hlsearch_live_update` 的取舍见
+//! NOTES 性能节。
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
