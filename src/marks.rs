@@ -131,6 +131,14 @@ impl Marks {
             f(a);
             f(b);
         }
+        // the live selection rides along: edits DO happen while it is
+        // active (an Ex command run from the visual `:` prompt), and an
+        // unadjusted pair handed `parse_range` mid-character offsets
+        // (fuzz round 13) — same treatment as `last_visual`
+        if let Some((a, b)) = self.active_visual.as_mut() {
+            f(a);
+            f(b);
+        }
         if let Some(p) = self.last_change.as_mut() {
             f(p);
         }

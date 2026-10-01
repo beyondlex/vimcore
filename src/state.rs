@@ -367,16 +367,21 @@ impl VimState {
 
     /// `(anchor, cursor, kind)` while in visual mode (raw, unnormalized).
     pub fn visual_selection(&self) -> Option<(usize, usize, VisualKind)> {
-        let anchor = self.visual_anchor?;
-        let kind = match self.mode {
-            Mode::Visual { kind } => kind,
-            // the visual `:` prompt: keep the selection's original shape
-            Mode::CommandLine { .. } => self.cmdline_visual?.0,
+        match self.mode {
+            Mode::Visual { kind } => Some((self.visual_anchor?, self.cursor.offset, kind)),
+            // the visual `:` prompt: the selection is the FROZEN prompt-time
+            // range. The live `visual_anchor` may already be stale here (it
+            // survives the prompt while other code moves the cursor), and
+            // reporting it handed hosts a mid-character anchor (fuzz round
+            // 13) — the snapshot pair is floored by the edit funnels instead.
+            Mode::CommandLine { .. } => {
+                let (kind, anchor, prompt_cursor) = self.cmdline_visual?;
+                Some((anchor, prompt_cursor, kind))
+            }
             // outside visual there is no selection (a stale anchor must not
             // keep rendering one)
-            _ => return None,
-        };
-        Some((anchor, self.cursor.offset, kind))
+            _ => None,
+        }
     }
 
     /// Status-bar mode text (`-- INSERT --` etc.).
@@ -637,6 +642,15 @@ impl VimState {
         }
         if self.pending_keys.is_empty() {
             self.expanding_mapping = false;
+        }
+        // A visual `:` snapshot is consumed by its prompt's execute (marks
+        // written from the prompt-time range) or cancel (selection restored).
+        // Any leftover while the prompt is GONE means a close path bypassed
+        // both — keeping it would let `visual_selection` report a stale frozen
+        // selection to the host, so drop it here (the sweep runs after every
+        // keystroke; a live prompt leaves its snapshot untouched above).
+        if !matches!(self.mode, Mode::CommandLine { .. }) {
+            self.cmdline_visual = None;
         }
         if any_unknown {
             KeyResult::Unknown
@@ -1135,6 +1149,15 @@ impl VimState {
         if !self.hlsearch_live_update {
             return;
         }
+        self.republish_search_inner(ctx);
+    }
+
+    /// The scan-and-publish body shared by the per-edit path and the host's
+    /// explicit [`VimState::refresh_highlights`] — the `hlsearch_live_update`
+    /// guard lives ONLY in `republish_search`: putting it here silently
+    /// no-op'd the explicit refresh forever (a host with live updates off
+    /// never got a fresh match list — fuzz round 13, huge-file host mode).
+    fn republish_search_inner(&mut self, ctx: &mut Ctx) {
         if !self.options.hlsearch {
             return;
         }
@@ -1182,6 +1205,15 @@ impl VimState {
         }
         for pos in self.jumps.iter_mut() {
             *pos = floor(*pos);
+        }
+        // the live selection survives a host undo (`u` right after `gv:`'s
+        // cmdline closes back into visual) — same invariant as the edits
+        if let Some(anchor) = self.visual_anchor.as_mut() {
+            *anchor = floor(*anchor);
+        }
+        if let Some((_, a, c)) = self.cmdline_visual.as_mut() {
+            *a = floor(*a);
+            *c = floor(*c);
         }
     }
 
@@ -1251,6 +1283,13 @@ impl VimState {
     /// Floor every stored byte offset onto the nearest char boundary of the
     /// CURRENT text (also caps at the buffer end). Used by the edit funnels
     /// after the relative mark adjustment.
+    ///
+    /// `visual_anchor` / `cmdline_visual` live OUTSIDE the marks map (raw
+    /// fields) and so miss the marks' relative shift; they still must obey
+    /// the standing addressability invariant — an Ex command run from the
+    /// visual `:` prompt (`gv:` then `@:`) rewrites the text while the live
+    /// selection survives, and a stale anchor resumed mid-character made
+    /// host renders panic (fuzz round 13).
     fn refloor_stored_offsets(&mut self, ctx: &Ctx) {
         let buf: &dyn crate::buffer::VimBuffer = ctx.buf;
         let floor = |p: &mut usize| {
@@ -1262,6 +1301,13 @@ impl VimState {
         }
         for pos in self.jumps.iter_mut() {
             floor(pos);
+        }
+        if let Some(anchor) = self.visual_anchor.as_mut() {
+            floor(anchor);
+        }
+        if let Some((_, a, c)) = self.cmdline_visual.as_mut() {
+            floor(a);
+            floor(c);
         }
     }
 
@@ -1399,6 +1445,14 @@ impl VimState {
         // only undid the typing and a second one was needed for the deletion.
         self.open_undo_group();
         self.insert_session = Some(InsertSession);
+        // a NEW session supersedes any count-repeat left over from a previous
+        // one (`3o` still open when a visual-block `I`/`A`/`c` starts): the
+        // stale repeat fired inside the block session's exit_insert, inserting
+        // its copies AFTER the replica row offsets were recorded and desyncing
+        // the block replication into mid-character inserts (fuzz round 13).
+        // execute_command re-arms the repeat AFTER start_insert returns, so a
+        // plain `3i` keeps its count.
+        self.insert_repeat = None;
         self.mode = if kind == InsertKind::Replace {
             Mode::Replace
         } else {
@@ -1418,6 +1472,12 @@ impl VimState {
         let Some(rep) = self.insert_repeat.take() else {
             return;
         };
+        // a block session never carries a count-repeat (mutually exclusive by
+        // construction); if one is still armed here the two replication passes
+        // would fight over the same exit — bail instead
+        if self.block_insert.is_some() {
+            return;
+        }
         if rep.text.is_empty() || rep.text.contains('\n') {
             return;
         }
@@ -1491,6 +1551,13 @@ impl VimState {
                     .collect();
                 rows.sort_unstable_by(|a, b| b.cmp(a)); // bottom-up inserts
                 for offset in rows {
+                    // the delta model assumes ONLY typing happened on the
+                    // session's typing row; any other length change above a
+                    // row (a stale count-repeat, a host-side rewrite) leaves
+                    // the shifted offset unaligned — floor it so a replica
+                    // lands at worst one char off, never mid-character (the
+                    // buffer insert itself would panic the host)
+                    let offset = crate::buffer::floor_to_char_boundary(ctx.buf, offset);
                     self.edit_insert(ctx, offset, &block.text);
                     // a row ABOVE the cursor shifts everything below it, the
                     // cursor's byte offset included: edit_insert adjusts
@@ -1622,7 +1689,7 @@ impl VimState {
     /// Re-run the highlight scan and publish to the host (for hosts that
     /// disabled [`VimState::set_hlsearch_live_update`]).
     pub fn refresh_highlights(&mut self, ctx: &mut Ctx) {
-        self.republish_search(ctx);
+        self.republish_search_inner(ctx);
     }
 
     /// While set, `:action <unknown-id>` misses are silently ignored
@@ -1951,10 +2018,21 @@ impl VimState {
         };
         if !pads.is_empty() {
             self.begin_edit();
+            // pads move text after them; the cursor is caller-managed (edit
+            // funnels never touch it), so a pad on a row ABOVE the cursor's
+            // shifts the cursor's byte offset — without the adjustment it
+            // landed mid-character in multi-byte text (fuzz round 13) and
+            // the row recomputation below read a bogus cursor line
+            let cursor_before = self.cursor.offset;
+            let mut cursor_shift = 0usize;
             for (line, pad) in pads.iter().rev() {
                 let at = ctx.buf.line_end(*line);
+                if at <= cursor_before {
+                    cursor_shift += pad;
+                }
                 self.edit_insert(ctx, at, &" ".repeat(*pad));
             }
+            self.cursor.offset += cursor_shift;
             // the pads moved text after the match cache's offsets — every
             // other edit path republishes the hlsearch scan; skipping it
             // here left `last_matches` pointing mid-character until the
