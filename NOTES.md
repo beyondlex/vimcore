@@ -5,6 +5,123 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十四轮检视增补（2026-10-02，回归测试在
+`tests/parity_round14.rs`（48 例）、fuzz 在 `tests/fuzz_round14.rs`）
+
+本轮三个独立读码 agent 重扫 state.rs 全文、cmdline/config/options/keymap
+与 ops/motions/objects/word/search/registers/marks/insert_mode，共产出约
+40 条候选；全部语义类修复先在本机 vim 9.1 探针实证（三轮批量探针
+脚本，结论见各条目括号）。两个早前轮次的断言被探针**推翻并改正**
+（块 `O` 的 round8 探针误读、`:1,2d 3x` 的 round13 终点），一个 round12
+悬置项被证伪关闭（`:s//` 空模式），till 家族挖出一个**前所未知的
+真实偏差**（operator span 少一个字符——`dto` 旧断言得 "lo world"、
+vim 实为 "o world"）。
+
+### 语义修复（均 vim 9.1 探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **till 重复 `;`/`,` 原地假成功** | `t2;` 从光标重扫立即重命中同一目标、moved=true 偏移不动、无铃声。现跳过紧邻目标一次后按查找次数推进（`t3;;` 一次一跳、`t3` 后 `2;` 只前进一个——探针 A2/A4/A6/Q5） |
+| 2 | **fresh `Nt{x}` 的 count 数查找尝试而非目标** | `2t3` 曾重命中同一目标只落第一个；vim 数**不同目标**（紧邻目标算第一个：探针 A1/A5/A9 全落第二个 3） |
+| 3 | **till operator span 少一个字符** | 光标停靠位被直接用作 span 端点；vim 的 span 延伸到**目标位**（`dto` 得 "o world" 非 "lo world"、`d2t3` 删到第二个 3 前）。MotionResult 新增 `till_target`，span_from_motion 对齐 |
+| 4 | **yank 污染 changelist/`.` 标记** | operator 完成路径无条件 `bump()`：`yw`/`yi(` 进 `:changes`、`g;` 落 yank 处。探针 Q2：vim 的 `:changes` 在 yiw 前后条目数不变。改 `bump_if_edited`（空跨度 operator 同步受益） |
+| 5 | **`ci"` 的转义判定只看单个前置反斜杠** | `"a\"` 的收尾引号被误判转义、整行失去配对。按反斜杠游程长度 mod 2（探针 P20/Q8） |
+| 6 | **`ap` 于末段（无尾随空行）留下段前空行** | `:h ap` 无尾随空白时含前导。探针 P19：[para1,"",para2] `3Gdap` → [para1] |
+| 7 | **`"ax`/`"aX`/`"as`/`"<Del>` 丢弃寄存器前缀** | 只进 unnamed。探针 P10/P10b/P10c：vim 的 @a 收到删除文本。`delete_chars` 增寄存器参数 |
+| 8 | **`""` 前缀冻结编号环** | `""dd` 只写 unnamed。探针 P18：vim `""` ≡ 无前缀（`""dd` 照常轮转）。归一化为 None |
+| 9 | **块 visual `O` 方向弄反** | round8 测试固化的 probe10 是误读；三次独立探针一致：光标**保持所在行**换到块另一列角、anchor 镜像、矩形不变（anchor(0,0)+cursor(1,2) → cursor(1,0)；本几何探针 cur=3:2）。单行块是真实水平换角（(0,2)→(0,0)），曾 no-op |
+| 10 | **char/line visual `O` 响铃** | 探针 Q3/Q4：vim 中等同 `o`（镜像端点、无铃声） |
+| 11 | **映射劫持部分命令的续键** | `:nnoremap j gj` 后输入 `gj`：引擎让续键 `j` 进映射表、展开重放再次命中 → runaway 熔断、gj 完全失效；`:nnoremap j G` 则 G 跳末行。探针 P6：vim 的续键直接完成 builtin（cur=2:1）。mapping_step 增 cmd_seq 守卫——映射只在命令边界生效 |
+| 12 | **no_remap 预算跨守卫泄漏** | 流水线守卫/maxmapdepth 清队列后残余预算让后续按键静默绕过映射。清队列时归零 |
+| 13 | **MAX_MAP_DEPTH=100 低于 vim 默认** | vim maxmapdepth=1000；合法的百级展开链曾被误判 runaway。对齐 1000 |
+| 14 | **`N:` 的 count 泄漏** | `3:<CR>` 后 `j` 跳 3 行、`3:` 光标不动。探针 P7：vim 把 count 变成范围预填 `.,.+2`（`3:d<CR>` 删 3 行）。现预填范围 |
+| 15 | **`N/pat` 的 count 被丢弃** | 曾硬编码 count=1。探针 P8b：vim `3/foo` 跳第 3 个匹配。取消的搜索丢弃 count（探针 P9：`2/x<Esc>` 后 `x` 只删 1 字符）；visual `:` 同 |
+| 16 | **`:d`/`:y`/`:j` 尾参垃圾静默执行** | `:1,2d 3x` 删范围、`:d a b` 只取 a。探针 P13/P54/B4：vim 报 E488 且不执行（round13 的注释写着正确行为但 `unwrap_or(0)` 没实现它）。`|` 分隔符同落 E488（`:h :bar`） |
+| 17 | **`:d!`/`:y!` 被静默接受** | 探针 P16：vim 报 E477 No ! allowed。消息带完整原行（`E477: ...: 1,2y!`） |
+| 18 | **越界地址被钳制而非报错** | `:1000000d`/`:2,99999d`/`:.+99d`/裸 `:99999999` 曾钳到末行照常执行。探针 P15/P50：vim 报 E16 且不动。地址 0/负数仍合法作用于首行（探针 B1/B3） |
+| 19 | **`:y a3` 打包形式丢 count** | 寄存器 token 只取首字符。探针 P17：vim 的 `a3` = 寄存器 a + 3 行。共享 token 解析（寄存器+纯数字尾） |
+| 20 | **`:s` 的 `\/` 转义分隔符不存在** | `:s/a\/b/x/` 解析切碎。探针 P26：vim 匹配字面 `a/b`。按未转义分隔符切分，反斜杠留在模式里 |
+| 21 | **`:s` 的 `n` 标志被忽略并执行破坏性替换** | `:%s/foo//n` 曾真删。探针 P14：vim 报 "2 matches on 2 lines" 不动缓冲 |
+| 22 | **`:set` 面缺失** | `:se` 缩写、`:setl[ocal]`（单缓冲= :set）、`:set ts&`/`ts&vim` 重置默认、`:set ts ?` 空格问号查询、裸 `:set ts` 查询——曾 bell 并中止整行（探针 P27/P29/B8/Q16） |
+| 23 | **`:bn`/`:bp` 只认精确拼写** | `:bne` E492。vim 缩写规则全前缀可用 |
+| 24 | **config：`let mapleader2` 劫持 leader** | strip_prefix 整行吞掉，无关变量静默改绑 `<Leader>`、不进 ignored。词边界检查 |
+| 25 | **config：TAB 分隔的 set/source 进 ignored** | map 族早修过 TAB，set/source 漏了 |
+| 26 | **config：rc 的 set 注释/查询产垃圾** | `set ts=4 " note` 产出 On("\"")/On("note") 虚增 ignored；`set ic?` 产出垃圾 token。注释截断、查询丢弃；新增 `Setting::Reset`（`set ts&`） |
+| 27 | **`<LocalLeader>` 映射静默死掉** | 残留 Named("localleader") 标记键、键盘永远无法产生。现经 `let maplocalleader` 解析（缺省 `\`） |
+| 28 | **Replace BS 是裸 LIFO** | BS 后 `<Right>` 再 BS 把属于更后位置的字符写到光标处（曾得 'ayy'）且栈永久错位。条目携带缓冲偏移：栈顶恰为退格位才恢复（追加字符按删除），失配整键 no-op——与探针矩阵 Q8a-e/P23a-d 吻合；换行分割失配（round9 悬置）顺势闭合 |
+| 29 | **ai 下 count-repeat insert 丢 count** | `3ifoo<CR>bar<Esc>` 的退出不变式比对原文长度，缩进使缓冲增长超原文 → 静默放弃。探针 P24：vim 得三组 foo/bar。现以展开文本为复制单元 |
+| 30 | **`*` 在非词字符上响铃 + 引用陈旧 pattern** | 探针 Q1：vim 搜该字符的**字面**（pattern = 转义单字符）。光标行全空白报 E348（旧行为报 E486 引用无关旧 pattern） |
+| 31 | **changelist 去重分支不前移 change_pos** | 新编辑恰落最新条目时指针滞留，后续 `g,` 从错误位置走 |
+| 32 | **u/`<C-r>` 不清 desired_col** | 陈旧纵向目标列带进 undo 后的 `j`（JumpBackward/OlderChange 同款处理） |
+| 33 | **`replace_range` 悬挂 undo 组** | pub 宿主 API 在 insert 会话外调用时 open_undo 不闭合，下一次编辑并进同一 undo 组、一次 u 撤两步 |
+
+### 死代码清理
+
+- `word::is_non_blank`、`keymap::Trie::is_prefix`（全仓零调用）；
+- `search::compile` 的永真 `Option` 分支（签名改返回 builder）、
+  `SearchState.last_index` 死状态（只写不读）；
+- tables.rs 不可达的 `guu`/`gUU`/`g~~`/`gqq` 及全部 4 键 doubling 行
+  （`gu` 第二键即 Hit、cmd_seq 清空，更长的序列永远无法在 trie 累积——
+  doubling 走 operator 挂起路径，fuzz_round10 一直覆盖的正是它）与
+  normal `<Del>` 行（navigation 拦截器先于 trie，visual 也映射到 d）；
+- `ops::span_from_object` 未用的 `_buf` 参数。
+
+### 被探针证伪/关闭的悬置项
+
+- **`:s//x/` 空模式复用「上一条替换模式」（round12 悬置）**：不成立——
+  探针 P25b/P25d：vim 用**搜索**模式（`s/b/B/` 后 `s//Q/` 把 b 换成 Q）。
+  引擎现行为已正确，悬置关闭。
+- **`m^`/`m.` 可设但解析不到**：探针 P22/P48：vim 也静默接受 `m^` 且
+  `` `^ `` 仍指向内部状态——引擎与 vim 可观测行为一致，关闭。
+- **`gv` 无前次选区（round11 悬置）**：已在 round12/13 实现
+  （`NormalCmd::RestoreVisual` + `marks.last_visual` 随编辑平移），本轮
+  fuzz 确认路径健壮，记录关闭。
+
+### 新增已知分歧（接全局序号）
+
+38. **递归映射经 builtin 前缀不产生 E223**：`:map j gj`（递归）后输入
+    `j`，vim 递归展开至 E223；引擎因 cmd_seq 守卫（修复 #11）在展开的
+    `g` 装配后让 `j` 直接完成 builtin——执行一次 gj、不递归。 pathological
+    配置下引擎更宽容。
+39. **Replace BS 的多次 BS+移动序列**：探针矩阵 9/10 与引擎吻合；P23e
+    （`Rab<BS><Right><BS>` 得 'abyz'，引擎得 'axyz'）显示 vim 在恢复后
+    的 Right/BS 组合上有额外的栈交互，未建模。
+40. **`:s` 的 `c` 交互确认标志不支持**：无宿主确认 UI；现静默当作无 c
+    执行全部替换（vim 逐个询问）。使用会改变缓冲，接入方需知。
+41. **`:set so=-1` 仍拒绝**：scrolloff 字段为 usize（下游 gpui-vim/
+    crossterm-vim 直接读），改 i64 是破坏性变更；vim 允许 -1（居中语义）。
+    留待 0.2 的 breaking 窗口。
+
+### 悬而未决（更新）
+
+- config.rs 与 ex_set 对 set 语法的解析**仍是两套实现**（本轮补齐了
+  config 侧的注释/查询/重置，分歧收窄；抽共享解析函数仍待做）。
+- 命令行提示符无光标模型、`|` 在 `:s` 参数中仍按字面读（`:h :bar`
+  语义本身如此，维持）、`state.rs` 拆文件（现 3900+ 行）、Tab 显示宽度、
+  visual charwise + linewise 寄存器的 `p` 精确语义——均维持。
+
+### 体验备注（本轮）
+
+- 错误消息对齐 vim 的错误码族：E488（尾参）、E477（多余 !）、E16（越界
+  范围）、E348（无词可搜）——宿主状态栏现在能显示与 vim 相同的文案，
+  `:5>` 这类输入的报错也从误导性 E16 修正为如实 E492/E16 组合。
+- `3:` 现预填 `.,.+2` 范围（vim 同款），提示符里看得见、可继续编辑。
+- parity_round8 的两个 O 测试与 round3/round13 的三条断言按新探针
+  改写并注明修正缘由（round8 的 probe10 是一次探针误读，测试把误读
+  固化了三轮）。
+- fuzz round14 一半种子预注册 `nnoremap j gj`，让 cmd_seq 守卫与映射
+  展开重放持续接受随机序列轰炸。
+
+### 性能备注（本轮复核）
+
+- bench_probe 全量复跑，**与修复前的基线提交逐项一致**（w 6.0 vs
+  6.3µs/key、1MB 行 173 vs 186µs、hlsearch 重扫 0.30 vs 0.30ms、
+  `:%s` 6.1 vs 5.8ms、`n` 3.6 vs 3.7µs）——本轮对 motion/search 热路径
+  的改动（find_from 重写、`*` 链）无可测回归。与 round13 NOTES 记录的
+  2.1µs 相比整体漂移约 3 倍，同一提交内可复现，判定为机器状态差异
+  （绝对值以同次运行为准，round13 的数字作废）。
+- fuzz round14 与 round13 同预算（16 种子 × 60 轮 × 120 步），耗时持平。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十三轮检视增补（2026-10-02，回归测试在
 `tests/parity_round13.rs`（30 例）、fuzz 在 `tests/fuzz_round13.rs`）
 
