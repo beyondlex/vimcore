@@ -855,10 +855,15 @@ impl VimState {
     }
 
     /// Open (or reuse) the undo group for the current logical command.
+    ///
+    /// Deliberately does NOT touch `recording_mutated`: whole command
+    /// families open the group speculatively and several turn out to be
+    /// no-ops (`x` on an empty line, `p` with an empty register). Marking
+    /// the recording mutated here let a no-op command REPLACE `last_change`
+    /// — `.` then replayed the no-op instead of the previous real change
+    /// (vim's redo record is only written by actual edits). The three
+    /// `edit_*` funnels set the flag when bytes actually moved.
     pub(crate) fn begin_edit(&mut self) {
-        if !self.replaying {
-            self.recording_mutated = true;
-        }
         self.open_undo_group();
     }
 
@@ -1198,6 +1203,9 @@ impl VimState {
         if text.is_empty() {
             return;
         }
+        if !self.replaying {
+            self.recording_mutated = true;
+        }
         self.flush_undo_group(ctx);
         ctx.buf.insert_text(at, text);
         let len = text.len();
@@ -1210,6 +1218,9 @@ impl VimState {
     pub(crate) fn edit_delete(&mut self, ctx: &mut Ctx, range: Range<usize>) {
         if range.start >= range.end {
             return;
+        }
+        if !self.replaying {
+            self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
         ctx.buf.delete_range(range.clone());
@@ -1257,6 +1268,9 @@ impl VimState {
     pub(crate) fn edit_replace(&mut self, ctx: &mut Ctx, range: Range<usize>, text: &str) {
         if range.start >= range.end {
             return self.edit_insert(ctx, range.start, text);
+        }
+        if !self.replaying {
+            self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
         ctx.buf.replace_range(range.clone(), text);
@@ -1719,8 +1733,17 @@ impl VimState {
         let offset = clamp_cursor(buf, offset);
         self.cursor.offset = offset;
         self.cursor.desired_col = None;
+        // In visual mode a click moves the CURSOR only: vim's selection
+        // follows while the anchor stays put (`:h visual-use`, mouse drag
+        // aside — hosts use set_visual_range for that). Overwriting the
+        // anchor collapsed the selection to zero width, so a later `d`
+        // deleted a single char instead of the dragged-out range.
         if matches!(self.mode, Mode::Visual { .. }) {
-            self.visual_anchor = Some(offset);
+            if let Some(anchor) = self.visual_anchor {
+                let (lo, hi) = (anchor.min(offset), anchor.max(offset));
+                let end = crate::buffer::next_grapheme_offset(buf, hi).unwrap_or(hi);
+                self.marks.active_visual = Some((lo, end));
+            }
         }
     }
 
@@ -3669,8 +3692,18 @@ impl VimState {
                 self.marks.set(c, self.cursor.offset);
             }
             CharArgCmd::MacroRecord => {
-                // starting `q{reg}`; the stop is handled in execute_command
-                self.macro_capture = Some((c, Vec::new()));
+                // starting `q{reg}`; the stop is handled in execute_command.
+                // vim only accepts a-zA-Z0-9 — `q/` beeps and stays idle, so
+                // a stray key can't hijack a slot the `@` lookup expects to
+                // be a real register.
+                if c.is_ascii_alphanumeric() {
+                    self.macro_capture = Some((c, Vec::new()));
+                } else {
+                    self.char_arg = None;
+                    self.reset_pending();
+                    ctx.host.bell();
+                    return ProcessOutcome::Consumed;
+                }
             }
             CharArgCmd::MacroPlay => {
                 // `@:` repeats the last executed Ex command line
