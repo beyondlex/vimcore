@@ -1191,6 +1191,11 @@ impl VimState {
                 self.changes.remove(0);
             }
             self.change_pos = self.changes.len() - 1;
+        } else if self.change_pos != self.changes.len() - 1 {
+            // dedup branch: the new edit sits ON the newest entry — the
+            // list is unchanged, but the "current" pointer must still move
+            // to it, or a later `g,` walks from a stale position
+            self.change_pos = self.changes.len() - 1;
         }
     }
 
@@ -1226,7 +1231,6 @@ impl VimState {
         let matches = crate::search::all_matches(self, ctx.buf, &pattern);
         if matches.is_empty() {
             self.search.last_matches.clear();
-            self.search.last_index = None;
             ctx.host.set_search_highlights(&[], None);
             return;
         }
@@ -1235,12 +1239,8 @@ impl VimState {
             .find(|m| m.start >= self.cursor.offset)
             .or_else(|| matches.last())
             .cloned();
-        let index = current
-            .as_ref()
-            .and_then(|c| matches.iter().position(|m| m == c));
         self.search.last_matches = matches;
         self.search.matches_generation = Some(self.edit_generation);
-        self.search.last_index = index;
         let matches = &self.search.last_matches;
         ctx.host.set_search_highlights(matches, current);
     }
@@ -1871,6 +1871,11 @@ impl VimState {
         // the match cache in step with the buffer, like every other path
         self.republish_search(ctx);
         ctx.host.changed();
+        // close the group this call opened. Hosts MAY call this outside an
+        // insert session (a REPL-style substitution); leaving `open_undo`
+        // dangling glued the host's NEXT edit into the same undo step — one
+        // `u` reverted two unrelated changes.
+        self.end_edit();
     }
 
     /// Host-initiated cursor move (e.g. a mouse click). `offset` may be any
@@ -2781,11 +2786,24 @@ impl VimState {
                     if !self.goto_motion(ctx, motion, count) {
                         // `n`/`N`/`*` misses get vim's message channel, not
                         // just a bare bell (E35 before any search, E486 with
-                        // the pattern otherwise)
-                        if matches!(
-                            motion,
-                            Motion::SearchNext { .. } | Motion::StarSearch { .. }
-                        ) {
+                        // the pattern otherwise). `*` on a line with NOTHING
+                        // at the cursor is vim's E348 instead — the old code
+                        // reported E486 quoting a stale pattern from some
+                        // unrelated earlier search.
+                        if matches!(motion, Motion::StarSearch { .. }) {
+                            let line = ctx.buf.offset_to_line(self.cursor.offset);
+                            let line_blank = ctx.buf
+                                .slice(ctx.buf.line_start(line)..ctx.buf.line_end(line))
+                                .chars()
+                                .all(char::is_whitespace);
+                            if line_blank {
+                                ctx.host
+                                    .status_message("E348: No string under cursor");
+                                ctx.host.bell();
+                            } else {
+                                self.report_search_miss(ctx);
+                            }
+                        } else if matches!(motion, Motion::SearchNext { .. }) {
                             self.report_search_miss(ctx);
                         } else {
                             ctx.host.bell();
@@ -3272,6 +3290,10 @@ impl VimState {
                             ctx.buf,
                             crate::buffer::floor_to_char_boundary(ctx.buf, offset),
                         );
+                        // the stale vertical goal from before the undo must
+                        // not steer a following `j` (JumpBackward/OlderChange
+                        // clear it — same drift, same cure)
+                        self.cursor.desired_col = None;
                     } else {
                         ctx.host.bell();
                         break;
@@ -3291,6 +3313,7 @@ impl VimState {
                             ctx.buf,
                             crate::buffer::floor_to_char_boundary(ctx.buf, offset),
                         );
+                        self.cursor.desired_col = None;
                     } else {
                         ctx.host.bell();
                         break;

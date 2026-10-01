@@ -1398,10 +1398,7 @@ impl VimState {
         // `c` flag stays a documented divergence (no host UI for it).
         if flags.contains('n') {
             let (first_line, last_line) = range;
-            let Some(mut builder) = search::compile(self, &pattern) else {
-                ctx.host.bell();
-                return true;
-            };
+            let mut builder = search::compile(self, &pattern);
             if flags.contains('i') {
                 builder.case_insensitive(true);
             } else if flags.contains('I') {
@@ -1432,10 +1429,7 @@ impl VimState {
                 .status_message(&format!("{total} matches on {lines_with} lines"));
             return true;
         }
-        let Some(mut builder) = search::compile(self, &pattern) else {
-            ctx.host.bell();
-            return true;
-        };
+        let mut builder = search::compile(self, &pattern);
         // `i` forces case-insensitive for this substitution, `I` forces
         // case-sensitive (overriding ignorecase/smartcase, like vim)
         if flags.contains('i') {

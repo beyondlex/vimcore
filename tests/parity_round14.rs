@@ -574,3 +574,31 @@ fn local_leader_resolves_from_let_variable() {
     );
     assert_eq!(lhs[1], vimcore::key::Key::char('x'));
 }
+
+/// PROBE: vim 9.1 Q1——`*` 在非词非空白字符上搜该字符的**字面**（pattern
+/// 为 `!`），不是响铃也不是复用旧 pattern。行内向后首个非空白同理。
+#[test]
+fn star_on_non_word_char_searches_it_literally() {
+    let mut f = Fixture::new("foo !\nbar !\n");
+    f.feed(["/", "b", "a", "r", "<Enter>"]); // 先武装一个无关 pattern
+    f.feed(["g", "g"]); // 回第 1 行
+    f.feed(["$"]); // 光标到 '!'
+    f.feed(["*"]);
+    assert_eq!(
+        f.vim.search.pattern.as_deref(),
+        Some("!"),
+        "字面 ! 成为主 pattern"
+    );
+    assert_eq!(f.vim.cursor_offset(), 10, "跳到下一个 !（第 2 行）");
+}
+
+/// 光标行全是空白时 `*` 报 E348（vim 的错误串），不再引用陈旧 pattern。
+#[test]
+fn star_on_blank_line_reports_e348() {
+    let mut f = Fixture::new("word\n   \n");
+    f.feed(["/", "w", "o", "r", "d", "<Enter>"]);
+    f.feed(["j", "j"]); // 空白行
+    f.feed(["*"]);
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert_eq!(last, "E348: No string under cursor");
+}

@@ -274,39 +274,12 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["g", "~"], CmdKind::Operator(Operator::ToggleCase));
     b.normal(&["g", "q"], CmdKind::Operator(Operator::Format));
     b.normal(&["g", "w"], CmdKind::Operator(Operator::Format));
-    // multi-key operator doubling (single-key doubling is generic)
-    b.normal(
-        &["g", "u", "u"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::Lowercase)),
-    );
-    b.normal(
-        &["g", "u", "g", "u"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::Lowercase)),
-    );
-    b.normal(
-        &["g", "U", "U"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::Uppercase)),
-    );
-    b.normal(
-        &["g", "U", "g", "U"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::Uppercase)),
-    );
-    b.normal(
-        &["g", "~", "~"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::ToggleCase)),
-    );
-    b.normal(
-        &["g", "q", "q"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::Format)),
-    );
-    b.normal(
-        &["g", "q", "g", "q"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::Format)),
-    );
-    b.normal(
-        &["g", "~", "g", "~"],
-        CmdKind::Normal(NormalCmd::LinewiseOp(Operator::ToggleCase)),
-    );
+    // NOTE: there are no `guu`/`gUU`/`g~~`/`gqq` (or `gugu`-style) rows
+    // here on purpose: `gu`/`gU`/`g~`/`gq` already RESOLVE at the second
+    // key (operator armed, cmd_seq cleared), so a third key can never
+    // accumulate in this trie. The linewise doubling forms are handled by
+    // the operator-pending doubling path in state.rs (`gUU` etc. work —
+    // engine.rs + fuzz_round10 pin them).
 
     // ---- text objects (pending + visual) ---------------------------------
     b.object(
@@ -442,7 +415,9 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
 
     // ---- normal-mode actions ---------------------------------------------
     b.normal(&["x"], CmdKind::Normal(NormalCmd::DeleteCharForward));
-    b.normal(&["<Del>"], CmdKind::Normal(NormalCmd::DeleteCharForward));
+    // NOTE: no `<Del>` row — the navigation-key interceptor (state.rs) takes
+    // "delete" before the trie walk, and visual mode maps it to `d` there
+    // too; a trie row would be unreachable.
     b.normal(&["X"], CmdKind::Normal(NormalCmd::DeleteCharBackward));
     b.normal(&["s"], CmdKind::Normal(NormalCmd::SubstituteChar));
     b.normal(&["S"], CmdKind::Normal(NormalCmd::SubstituteLine));

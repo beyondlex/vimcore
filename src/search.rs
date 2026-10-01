@@ -15,7 +15,6 @@ pub struct SearchState {
     pub forward: bool,
     /// The match under the cursor for `n`/`N` stepping.
     pub last_matches: Vec<Range<usize>>,
-    pub last_index: Option<usize>,
     /// The range `gn`/`dgn` last selected, for the operator span.
     pub(crate) last_found_match: Option<Range<usize>>,
     /// Buffer edit generation `last_matches` was computed at. Every edit
@@ -34,26 +33,24 @@ impl Default for SearchState {
             forward: true,
             last_matches: Vec::new(),
             last_found_match: None,
-            last_index: None,
             matches_generation: None,
         }
     }
 }
 
-pub fn compile(vim: &VimState, pattern: &str) -> Option<RegexBuilder> {
+/// Regex options come from the engine's case options; the builder itself
+/// never fails to construct (only `.build()` can reject a bad pattern).
+pub fn compile(vim: &VimState, pattern: &str) -> RegexBuilder {
     let mut builder = RegexBuilder::new(pattern);
     builder
         .case_insensitive(vim.options.case_insensitive_for(pattern))
         .multi_line(true);
-    Some(builder)
+    builder
 }
 
 /// Find all matches of `pattern`, with a limit guard on pathological input.
 pub fn all_matches(vim: &VimState, buf: &dyn VimBuffer, pattern: &str) -> Vec<Range<usize>> {
-    let Some(builder) = compile(vim, pattern) else {
-        return Vec::new();
-    };
-    let Ok(re) = builder.build() else {
+    let Ok(re) = compile(vim, pattern).build() else {
         return Vec::new();
     };
 
@@ -95,7 +92,6 @@ pub fn set_pattern_inner(
     vim.search.forward = forward;
     vim.search.last_matches = matches;
     vim.search.matches_generation = Some(vim.edit_generation);
-    vim.search.last_index = None;
     // vim mirrors every search into `@/` (`<C-r>/` in insert, `:reg`)
     vim.registers.store_search(pattern);
     if vim.options.hlsearch {
@@ -109,7 +105,6 @@ pub fn set_pattern_inner(
 pub fn clear_highlights(vim: &mut VimState, ctx: &mut Ctx) {
     vim.search.last_matches.clear();
     vim.search.matches_generation = None;
-    vim.search.last_index = None;
     ctx.host.set_search_highlights(&[], None);
 }
 
@@ -160,10 +155,13 @@ pub fn jump_to_match(
     Some(matches.get(index % matches.len())?.start)
 }
 
-/// `*` / `#`: build a whole-word pattern from the word under the cursor and
-/// search for it. When the cursor is NOT on a word, vim uses the closest
-/// word FORWARD on the same line. Returns false when no word was found (the
-/// caller must not jump: a stale pattern would silently re-search).
+/// `*` / `#`: search for the text at the cursor. Vim's fallback chain
+/// (probe 9.1, round 14): the WORD under the cursor → the first non-blank
+/// char after it on the line, taken LITERALLY (cursor on `!` searches the
+/// escaped `!` — the old code scanned only for word chars, so a line of
+/// `foo !` fell through to the stale-pattern bell). Returns false when the
+/// line offers nothing (whitespace only) — the caller must not jump with a
+/// stale pattern.
 pub fn search_word_under_cursor(
     vim: &mut VimState,
     buf: &dyn VimBuffer,
@@ -171,29 +169,40 @@ pub fn search_word_under_cursor(
     forward: bool,
 ) -> bool {
     let offset = vim.cursor.offset;
-    // not on a word char: scan forward to the next one within this line
+    // not on a word char: scan forward to the next NON-BLANK within this line
     let offset = if !matches!(buf.char_at(offset), Some(c) if is_word_char(c)) {
         let line_end = buf.line_end(buf.offset_to_line(offset));
         let mut o = offset;
-        while o < line_end && !matches!(buf.char_at(o), Some(c) if is_word_char(c)) {
+        while o < line_end && matches!(buf.char_at(o), Some(c) if c.is_whitespace()) {
             o += buf.char_at(o).map(|c| c.len_utf8()).unwrap_or(1);
         }
         o
     } else {
         offset
     };
-    let Some((start, end)) = word_bounds_at(buf, offset) else {
-        return false;
-    };
-    let literal = buf.slice(start..end);
-    if literal.is_empty() {
-        return false;
+    // a word char at the probe: whole-word pattern, like vim's `*`
+    if let Some((start, end)) = word_bounds_at(buf, offset) {
+        let literal = buf.slice(start..end);
+        if literal.is_empty() {
+            return false;
+        }
+        let escaped = regex::escape(&literal);
+        let pattern = format!(r"\b{escaped}\b");
+        set_pattern_inner(vim, buf, host, pattern, forward);
+        vim.search.forward = forward;
+        return true;
     }
-    let escaped = regex::escape(&literal);
-    let pattern = format!(r"\b{escaped}\b");
-    set_pattern_inner(vim, buf, host, pattern, forward);
-    vim.search.forward = forward;
-    true
+    // a non-word, non-blank char: search it literally (no word boundaries —
+    // vim's pattern for `*` on `!` is just the escaped char)
+    match buf.char_at(offset) {
+        Some(c) if !c.is_whitespace() => {
+            let pattern = regex::escape(&c.to_string());
+            set_pattern_inner(vim, buf, host, pattern, forward);
+            vim.search.forward = forward;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Word bounds around `offset` (the run of word chars containing it).
