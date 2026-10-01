@@ -1677,6 +1677,9 @@ impl VimState {
         } else if self.cursor.offset > range.end {
             self.cursor.offset += text.len().saturating_sub(range.len());
         }
+        // committed text is a real edit: keep the published highlights and
+        // the match cache in step with the buffer, like every other path
+        self.republish_search(ctx);
         ctx.host.changed();
     }
 
@@ -1911,6 +1914,11 @@ impl VimState {
                 let at = ctx.buf.line_end(*line);
                 self.edit_insert(ctx, at, &" ".repeat(*pad));
             }
+            // the pads moved text after the match cache's offsets — every
+            // other edit path republishes the hlsearch scan; skipping it
+            // here left `last_matches` pointing mid-character until the
+            // session exits (fuzz round 11)
+            self.republish_search(ctx);
         }
         let cursor_line = ctx.buf.offset_to_line(self.cursor.offset);
         // the pads above shifted every row below them: recompute each row's
