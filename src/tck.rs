@@ -38,7 +38,12 @@ use crate::state::{Ctx, VimState};
 /// - `slice(range).len() == range.len()`；
 /// - `offset_to_line(line_start(i)) == i`；
 /// - `char_at` 在每个字符边界返回 `Some`、非边界/越界返回 `None`；
-/// - `prev_char_offset` 从 `len` 逐步回链到 0，步数恰等于字符数。
+/// - `prev_char_offset` 从 `len` 逐步回链到 0，步数恰等于字符数；
+/// - **幻影行容忍**：引擎的普通光标命令（缓冲区末尾的 `w`/`}` 等）会以
+///   `line == line_count` 调 `line_range`/`line_end`，并以任意字节（含
+///   多字节字符中间）调 `offset_to_line`——实现必须像本参考一样返回
+///   `len..len` / 行尾、并把偏移落到最近字符边界，越界 panic 的宿主
+///   会在最普通的按键上崩溃。
 pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), String> {
     let len = buf.len();
     let lines = buf.line_count();
@@ -79,6 +84,14 @@ pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), Strin
                 buf.offset_to_line(range.start)
             ));
         }
+    }
+    // 幻影行与越界/中间字符偏移必须被容忍（见上方契约说明）：普通命令
+    // `w` 在缓冲末尾就会以 line == line_count 读 line_range
+    if buf.line_range(lines) != (len..len) && len > 0 {
+        return Err(format!(
+            "line_range(line_count) 必须容忍幻影行（返回 len..len），got {:?}",
+            buf.line_range(lines)
+        ));
     }
     let full = buf.slice(0..len);
     if full.len() != len {
@@ -243,11 +256,13 @@ impl VimBuffer for TckStrBuf {
         if line >= self.line_count() {
             return self.0.len()..self.0.len();
         }
+        let parts = self.0.split('\n');
+        let total = self.line_count();
         let mut start = 0;
-        for (i, part) in self.0.split('\n').enumerate() {
+        for (i, part) in parts.enumerate() {
             if i == line {
                 // 终止 \n 存在就包含进 range；末行延伸到缓冲区尾
-                let end = if i + 1 < self.0.split('\n').count() {
+                let end = if i + 1 < total {
                     start + part.len() + 1
                 } else {
                     self.0.len()
@@ -259,7 +274,13 @@ impl VimBuffer for TckStrBuf {
         unreachable!()
     }
     fn offset_to_line(&self, offset: usize) -> usize {
-        self.0[..offset.min(self.0.len())].split('\n').count() - 1
+        // offsets arrive from OUTSIDE (stored marks, host clicks) and can be
+        // past the end or mid-character — the char_at/prev_char_offset guards
+        // cover their own slices, this one needs its own (a mid-char slice
+        // panicked the reference host, and every host copying it verbatim)
+        let offset = offset.min(self.0.len());
+        let offset = offset.min(self.0.ceil_char_boundary(offset));
+        self.0[..offset].split('\n').count() - 1
     }
     fn slice(&self, range: Range<usize>) -> String {
         self.0[range].to_owned()

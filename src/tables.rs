@@ -90,6 +90,12 @@ pub enum VisualCmd {
     /// selection (round11 悬置闭环). The engine only reports the anchor;
     /// hosts own the viewport.
     Scroll(crate::host::ScrollAnchor),
+    /// `Y`/`D`/`X`/`C`/`S`: vim's LINEWISE visual spellings (`:h v_Y` —
+    /// v_D/v_X delete the covered LINES, v_Y yanks them linewise, v_C/v_S
+    /// linewise-change them; 9.1 probes). The row keys still read as plain
+    /// operators in the table below; this variant routes them to the
+    /// covered-lines span instead of the charwise selection.
+    LinewiseOp(Operator),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -561,13 +567,16 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.visual(&["x"], CmdKind::Operator(Operator::Delete));
     b.visual(&["<Del>"], CmdKind::Operator(Operator::Delete));
     b.visual(&["y"], CmdKind::Operator(Operator::Yank));
-    b.visual(&["Y"], CmdKind::Operator(Operator::Yank));
+    // Y/D/X/C/S are vim's LINEWISE visual commands (see VisualCmd::LinewiseOp;
+    // 9.1 probes: `vlY` yanks the line, `vlD` deletes the line whole, `v_x`
+    // stays charwise and `v_s` stays charwise change)
+    b.visual(&["Y"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Yank)));
     b.visual(&["c"], CmdKind::Operator(Operator::Change));
     b.visual(&["s"], CmdKind::Operator(Operator::Change));
-    b.visual(&["C"], CmdKind::Operator(Operator::Change));
-    b.visual(&["S"], CmdKind::Operator(Operator::Change));
-    b.visual(&["D"], CmdKind::Operator(Operator::Delete));
-    b.visual(&["X"], CmdKind::Operator(Operator::Delete));
+    b.visual(&["C"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)));
+    b.visual(&["S"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)));
+    b.visual(&["D"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)));
+    b.visual(&["X"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)));
     b.visual(&[">"], CmdKind::Operator(Operator::IndentRight));
     b.visual(&["<"], CmdKind::Operator(Operator::IndentLeft));
     b.visual(&["u"], CmdKind::Operator(Operator::Lowercase));
