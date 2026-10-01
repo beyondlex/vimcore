@@ -110,7 +110,7 @@ const MAX_PIPELINE_STEPS: usize = 100_000;
 
 /// Depth limit for nested mapping expansions. A `:map x y` + `:map y x` pair
 /// would otherwise ping-pong forever; vim errors out the same way.
-const MAX_MAP_DEPTH: usize = 100;
+const MAX_MAP_DEPTH: usize = 1_000; // vim 9.1 default maxmapdepth=1000
 
 /// Cap for the jumplist (`C-o`/`C-i` history) and the changelist (`g;`/`g,`).
 const LIST_LIMIT: usize = 100;
@@ -601,6 +601,9 @@ impl VimState {
             guard += 1;
             if guard > MAX_PIPELINE_STEPS {
                 self.pending_keys.clear();
+                // a stale no-remap budget would silently bypass mapping
+                // resolution for every LATER keystroke until it drained
+                self.no_remap_left = 0;
                 self.reset_pending();
                 self.discard_change_record();
                 self.replaying = false;
@@ -701,6 +704,14 @@ impl VimState {
         if self.op.is_some() {
             return MappingStep::FallThrough;
         }
+        // A partial builtin command is being assembled (`cmd_seq` holds the
+        // `g` of `gj`): vim routes the continuation key straight into the
+        // command — mappings are only consulted BETWEEN commands, never for
+        // a partial command's next key (probe 9.1: `:nnoremap j G` + typed
+        // `gj` runs the builtin `gj`; the mapped `G` does not fire).
+        if !self.cmd_seq.is_empty() {
+            return MappingStep::FallThrough;
+        }
         let class = mapping_class_for(self.mode);
         // Waiting keeps the key IN the queue: insert-mode printables are
         // declined by the pipeline and delivered by the host later, so
@@ -723,6 +734,7 @@ impl VimState {
                 self.map_depth += 1;
                 if self.map_depth > MAX_MAP_DEPTH {
                     self.pending_keys.clear();
+                    self.no_remap_left = 0;
                     self.reset_pending();
                     ctx.host.bell();
                     return MappingStep::Done;
@@ -3561,11 +3573,15 @@ impl VimState {
                     self.cursor.offset = anchor;
                 }
             }
-            // O (block mode): swap the two ROW-ends, each side keeping its
-            // own column — the rectangle stays on screen, the cursor lands
-            // on the anchor's row at the cursor's column (vim 9.1 probe:
-            // anchor (2,2) cursor (3,3) → O puts the cursor at (2,3)). Not
-            // applicable outside block mode — bell like vim's unmapped keys.
+            // O: in block mode the cursor moves to the other corner of the
+            // block IN THE SAME LINE (`:h v_O`; three vim 9.1 probes agree:
+            // anchor (0,0) cursor (1,2) → cursor (1,0) + anchor (0,2), i.e.
+            // cursor keeps its ROW and takes the block's other COLUMN edge,
+            // the anchor mirrors it so the rectangle is unchanged — the
+            // round-8 tests had this backwards from a misread probe). On a
+            // single-row block this is a real horizontal move (cursor
+            // (0,2) → (0,0)), not a no-op. In char/line visual O is vim's
+            // synonym of `o`.
             VisualCmd::SwapEndsKeepCol => {
                 let is_block = matches!(
                     self.mode,
@@ -3577,29 +3593,25 @@ impl VimState {
                     return;
                 };
                 if !is_block {
-                    ctx.host.bell();
+                    // char/line visual: O is vim's synonym of `o` (probe 9.1:
+                    // `vllO` and `VjO` both mirror the ends, no bell)
+                    self.visual_anchor = Some(cursor);
+                    self.cursor.offset = anchor;
                     return;
                 }
                 let (a_line, c_line) = (
                     ctx.buf.offset_to_line(anchor),
                     ctx.buf.offset_to_line(cursor),
                 );
-                if a_line == c_line {
-                    // single-row block: "other corner, same column" is the
-                    // identity (each end recomputes to its own position) —
-                    // the block rectangle is unchanged either way, so take
-                    // the cheap path
-                    return;
-                }
                 let (a_col, c_col) = (
                     crate::buffer::display_column(ctx.buf, anchor),
                     crate::buffer::display_column(ctx.buf, cursor),
                 );
                 self.visual_anchor = Some(crate::buffer::offset_for_display_column(
-                    ctx.buf, c_line, a_col,
+                    ctx.buf, a_line, c_col,
                 ));
                 self.cursor.offset =
-                    crate::buffer::offset_for_display_column(ctx.buf, a_line, c_col);
+                    crate::buffer::offset_for_display_column(ctx.buf, c_line, a_col);
                 self.cursor.desired_col = None;
             }
             VisualCmd::PutReplace => {

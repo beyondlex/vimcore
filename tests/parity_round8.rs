@@ -269,8 +269,12 @@ fn block_session_ignores_host_click() {
 
 // ---- 7. 体验补充（块选 O / :marks 特殊标记 / :bN 别名） ------------------------
 
-/// vim 9.1 探针 probe10：块 anchor(2,2) cursor(3,3) 时 `O` → cursor(2,3)
-/// （同列、换到块另一行端）；`o` → cursor(2,2)（对角角，既有 SwapEnds）。
+/// 【第十四轮修正】本测试固化的 probe10 是一次误读。vim 9.1 三次独立探针
+/// 一致：块 `O` 光标保持所在**行**、换到块的另一**列**角（`:h v_O` "the
+/// cursor moves to the other corner in the same line"），anchor 镜像换列、
+/// 矩形不变；单行块是真实的水平换角而非 no-op；字符/行 visual 的 `O`
+/// 等同 `o`（不响铃）。三次探针：anchor(0,0)+cursor(1,2) → cursor(1,0)；
+/// anchor(1,1)+cursor(2,2)（本几何）→ cursor(2,1)；单行 (0,2) → (0,0)。
 #[test]
 #[allow(non_snake_case)] // O 是按键名
 fn block_visual_O_moves_to_other_row_same_col() {
@@ -279,34 +283,40 @@ fn block_visual_O_moves_to_other_row_same_col() {
     f.feed(["<C-v>", "j", "l"]); // block lines1-2 cols1-2，cursor (2,2)
     f.feed(["O"]);
     let (anchor, cursor, _) = f.vim.visual_selection().unwrap();
-    assert_eq!(f.buf.offset_to_line(cursor), 1, "O 把光标换到 anchor 行");
+    assert_eq!(f.buf.offset_to_line(cursor), 2, "O 保持光标所在行");
     assert_eq!(
         vimcore::buffer::display_column(&f.buf, cursor),
-        2,
-        "光标列保持不变"
+        1,
+        "光标换到块的另一列角"
     );
-    assert_eq!(f.buf.offset_to_line(anchor), 2, "anchor 换到原光标行");
+    assert_eq!(f.buf.offset_to_line(anchor), 1, "anchor 行不变");
     assert_eq!(
         vimcore::buffer::display_column(&f.buf, anchor),
-        1,
-        "anchor 列保持不变（选区矩形在屏幕上不变）"
+        2,
+        "anchor 镜像换列（矩形不变）"
     );
 
-    // 单行块 O：无事发生
+    // 单行块 O：真实的水平换角（vim 探针 (0,2) → (0,0)）
     let mut f = Fixture::new("aaaa\nbbbb\n");
     f.feed(["<C-v>", "l"]);
-    let before = f.vim.visual_selection().unwrap();
     f.feed(["O"]);
-    assert_eq!(f.vim.visual_selection(), Some(before), "单行块 O 不动");
+    let (anchor, cursor, _) = f.vim.visual_selection().unwrap();
+    assert_eq!(f.buf.offset_to_line(cursor), 0);
+    assert_eq!(vimcore::buffer::display_column(&f.buf, cursor), 0, "单行块 O 换角");
+    assert_eq!(vimcore::buffer::display_column(&f.buf, anchor), 1);
 }
 
-/// 字符/行可视模式没有 `O`（vim 仅块选支持）——响铃。
+/// 【第十四轮修正】字符/行 visual 的 `O` 等同 `o`（vim 9.1 探针：
+/// `vllO` → cursor (0,0)、`VjO` → (0,0)，无铃声）。
 #[test]
 #[allow(non_snake_case)] // O 是按键名
-fn char_visual_O_bells() {
-    let mut f = Fixture::new("abc\n");
-    f.feed(["v", "l", "O"]);
-    assert!(f.host.bells > 0, "char visual 的 O 响铃");
+fn char_visual_O_mirrors_ends_like_o() {
+    let mut f = Fixture::new("abcdef\n");
+    f.feed(["v", "l", "l", "l", "O"]);
+    assert_eq!(f.host.bells, 0, "char visual 的 O 不响铃");
+    let (anchor, cursor, _) = f.vim.visual_selection().unwrap();
+    assert_eq!(cursor, 0, "光标镜像到对角");
+    assert_eq!(anchor, 3);
 }
 
 /// `:marks` 现在也列出 `.`（最后变更）与 `^`（最后插入退出）。
