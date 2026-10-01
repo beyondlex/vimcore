@@ -133,8 +133,10 @@ fn delete_counts_and_motions() {
     let f = edit("hello world", 0, 0, &["d", "f", "o"]);
     assert_eq!(f.text(), " world");
 
+    // vim 9.1 probe (round 14): the till span reaches the TARGET — `dto`
+    // deletes "hell", not "hel" (the old assertion was one char short)
     let f = edit("hello world", 0, 0, &["d", "t", "o"]);
-    assert_eq!(f.text(), "lo world");
+    assert_eq!(f.text(), "o world");
 }
 
 #[test]
