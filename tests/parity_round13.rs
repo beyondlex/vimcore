@@ -316,17 +316,27 @@ fn ex_bang_forms_and_abbreviations() {
 }
 
 #[test]
-fn ex_garbage_count_does_not_reanchor() {
-    // :1,2d 3x — 尾参垃圾曾当 count=1 把范围重锚到第 2 行，只删第 2 行
+fn ex_garbage_count_reports_e488_and_deletes_nothing() {
+    // 【第十四轮修正】vim 9.1 探针 P13：`:1,2d 3x` 报 E488 且**不删除**。
+    // 第十三轮把垃圾 count 当 0（=无 count）照常删整个 typed range——
+    // 相邻修复方向对了，终点错了；第十四轮的 parse_reg_count 现在报错。
     let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "d", " ", "3", "x", "<CR>"]);
-    assert_eq!(f.text(), "c\n", "垃圾 count 按 vim 删整个 typed range");
+    assert_eq!(f.text(), "a\nb\nc\n", "垃圾尾参 = E488，缓冲不动");
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E488"), "got {last:?}");
 }
 
 #[test]
 fn ex_address_whitespace_and_midrange_percent() {
-    let f = edit("a\nb\nc\n", 0, 0, &[":", "5", " ", "+", "2", "d", "<CR>"]);
-    // :5 +2 超出末行 → clamp 到 $，删 5..$（不存在）→ 只删到最后一行
-    assert_eq!(f.text(), "a\nb\n", "地址内空白被跳过（曾 E16）");
+    // 【第十四轮修正】地址内空白跳过用**范围内**的例子证明（vim 9.1）：
+    // `:2 +1d` 删第 3 行。越界地址 `:5 +2` 现按探针 P15 报 E16（第十二轮
+    // 注释里的「clamp 到 $」是当时实现的期望，非 vim 行为）。
+    let f = edit("a\nb\nc\nd\n", 0, 0, &[":", "2", " ", "+", "1", "d", "<CR>"]);
+    assert_eq!(f.text(), "a\nb\nd\n", "地址内空白被跳过");
+
+    let f3 = edit("a\nb\nc\n", 0, 0, &[":", "5", " ", "+", "2", "d", "<CR>"]);
+    let last = f3.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E16"), "越界地址 = E16，got {last:?}");
 
     let f2 = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "%", "d", "<CR>"]);
     assert_eq!(f2.text(), "", "mid-range % = 1,$（曾是 cursor line）");

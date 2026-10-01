@@ -49,6 +49,15 @@ pub fn is_bool_option(name: &str) -> bool {
     canonical_bool(name).is_some()
 }
 
+/// Defaults for `:set {name}&` — mirrors [`Options::default`]. Keep the two
+/// in sync (a drift makes `ts&` reset to a non-default value).
+const VALUE_DEFAULTS: &[(&str, usize)] = &[
+    ("tabstop", 4),
+    ("shiftwidth", 4),
+    ("textwidth", 78),
+    ("scrolloff", 4),
+];
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub number: bool,
@@ -152,6 +161,31 @@ impl Options {
             "shiftwidth" => self.shiftwidth = v,
             "textwidth" => self.textwidth = v,
             "scrolloff" => self.scrolloff = v,
+            _ => unreachable!("VALUE_TABLE and this match are out of sync"),
+        }
+        true
+    }
+
+    /// True when `name` (canonical or alias) names a numeric option —
+    /// `:set ts` (bare, no `=`) must QUERY it, not try a boolean set.
+    pub fn is_value_option(&self, name: &str) -> bool {
+        canonical_value(name).is_some()
+    }
+
+    /// `:set {name}&` — reset a numeric option to its default.
+    /// False when the name is unknown.
+    pub fn reset_value(&mut self, name: &str) -> bool {
+        let Some(canon) = canonical_value(name) else {
+            return false;
+        };
+        let Some((_, default)) = VALUE_DEFAULTS.iter().find(|(n, _)| *n == canon) else {
+            return false;
+        };
+        match canon {
+            "tabstop" => self.tabstop = *default,
+            "shiftwidth" => self.shiftwidth = *default,
+            "textwidth" => self.textwidth = *default,
+            "scrolloff" => self.scrolloff = *default,
             _ => unreachable!("VALUE_TABLE and this match are out of sync"),
         }
         true

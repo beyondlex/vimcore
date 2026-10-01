@@ -294,9 +294,16 @@ fn empty_line_pattern_no_phantom_match_after_trailing_newline() {
 }
 
 #[test]
-fn shift_in_range_reports_e492_not_e16() {
-    // :5> 是 shift 命令(引擎不支持 → E492);旧实现把 > 当范围字符报 E16
+fn shift_in_range_reports_e16_when_out_of_range() {
+    // 【第十四轮修正】vim 9.1 探针：2 行缓冲上 `:5>` 报
+    // "E16: Invalid range: 5>"——范围解析先于命令识别，越界地址先报 E16。
+    // 第十二轮的 E492 断言基于「> 不该被当范围字符」的正确修复，但对
+    // 这个具体输入选择了错误的期望值；第十四轮的 E16 严格化后与 vim 一致。
+    // 命令在范围内时 `:5>` 式输入仍走 E492（如 2 行缓冲上 `:2>`）。
     let f = edit("a\nb\n", 0, 0, &[":", "5", ">", "\r"]);
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E16"), "got {last:?}");
+    let f = edit("a\nb\n", 0, 0, &[":", "2", ">", "\r"]);
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert!(last.starts_with("E492"), "got {last:?}");
 }

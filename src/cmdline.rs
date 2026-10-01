@@ -386,6 +386,9 @@ impl VimState {
         if line.is_empty() {
             return;
         }
+        // error messages quote the WHOLE typed line (vim: `E477: No !
+        // allowed: 1,2y!`) — the dispatch works on the range-stripped rest
+        let full_line = line.to_owned();
         // a leading `"` comments the whole line out (vim: `: " scratch` is a
         // silent no-op, not E492)
         if line.starts_with('"') {
@@ -443,20 +446,6 @@ impl VimState {
                 ctx.host.request_close_forced(true);
                 return;
             }
-            // :bf[irst]/:brewind — the host owns the buffer list (NOTES.md
-            // 第八轮「悬而未决」闭环); a refusal rings like :bN's.
-            "bfirst" | "bf" | "brewind" => {
-                if !ctx.host.first_buffer() {
-                    ctx.host.bell();
-                }
-                return;
-            }
-            "blast" | "bl" => {
-                if !ctx.host.last_buffer() {
-                    ctx.host.bell();
-                }
-                return;
-            }
             // :reg[isters] — one status line per populated register
             "reg" | "registers" => {
                 for (name, reg) in self.registers.items() {
@@ -494,21 +483,48 @@ impl VimState {
             }
             _ => {}
         }
-        if let Some(rest) = line
-            .strip_prefix("set")
-            .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+        // `:se[t]` and `:setl[ocal]` — in a single-buffer engine setlocal
+        // has no scope to differ, so it IS `:set` (vim accepts both spellings)
+        const SET_SPELLINGS: &[&str] = &["set", "se", "setlocal", "setl"];
+        if let Some(rest) = SET_SPELLINGS
+            .iter()
+            .find_map(|cmd| {
+                line.strip_prefix(cmd)
+                    .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+            })
         {
             self.ex_set(ctx, rest.trim_start());
             return;
         }
-        if line == "bnext" || line == "bn" {
+        // vim's abbreviation rule applies to the whole buffer family:
+        // `:bn[ext]`, `:bp[revious]`/`:bN`, `:bf[irst]`/`:brewind`,
+        // `:bl[ast]` — every prefix of the full name works (`:bne`, `:bpr`…)
+        const BNEXT_SPELLINGS: &[&str] = &["bnext", "bnex", "bne", "bn"];
+        const BPREV_SPELLINGS: &[&str] = &[
+            "bprevious", "bpreviou", "bprevio", "bprevi", "bprev", "bpre", "bpr", "bp", "bN",
+        ];
+        const BFIRST_SPELLINGS: &[&str] = &["bfirst", "bfirs", "bfir", "bfi", "bf", "brewind"];
+        const BLAST_SPELLINGS: &[&str] = &["blast", "blas", "bla", "bl"];
+        if BNEXT_SPELLINGS.contains(&line) {
             if !ctx.host.cycle_buffer(true) {
                 ctx.host.bell();
             }
             return;
         }
-        if line == "bprev" || line == "bprevious" || line == "bp" || line == "bN" {
+        if BPREV_SPELLINGS.contains(&line) {
             if !ctx.host.cycle_buffer(false) {
+                ctx.host.bell();
+            }
+            return;
+        }
+        if BFIRST_SPELLINGS.contains(&line) {
+            if !ctx.host.first_buffer() {
+                ctx.host.bell();
+            }
+            return;
+        }
+        if BLAST_SPELLINGS.contains(&line) {
+            if !ctx.host.last_buffer() {
                 ctx.host.bell();
             }
             return;
@@ -546,7 +562,20 @@ impl VimState {
             .iter()
             .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
-            let (register, count) = Self::parse_reg_count(rest.trim());
+            // `:d!` is not a thing in vim — E477, nothing deleted (probe 9.1)
+            if rest.starts_with('!') {
+                ctx.host
+                    .status_message(&format!("E477: No ! allowed: {full_line}"));
+                ctx.host.bell();
+                return;
+            }
+            let (register, count) = match Self::parse_reg_count(rest.trim()) {
+                Ok(parsed) => parsed,
+                Err(token) => {
+                    Self::report_trailing(ctx, &token, line);
+                    return;
+                }
+            };
             let (mut first, last) = range;
             if count >= 1 {
                 first = last;
@@ -562,7 +591,14 @@ impl VimState {
             .iter()
             .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
-            self.ex_yank_lines(ctx, range, rest.trim());
+            // `:y!` is E477 like `:d!` (probe 9.1)
+            if rest.starts_with('!') {
+                ctx.host
+                    .status_message(&format!("E477: No ! allowed: {full_line}"));
+                ctx.host.bell();
+                return;
+            }
+            self.ex_yank_lines(ctx, range, rest.trim(), &full_line);
             return;
         }
         // :{range}sor[t] [!] [i] [u] — sort the range's lines (before `s`:
@@ -586,7 +622,7 @@ impl VimState {
             .iter()
             .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
-            self.ex_join(ctx, range, rest.trim(), addr_count);
+            self.ex_join(ctx, range, rest.trim(), addr_count, &full_line);
             return;
         }
         ctx.host
@@ -830,7 +866,15 @@ impl VimState {
                     with_offset(base, off_str)
                 }
             };
-            addresses.push(value.min(last));
+            // vim reports E16 for an address PAST the last line and runs
+            // nothing (probes 9.1: `:1000000d`, `:2,99999d`, `:.+99d`, bare
+            // `:99999999` — the engine used to clamp silently and act).
+            // Addresses at/below 0 stay legal: `:0d`/`:-1d` act on the first
+            // line (probes 9.1).
+            if value > last {
+                return Err("E16: Invalid range".to_owned());
+            }
+            addresses.push(value);
         }
         match addresses.as_slice() {
             [] => Err("E16: Invalid range".to_owned()),
@@ -853,13 +897,25 @@ impl VimState {
     /// (vim 9.1, `:h :j`: "If a [range] has equal start and end values, this
     /// command does nothing"). A COUNT re-anchors the range to count lines
     /// starting at its LAST line (`:2j 3` joins lines 2-4).
-    fn ex_join(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str, addr_count: usize) {
+    fn ex_join(
+        &mut self,
+        ctx: &mut Ctx,
+        (first, last): (usize, usize),
+        args: &str,
+        addr_count: usize,
+        line_text: &str,
+    ) {
         let bang = args.starts_with('!');
-        let count = args
-            .trim_start_matches('!')
-            .trim()
-            .parse::<usize>()
-            .unwrap_or(0);
+        let count_token = args.trim_start_matches('!').trim();
+        let count = match count_token.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) if count_token.is_empty() => 0,
+            Err(_) => {
+                // vim rejects a junk count like any other trailing garbage
+                Self::report_trailing(ctx, count_token, line_text);
+                return;
+            }
+        };
         let last = last.min(ctx.buf.line_count().saturating_sub(1));
         let mut first = first.min(last);
         if count >= 1 {
@@ -951,33 +1007,72 @@ impl VimState {
 
     /// Parse the `:d` / `:y` argument list: a lone numeric first argument is
     /// a COUNT (`:2y 3`), an alphabetic one names a REGISTER with an
-    /// optional count after it (`:y a 2`). Special register chars work too —
-    /// `:d _` must land in the black hole (not `"1`), `:d +` in the
-    /// clipboard (9.1 semantics). Returns `(register, count)`, count 0 =
-    /// absent.
-    fn parse_reg_count(args: &str) -> (Option<char>, usize) {
+    /// optional count after it (`:y a 2`, or PACKED as `:y a3` — vim parses
+    /// that as register a, count 3, probe 9.1). Special register chars work
+    /// too — `:d _` must land in the black hole (not `"1`), `:d +` in the
+    /// clipboard (9.1 semantics). Count 0 = absent.
+    ///
+    /// Anything else is GARBAGE and returns Err(token): vim reports
+    /// E488 "Trailing characters" and DOES NOT run the command (probes:
+    /// `:1,2d 3x`, `:d a b`, `:1,2d _ x` — the engine used to swallow the
+    /// token and delete the range anyway; the comment above the old
+    /// `unwrap_or(0)` even documented the vim behavior it wasn't
+    /// implementing). The `|` separator falls out of the same rule for the
+    /// commands that see it literally (`:h :bar`).
+    fn parse_reg_count(args: &str) -> Result<(Option<char>, usize), String> {
         const SPECIALS: &str = "_+\".-:%#*";
-        let mut register = None;
-        let mut count = 0usize;
         let mut parts = args.split_whitespace();
-        if let Some(head) = parts.next() {
-            if let Some(c) = head.chars().next() {
-                if c.is_ascii_digit() {
-                    // a NON-numeric tail (`:1,2d 3x`) is garbage, not a
-                    // count of 1: defaulting to 1 re-anchored the range at
-                    // its last line and deleted the WRONG line set — vim
-                    // reports E488 and deletes nothing. 0 = no count.
-                    count = head.parse::<usize>().unwrap_or(0);
-                } else if c.is_ascii_alphanumeric() || SPECIALS.contains(c) {
-                    register = Some(c);
-                    // the count may follow the register (`:y a 2`)
-                    if let Some(n) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
-                        count = n;
+        let Some(head) = parts.next() else {
+            return Ok((None, 0));
+        };
+        let Some(c) = head.chars().next() else {
+            return Ok((None, 0));
+        };
+        if c.is_ascii_digit() {
+            return match head.parse::<usize>() {
+                Ok(count) => {
+                    // a count leaves no room for further arguments
+                    match parts.next() {
+                        Some(extra) => Err(extra.to_owned()),
+                        None => Ok((None, count)),
                     }
                 }
-            }
+                Err(_) => Err(head.to_owned()),
+            };
         }
-        (register, count)
+        if !c.is_ascii_alphanumeric() && !SPECIALS.contains(c) {
+            return Err(head.to_owned());
+        }
+        let register = Some(c);
+        let tail = &head[c.len_utf8()..];
+        if !tail.is_empty() {
+            // packed form `a3`: the rest of the token must be pure digits
+            return match tail.parse::<usize>() {
+                Ok(count) => match parts.next() {
+                    Some(extra) => Err(extra.to_owned()),
+                    None => Ok((register, count)),
+                },
+                Err(_) => Err(head.to_owned()),
+            };
+        }
+        // the count may follow as its own token (`:y a 2`)
+        match parts.next() {
+            None => Ok((register, 0)),
+            Some(count_token) => match count_token.parse::<usize>() {
+                Ok(count) => match parts.next() {
+                    Some(extra) => Err(extra.to_owned()),
+                    None => Ok((register, count)),
+                },
+                Err(_) => Err(count_token.to_owned()),
+            },
+        }
+    }
+
+    /// Report a rejected `:d`/`:y` argument the way vim does.
+    fn report_trailing(ctx: &mut Ctx, token: &str, line: &str) {
+        ctx.host
+            .status_message(&format!("E488: Trailing characters: {token}: {line}"));
+        ctx.host.bell();
     }
 
     /// `:{range}y[ank] [x] [count]` — yank the range's lines into a register
@@ -986,8 +1081,20 @@ impl VimState {
     /// lines into `"a`, `:1,2y 3` = lines 2-4, vim 9.1 probe — the engine
     /// used to extend the range instead); a lone numeric first argument is a
     /// count (`:2y 3`). The buffer is untouched.
-    fn ex_yank_lines(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), args: &str) {
-        let (register, count) = Self::parse_reg_count(args);
+    fn ex_yank_lines(
+        &mut self,
+        ctx: &mut Ctx,
+        (first, last): (usize, usize),
+        args: &str,
+        line: &str,
+    ) {
+        let (register, count) = match Self::parse_reg_count(args) {
+            Ok(parsed) => parsed,
+            Err(token) => {
+                Self::report_trailing(ctx, &token, line);
+                return;
+            }
+        };
         let (mut first, last) = (first, last);
         // any EXPLICIT count (even 1) re-anchors at the range's last line
         // (vim: `:1,2y 1` yanks just line 2)
@@ -1060,7 +1167,27 @@ impl VimState {
         }
         let mut applied = false;
         let mut search_rules_changed = false;
-        for arg in args.split_whitespace() {
+        // vim reads the question mark with or WITHOUT whitespace before it
+        // (`:set ts?` and `:set ts ?` both query — probe 9.1) and shows a
+        // bare numeric name's value (`:set ts` → `tabstop=4`). Fold the
+        // spaced form onto the name up front so one query path serves all
+        // three spellings; the old parser belled on `ts ?` and dropped the
+        // rest of the line.
+        let mut tokens: Vec<String> = Vec::new();
+        for tok in args.split_whitespace() {
+            if tok == "?" {
+                match tokens.last_mut() {
+                    // fold onto the preceding bare name (`ts ?` → `ts?`);
+                    // a stray `?` with no name before it stays a stray
+                    Some(prev) if !prev.ends_with('?') => prev.push('?'),
+                    _ => tokens.push(tok.to_owned()),
+                }
+            } else {
+                tokens.push(tok.to_owned());
+            }
+        }
+        for arg in &tokens {
+            let arg = arg.as_str();
             // a `"` starts a comment to end of line (vim: `:set ts=4 " note`
             // sets quietly); stop parsing so the words after it don't error
             if arg.starts_with('"') {
@@ -1094,6 +1221,26 @@ impl VimState {
                 self.options.set_boolean(name, false)
             } else if let Some((name, value)) = arg.split_once('=') {
                 self.options.set_value(name, value)
+            } else if let Some(name) = arg
+                .strip_suffix("&vim")
+                .or_else(|| arg.strip_suffix("&vi"))
+                .or_else(|| arg.strip_suffix('&'))
+            {
+                // `:set ts&` (and `ts&vim`/`ts&vi`) resets to the option's
+                // default (vim 9.1 probes: ts=2, `set ts&` → default)
+                self.options.reset_value(name)
+            } else if self.options.is_value_option(arg) {
+                // `:set ts` (no value, no ?) is a QUERY for numeric options
+                // in vim; the old parser treated it as a boolean set and
+                // belled
+                match self.options.describe(arg) {
+                    Some(text) => ctx.host.status_message(&text),
+                    None => {
+                        ctx.host.bell();
+                        return;
+                    }
+                }
+                continue;
             } else {
                 self.options.set_boolean(arg, true)
             };
@@ -1188,7 +1335,32 @@ impl VimState {
             // unknown-command report instead of a bare bell
             return false;
         }
-        let mut parts = after_s[sep.len_utf8()..].split(sep);
+        // Split on UNESCAPED separators: `:s/a\/b/x/` matches the literal
+        // `a/b` (probe 9.1) — the naive `split(sep)` chopped the pattern at
+        // the escaped slash and the command never worked. The backslash
+        // stays in the piece (the regex crate reads `\/` as an escaped
+        // literal slash); `substitute_without_flags` keeps its naive split
+        // because a command whose flags field contains the separator is
+        // already malformed.
+        fn split_escaped(rest: &str, sep: char) -> Vec<&str> {
+            let mut pieces = Vec::new();
+            let mut start = 0usize;
+            let mut chars = rest.char_indices();
+            while let Some((i, c)) = chars.next() {
+                if c == '\\' {
+                    // the escape AND the next char stay verbatim in the piece
+                    chars.next();
+                    continue;
+                }
+                if c == sep {
+                    pieces.push(&rest[start..i]);
+                    start = i + sep.len_utf8();
+                }
+            }
+            pieces.push(&rest[start..]);
+            pieces
+        }
+        let parts = &mut split_escaped(&after_s[sep.len_utf8()..], sep).into_iter();
         let Some(pattern) = parts.next() else {
             ctx.host.bell();
             return true;
@@ -1219,6 +1391,47 @@ impl VimState {
         } else {
             pattern.to_owned()
         };
+        // the `n` flag reports the match count WITHOUT substituting (vim:
+        // `:%s/foo//n` → "2 matches on 2 lines", buffer untouched — probe
+        // 9.1; the engine used to ignore the flag and DELET everything the
+        // pattern matched, a data-loss surprise). The interactive-confirm
+        // `c` flag stays a documented divergence (no host UI for it).
+        if flags.contains('n') {
+            let (first_line, last_line) = range;
+            let Some(mut builder) = search::compile(self, &pattern) else {
+                ctx.host.bell();
+                return true;
+            };
+            if flags.contains('i') {
+                builder.case_insensitive(true);
+            } else if flags.contains('I') {
+                builder.case_insensitive(false);
+            }
+            let Ok(re) = builder.build() else {
+                ctx.host.bell();
+                return true;
+            };
+            let mut total = 0usize;
+            let mut lines_with = 0usize;
+            for line_no in first_line..=last_line {
+                let ls = ctx.buf.line_start(line_no);
+                let le = ctx.buf.line_end(line_no);
+                let hits = re.find_iter(&ctx.buf.slice(ls..le)).count();
+                if hits > 0 {
+                    total += hits;
+                    lines_with += 1;
+                }
+            }
+            if total == 0 {
+                ctx.host
+                    .status_message(&format!("E486: Pattern not found: {pattern}"));
+                ctx.host.bell();
+                return true;
+            }
+            ctx.host
+                .status_message(&format!("{total} matches on {lines_with} lines"));
+            return true;
+        }
         let Some(mut builder) = search::compile(self, &pattern) else {
             ctx.host.bell();
             return true;
