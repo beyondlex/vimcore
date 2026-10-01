@@ -137,8 +137,34 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
         return Some(ObjectRange::charwise(start, end));
     }
 
-    // cursor is on whitespace and the object is `aw`: the whitespace itself
-    Some(ObjectRange::charwise(start, end))
+    // Cursor on whitespace and the object is `aw`: the whitespace run PLUS
+    // the next word — the run extends across newlines (blank lines belong
+    // to it), matching vim (9.1 probes: `yaw` on the gap of "foo   bar"
+    // yanks "   bar"; on a whitespace-only line the object reaches the
+    // next line's word).
+    let mut o = end;
+    while let Some(c) = buf.char_at(o) {
+        if c.is_whitespace() {
+            o += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    // `o` is the first char of the next word (or EOF); consume its run
+    let mut word_end = o;
+    if let Some(class) = word::class_at(buf, word_end, big) {
+        word_end += buf.char_at(word_end).map(|c| c.len_utf8()).unwrap_or(1);
+        let mut probe = o;
+        while let Some(next) = buf.next_char_offset(probe) {
+            if word::class_at(buf, next, big) == Some(class) {
+                word_end = next + buf.char_at(next).map(|c| c.len_utf8()).unwrap_or(1);
+                probe = next;
+            } else {
+                break;
+            }
+        }
+    }
+    Some(ObjectRange::charwise(start, word_end))
 }
 
 fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {

@@ -370,7 +370,23 @@ pub fn apply(
     register: Option<char>,
 ) {
     match op {
-        Operator::Delete => delete_span(vim, ctx, span, register),
+        Operator::Delete => {
+            // `daw` on whitespace whose word sits on a FOLLOWING line: vim's
+            // delete merges that line away too (9.1 probe: `daw` on the
+            // blank line of ["foo","   ","bar"] leaves just ["foo"] — the
+            // word's line break goes with it). The fingerprint is a
+            // charwise span starting on whitespace, containing a newline,
+            // and ending right before the word's line break.
+            let mut span = *span;
+            if !span.linewise
+                && ctx.buf.char_at(span.end) == Some('\n')
+                && matches!(ctx.buf.char_at(span.start), Some(c) if c.is_whitespace())
+                && ctx.buf.slice(span.start..span.end).contains('\n')
+            {
+                span.end += 1;
+            }
+            delete_span(vim, ctx, &span, register)
+        }
         Operator::Yank => yank_span(vim, ctx, span, register),
         Operator::Change => {
             // keep the indent of the first line when changing linewise
@@ -392,7 +408,16 @@ pub fn apply(
                     linewise: false,
                 }
             } else {
-                *span
+                // `caw` on whitespace shares the delete-side merge: the
+                // following line's break goes away with the word
+                let mut merged = *span;
+                if ctx.buf.char_at(merged.end) == Some('\n')
+                    && matches!(ctx.buf.char_at(merged.start), Some(c) if c.is_whitespace())
+                    && ctx.buf.slice(merged.start..merged.end).contains('\n')
+                {
+                    merged.end += 1;
+                }
+                merged
             };
             delete_span(vim, ctx, &effective, register);
             // the TYPING position is the span start (plus restored indent) —
