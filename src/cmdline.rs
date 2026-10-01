@@ -62,6 +62,11 @@ pub struct Cmdline {
     /// bare `:s` repeat. Stored when the command PARSES (even on E486 — vim
     /// retries the same command and reports the same miss).
     pub last_substitute: Option<String>,
+    /// Count typed before the `/`/`?` prompt (`3/foo` = 3rd match from the
+    /// cursor — vim 9.1 probe). Consumed by the executing Enter; a cancelled
+    /// prompt drops it (probe: `2/x<Esc>` then `x` deletes ONE char — the
+    /// count must not leak into the next command). 0 = no count.
+    pub search_count: usize,
 }
 
 impl Cmdline {
@@ -96,7 +101,8 @@ impl VimState {
             match self.search.pattern.clone() {
                 Some(last) => {
                     search::set_pattern(self, ctx, last, forward);
-                    self.jump_to_current_match(ctx, forward, 1);
+                    let count = std::mem::take(&mut self.cmdline.search_count).max(1);
+                    self.jump_to_current_match(ctx, forward, count);
                     ctx.host.changed();
                 }
                 // vim reports E35 instead of a silent no-op (probe:
@@ -112,7 +118,8 @@ impl VimState {
         self.cmdline.history_pos = None;
         self.cmdline.stash = None;
         search::set_pattern(self, ctx, pattern, forward);
-        self.jump_to_current_match(ctx, forward, 1);
+        let count = std::mem::take(&mut self.cmdline.search_count).max(1);
+        self.jump_to_current_match(ctx, forward, count);
         ctx.host.changed();
     }
 
@@ -164,6 +171,7 @@ impl VimState {
         }
         self.discard_change_record();
         self.cmdline.buffer.clear();
+        self.cmdline.search_count = 0;
         // restore the previous highlight set — but only when `hlsearch` may
         // show one at all: with hlsearch OFF the pre-prompt set is empty,
         // and republishing `last_matches` here would leave permanent

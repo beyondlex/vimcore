@@ -2412,15 +2412,30 @@ impl VimState {
         if key.modifiers.is_plain() {
             match &key.kind {
                 KeyKind::Char('/') => {
+                    // the count rides INTO the prompt (3/foo = 3rd match)
+                    // instead of leaking into the next command (vim 9.1)
+                    self.cmdline.search_count = self.count.take().unwrap_or(0);
+                    self.register = None;
                     self.begin_cmdline('/');
                     return ProcessOutcome::Consumed;
                 }
                 KeyKind::Char('?') => {
+                    self.cmdline.search_count = self.count.take().unwrap_or(0);
+                    self.register = None;
                     self.begin_cmdline('?');
                     return ProcessOutcome::Consumed;
                 }
                 KeyKind::Char(':') => {
+                    // vim consumes a count into the RANGE: `3:` prefields
+                    // `.,.+2` (probe: `3:d<CR>` deletes 3 lines); without it
+                    // the count leaked and silently scaled the next command
+                    let count = self.count.take();
+                    self.register = None;
                     self.begin_cmdline(':');
+                    if let Some(n) = count {
+                        self.cmdline.buffer.push_str(".,.+");
+                        self.cmdline.buffer.push_str(&(n - 1).to_string());
+                    }
                     return ProcessOutcome::Consumed;
                 }
                 _ => {}
@@ -2572,6 +2587,8 @@ impl VimState {
                 self.visual_anchor.unwrap_or(self.cursor.offset),
                 self.cursor.offset,
             ));
+            self.count = None;
+            self.register = None;
             self.begin_cmdline(':');
             self.cmdline.buffer.push_str("'<,'>");
             return ProcessOutcome::Consumed;

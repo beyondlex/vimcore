@@ -4,6 +4,7 @@
 mod common;
 
 use common::{edit, Fixture};
+use vimcore::buffer::VimBuffer;
 
 /// PROBE: vim 9.1 `a1b2c3d2e` 上 `gg0t2;` → col 7（第二个 2 之前）。
 /// 旧引擎 `;` 从光标重扫，立即重新命中同一个 2，原地假成功。
@@ -219,4 +220,46 @@ fn guard_abort_resets_noremap_budget() {
         .map_str_noremap(vimcore::keymap::ModeClass::Normal, "w", "dd", true);
     f2.feed(["w"]);
     assert_eq!(f2.text(), "", "映射 w→dd 生效（若预算泄漏则 w 走词移动、缓冲不变）");
+}
+
+// ---- cmdline 的 count/register 卫生（vim 9.1 探针 P7/P8b/P9/P9b）----------
+
+/// PROBE: vim 9.1 `3:<CR>` → 光标落第 3 行：count 变成范围 `.,.+2` 并
+/// 被消费（引擎原先只开空提示符，count 挂着漏给下一条命令）。
+#[test]
+fn count_before_colon_becomes_range() {
+    let f = edit("a\nb\nc\nd\ne\n", 0, 0, &["3", ":", "enter"]);
+    assert_eq!(f.vim.cursor_offset(), 4, "3: 的范围末地址 = 第 3 行（1-based）");
+}
+
+/// PROBE: vim 9.1 `3:<Esc>` 后 `j` 只移动 1 行——count 在提示符取消时被消费。
+#[test]
+fn count_dropped_on_cancelled_colon() {
+    let f = edit("a\nb\nc\nd\ne\n", 0, 0, &["3", ":", "escape", "j"]);
+    assert_eq!(f.vim.cursor_offset(), 2, "取消后 count 不得放大后续 j");
+}
+
+/// PROBE: vim 9.1 `2/x<Esc>` 后 `x` 只删 1 个字符。
+#[test]
+fn count_dropped_on_cancelled_search() {
+    let f = edit("aXbXc\n", 0, 0, &["2", "/", "x", "escape", "x"]);
+    assert_eq!(f.text(), "XbXc\n", "取消的搜索不得让 x 删两个字符");
+}
+
+/// PROBE: vim 9.1 `3/foo<CR>`（光标不在匹配上）→ 跳到第 3 个匹配。
+#[test]
+fn count_before_search_jumps_to_nth_match() {
+    let f = edit("x\nfoo\ny\nfoo\nz\nfoo\n", 0, 0, &["3", "/", "f", "o", "o", "enter"]);
+    assert_eq!(
+        f.vim.cursor_offset(),
+        f.buf.line_start(5),
+        "3/foo 落第 3 个匹配"
+    );
+}
+
+/// visual `:` 的 count 被消费（vim 取消挂起的 count，不放大后续命令）。
+#[test]
+fn visual_colon_drops_count() {
+    let f = edit("a\nb\nc\n", 0, 0, &["V", "3", "v", ":", "escape", "j"]);
+    assert_eq!(f.vim.cursor_offset(), 2, "visual : 后 count 不得漏给 j");
 }
