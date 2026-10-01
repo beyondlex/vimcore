@@ -834,3 +834,64 @@ fn range_with_unset_named_mark_reports_e20() {
     assert_eq!(f.host.statuses, ["E20: Mark 'a not set"]);
     assert_eq!(f.text(), "abc\ndef\n");
 }
+
+// ---- Ex 范围语义三连（vim 9.1 探针实证，第十一轮）---------------------------
+
+/// 空命令带范围：vim 光标落范围的**最后一个地址**（`:2,5<CR>` 落第 5 行）。
+/// 引擎过去跳到 `first`，`:2,5` 落第 1 行。
+#[test]
+fn bare_range_command_moves_to_last_address() {
+    let mut f = Fixture::new("l1\nl2\nl3\nl4\nl5\n");
+    f.feed([":", "2", ",", "5", "<CR>"]);
+    assert_eq!(f.line(), 4, ":2,5<CR> 光标落第 5 行（末地址）");
+
+    // 单地址 `:5` 行为不变
+    let mut f = Fixture::new("l1\nl2\nl3\n");
+    f.feed([":", "2", "<CR>"]);
+    assert_eq!(f.line(), 1);
+}
+
+/// 多地址范围：vim 只保留**最后两个**地址（`:1,2,3d` 于 ['a','b','c','d']
+/// 删第 2-3 行，探针实证）。引擎过去保留首尾，删 1-3 行。
+#[test]
+fn multi_address_range_keeps_last_two() {
+    let mut f = Fixture::new("a\nb\nc\nd\n");
+    f.feed([":", "1", ",", "2", ",", "3", "d", "<CR>"]);
+    assert_eq!(f.text(), "a\nd\n");
+}
+
+/// 空地址默认当前行（两侧皆然）：`:,3d` 于第 2 行删 2-3、`:2,d` 于第 3 行
+/// 删 2-3（vim 探针）。跳过空段让两条命令都只删了单行。
+#[test]
+fn empty_range_address_defaults_to_cursor_line() {
+    let mut f = Fixture::at("a\nb\nc\nd\ne\n", 1, 0);
+    f.feed([":", ",", "3", "d", "<CR>"]);
+    assert_eq!(f.text(), "a\nd\ne\n");
+
+    let mut f = Fixture::at("a\nb\nc\nd\ne\n", 2, 0);
+    f.feed([":", "2", ",", "d", "<CR>"]);
+    assert_eq!(f.text(), "a\nd\ne\n");
+}
+
+// ---- `&` / 裸 `:s` 重放丢弃上一条的旗标（vim 探针）--------------------------
+
+/// vim 9.1：`s/a/B/g` 之后 `&` 于 "xaxax" 只替换首个匹配——`g` **不**随
+/// `&` 重放（`:h :&`）。引擎过去原样重放整条命令行，`g` 被保留。
+#[test]
+fn ampersand_repeat_drops_substitute_flags() {
+    let mut f = Fixture::new("xaxax\nxaxax\n");
+    f.feed([":", "s", "/", "a", "/", "B", "/", "g", "<CR>"]);
+    assert_eq!(f.text(), "xBxBx\nxaxax\n");
+    f.feed(["j", "&"]);
+    assert_eq!(f.text(), "xBxBx\nxBxax\n", "& 重放不带 g 旗标");
+}
+
+/// 裸 `:s` 与 `&` 同款：不带上一条的旗标。
+#[test]
+fn bare_colon_s_repeat_drops_substitute_flags() {
+    let mut f = Fixture::new("xaxax\nxaxax\n");
+    f.feed([":", "s", "/", "a", "/", "B", "/", "g", "<CR>"]);
+    f.feed(["j", ":"]);
+    f.feed(["s", "<CR>"]);
+    assert_eq!(f.text(), "xBxBx\nxBxax\n");
+}
