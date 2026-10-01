@@ -229,11 +229,17 @@ pub fn publish_incsearch(vim: &mut VimState, ctx: &mut Ctx, pattern: &str) {
 /// vim's gn prefers the current match, and `cgn` + `.` relies on "next after
 /// the cursor" afterwards. Returns None when there is no pattern or no match
 /// (the caller reports E35/E486).
+///
+/// `strict` skips the "match containing offset" preference: `2gN`'s second
+/// step must find the match BEFORE the one just selected — with the
+/// containing-preference the backward iteration kept re-selecting the same
+/// match (`range.start` is always contained in it).
 pub fn find_match_from(
     vim: &mut VimState,
     buf: &dyn VimBuffer,
     offset: usize,
     backward: bool,
+    strict: bool,
 ) -> Option<Range<usize>> {
     let pattern = vim.search.pattern.clone()?;
     if vim.search.matches_generation != Some(vim.edit_generation) {
@@ -242,7 +248,11 @@ pub fn find_match_from(
         vim.search.last_matches = matches;
     }
     let matches = &vim.search.last_matches;
-    let containing = matches.iter().find(|m| m.contains(&offset));
+    let containing = if strict {
+        None
+    } else {
+        matches.iter().find(|m| m.contains(&offset))
+    };
     let found = match containing {
         Some(m) => Some(m.clone()),
         None if backward => matches.iter().rev().find(|m| m.end <= offset).cloned(),
