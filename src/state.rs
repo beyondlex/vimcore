@@ -901,6 +901,24 @@ impl VimState {
                 i -= 1;
             }
             i
+        } else if cur < text.len()
+            && matches!(bytes[cur], b'x' | b'X' | b'b' | b'B')
+            && cur > 0
+            && bytes[cur - 1] == b'0'
+            && bytes.get(cur + 1).is_some_and(|&b| match bytes[cur] {
+                // the prefix only counts when a valid first digit follows
+                // (vim 9.1: cursor on the `b` of `0backup` finds NO number)
+                b'b' | b'B' => b == b'0' || b == b'1',
+                _ => b.is_ascii_hexdigit(),
+            })
+        {
+            // a radix-prefix LETTER counts as "on the number" (vim 9.1
+            // probe: cursor on the `x` of `0x1f` increments the whole
+            // literal to `0x20`; treating `x` as plain text grabbed the
+            // bare digit run `1` and spliced garbage around it). Anchor
+            // the run at the prefix's own `0` — the run=="0" branch below
+            // re-detects the radix and covers the full literal.
+            cur - 1
         } else {
             match (cur..text.len()).find(|&i| bytes[i].is_ascii_digit()) {
                 Some(i) => i,

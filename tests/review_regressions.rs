@@ -939,3 +939,42 @@ fn operator_with_unset_mark_bells_without_editing() {
     assert_eq!(f.text(), "aaa\nbbb\n");
     assert!(f.host.bells > 0);
 }
+
+// ---- <C-a> 光标落在进制前缀字母上（vim 9.1 探针实证）-------------------------
+
+/// vim 把 `0x1f` 的前缀字母 `x` 也视为「数字在光标处」：C-a 增的是整个
+/// 字面量（0x1f → 0x20）。旧实现把 `x` 当普通文本，向前抓到裸数字 `1`，
+/// 拼出 `00x2f` 这样的垃圾。`0XAB`/`0b101` 同理；前缀后无合法数位时
+/// （`0backup` 的 `b`）不算数字（vim 不动）。
+#[test]
+fn c_a_on_radix_prefix_letter_increments_whole_literal() {
+    let mut f = Fixture::new("v 0x1f\n");
+    f.feed(["0", "l", "l", "l", "<C-a>"]);
+    assert_eq!(f.text(), "v 0x20\n");
+
+    let mut f = Fixture::new("v 0XAB\n");
+    f.feed(["0", "l", "l", "l", "<C-a>"]);
+    assert_eq!(f.text(), "v 0XAC\n");
+
+    let mut f = Fixture::new("v 0b101\n");
+    f.feed(["0", "l", "l", "l", "2", "<C-a>"]);
+    assert_eq!(f.text(), "v 0b111\n");
+}
+
+/// 前缀字母的假阳性守卫：`0b` 后面不是 0/1 时不构成数字（vim: 缓冲不动，
+/// E18 报告）。
+#[test]
+fn c_a_on_bogus_binary_prefix_finds_no_number() {
+    let mut f = Fixture::new("0backup\n");
+    f.feed(["0", "l", "<C-a>"]);
+    assert_eq!(f.text(), "0backup\n");
+    assert!(f.host.statuses.iter().any(|s| s.contains("E18")));
+}
+
+/// 光标在 `077` 的前导 `0` 上：八进制 +1 = `0100`（宽度自然生长）。
+#[test]
+fn c_a_on_octal_leading_zero_grows_width() {
+    let mut f = Fixture::new("x077\n");
+    f.feed(["0", "l", "<C-a>"]);
+    assert_eq!(f.text(), "x0100\n");
+}
