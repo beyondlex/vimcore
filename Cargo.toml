@@ -21,3 +21,9 @@ ropey = "1"
 
 [profile.dev]
 opt-level = 1
+
+# fuzz 套件（fuzz_round7-13）在 test profile 下跑满管线预算（宏自递归的
+# @a 队列可重放 10 万键），opt-level 1 的调试构建要 78s——测试配置提到
+# 3，把重放路径压回秒级（增量编译代价可接受，见 NOTES 性能节）
+[profile.test]
+opt-level = 3
