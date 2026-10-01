@@ -3523,6 +3523,12 @@ impl VimState {
             // `r{char}` waits for its argument: the replacement is applied
             // in `complete_char_arg`'s VisualReplace arm
             VisualCmd::ReplaceChar => {}
+            // zz / zt / zb: report the anchored scroll and KEEP the
+            // selection — vim scrolls without leaving visual mode
+            VisualCmd::Scroll(anchor) => {
+                let line = ctx.buf.offset_to_line(self.cursor.offset);
+                ctx.host.scroll_to_line_anchored(line, anchor);
+            }
         }
     }
 

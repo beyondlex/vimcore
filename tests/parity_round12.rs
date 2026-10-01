@@ -275,3 +275,52 @@ fn set_noic_refreshes_live_highlights() {
     f.feed(&[":", "s", "e", "t", " ", "n", "o", "i", "c", "\r"]);
     assert_eq!(f.host.highlights.len(), 1);
 }
+
+// ---- 体验闭环(零宽搜索 / :5> / visual 滚动 / :marks)------------------------
+
+#[test]
+fn empty_line_pattern_finds_empty_lines() {
+    // /^$ 找到空行(vim 9.1 ggn 实证);旧实现把零宽匹配全滤掉报 E486
+    let f = edit("ab\n\ncd\n", 0, 0, &["/", "^", "$", "\r"]);
+    assert_eq!(f.line(), 1);
+    assert_eq!(f.cursor(), 3); // 空行行首
+}
+
+#[test]
+fn empty_line_pattern_no_phantom_match_after_trailing_newline() {
+    // 尾换行后的幻影位置不算匹配:n 在唯一空行上环绕停留
+    let f = edit("ab\n\ncd\n", 0, 0, &["/", "^", "$", "\r", "n"]);
+    assert_eq!(f.line(), 1);
+}
+
+#[test]
+fn shift_in_range_reports_e492_not_e16() {
+    // :5> 是 shift 命令(引擎不支持 → E492);旧实现把 > 当范围字符报 E16
+    let f = edit("a\nb\n", 0, 0, &[":", "5", ">", "\r"]);
+    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
+    assert!(last.starts_with("E492"), "got {last:?}");
+}
+
+#[test]
+fn visual_scroll_commands_keep_selection() {
+    // visual 模式 zz/zt/zb:滚动上报 + 保留选区(round11 悬置闭环,vim 行为)
+    let mut f = edit("one\ntwo\nthree\nfour\nfive\n", 0, 0, &["V", "j"]);
+    f.feed(&["z", "z"]);
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }), "selection survives zz");
+    assert_eq!(f.host.scrolled_to.last(), Some(&1));
+    f.feed(&["z", "t"]);
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
+    assert_eq!(f.host.scrolled_to.last(), Some(&1));
+    f.feed(&["z", "b"]);
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
+    assert_eq!(f.host.scrolled_to.last(), Some(&1));
+}
+
+#[test]
+fn marks_listing_dedupes_user_set_dot() {
+    // m. 设过 . mark 后,:marks 只列一行 .(旧实现 items + last_change 各一行)
+    let mut f = edit("a\nb\n", 0, 0, &["m", "."]);
+    f.feed(&[":", "m", "a", "r", "k", "s", "\r"]);
+    let dot_rows = f.host.statuses.iter().filter(|s| s.starts_with(". ")).count();
+    assert_eq!(dot_rows, 1, "dot mark listed once, got {:?}", f.host.statuses);
+}

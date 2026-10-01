@@ -63,8 +63,15 @@ pub fn all_matches(vim: &VimState, buf: &dyn VimBuffer, pattern: &str) -> Vec<Ra
     // whole-buffer scan stays. For per-edit cost control on huge files,
     // hosts use set_hlsearch_live_update(false) + refresh_highlights.
     let text = buf.slice(0..buf.len());
+    let ends_with_newline = text.ends_with('\n');
+    let len = text.len();
     re.find_iter(&text)
-        .filter(|m| !m.is_empty())
+        .filter(|m| {
+            // zero-width matches are real positions for search (`/^$` finds
+            // empty lines — vim 9.1), EXCEPT the phantom position after the
+            // final newline, which is no line at all
+            !(m.is_empty() && ends_with_newline && m.start() == len)
+        })
         .map(|m| m.start()..m.end())
         .take(10_000)
         .collect()
