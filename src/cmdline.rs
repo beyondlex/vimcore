@@ -641,8 +641,17 @@ impl VimState {
                 // `'a`-style marks: resolve through the mark table (the range
                 // scanner accepts any `'x`; dropping them here made
                 // `:'a,'b d` fail with E16 even though they parsed)
-                other if other.len() == 2 && other.starts_with('\'') => {
+                other if other.starts_with('\'') && other.len() > 1 => {
+                    // the name is one full char — a multi-byte char must not
+                    // be split (`:'中` panicking `split_at` was round12's
+                    // user-triggerable crash); vim reports E78 for unknown
+                    // mark *names*, E20 for unset ones.
                     let name = other[1..].chars().next().unwrap_or('\'');
+                    if !name.is_ascii_alphanumeric()
+                        && !matches!(name, '"' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | '.' | '^' | '\'' | '`')
+                    {
+                        return Err("E78: Unknown mark".to_owned());
+                    }
                     vim.marks
                         .resolve(name)
                         .map(|off| {
@@ -659,26 +668,44 @@ impl VimState {
             }
         }
         fn with_offset(base: usize, spec: &str) -> usize {
-            match spec.strip_prefix('-') {
-                Some(n) => base.saturating_sub(n.parse::<usize>().unwrap_or(0)),
-                None => match spec.strip_prefix('+') {
-                    Some(n) => base.saturating_add(n.parse::<usize>().unwrap_or(0)),
-                    _ => base,
-                },
+            // Chained offsets accumulate (`:5+2+1d` = line 8 — 9.1 probe);
+            // only the first run of `+`/`-` segments belongs to this address.
+            let mut value = base;
+            let mut rest = spec;
+            while !rest.is_empty() {
+                let (sign, digits) = match rest.strip_prefix('-') {
+                    Some(d) => (false, d),
+                    None => match rest.strip_prefix('+') {
+                        Some(d) => (true, d),
+                        None => break,
+                    },
+                };
+                let end = digits
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(digits.len());
+                let n: usize = digits[..end].parse().unwrap_or(0);
+                value = if sign {
+                    value.saturating_add(n)
+                } else {
+                    value.saturating_sub(n)
+                };
+                rest = &digits[end..];
             }
+            value
         }
         // split off the range part: a command starts at the first letter
         // that is not part of a `'<` / `'>` mark spec. Scan the allowed
-        // range alphabet manually.
-        let bytes = line.as_bytes();
+        // range alphabet manually, char-by-char so a multi-byte char after
+        // `'` (e.g. `:'中d`) can never push `range_end` into the middle of
+        // it — that made `line.split_at` panic (round12, user-triggerable).
         let mut range_end = 0usize;
         let mut i = 0usize;
-        while i < bytes.len() {
-            let c = bytes[i] as char;
+        while i < line.len() {
+            let c = line[i..].chars().next().unwrap();
             if c == '\'' {
-                // mark spec: ' + one char
-                i += 2;
-                range_end = i.min(bytes.len());
+                // mark spec: ' + one full char
+                i += 1 + line[i + 1..].chars().next().map_or(0, char::len_utf8);
+                range_end = i.min(line.len());
                 continue;
             }
             if c.is_ascii_digit()

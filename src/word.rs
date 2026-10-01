@@ -46,6 +46,13 @@ pub fn is_non_blank(buf: &dyn VimBuffer, offset: usize) -> bool {
     matches!(buf.char_at(offset), Some(c) if !c.is_whitespace())
 }
 
+/// A truly EMPTY line (no characters before the newline). vim's `w`/`b`
+/// family parks on empty lines only — a whitespace-only line ("   ") is
+/// skipped freely (9.1 probe: `w` over `abc | "   " | def` lands on `d`).
+fn is_empty_line(buf: &dyn VimBuffer, line: usize) -> bool {
+    matches!(buf.char_at(buf.line_start(line)), None | Some('\n'))
+}
+
 /// The next class run's start at or after `offset`, crossing lines freely.
 fn next_non_blank(buf: &dyn VimBuffer, offset: usize) -> Option<usize> {
     let mut o = offset;
@@ -91,8 +98,8 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
             Some('\n') => {
                 o += 1;
                 let line = buf.offset_to_line(o);
-                // stop on blank lines, otherwise continue skipping indent
-                if buf.line_is_blank(line) {
+                // stop on EMPTY lines only, otherwise continue skipping indent
+                if is_empty_line(buf, line) {
                     return buf.line_start(line);
                 }
             }
@@ -120,9 +127,12 @@ pub fn next_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
             }
         }
     }
-    // on a run end / blank: jump to the end of the next run
+    // on a run end / blank: jump to the end of the next run. When no run
+    // follows (cursor on the last word's end), the motion is a no-op —
+    // returning `buf.len()` made `ye`/`de` swallow the trailing newline
+    // (9.1 probe: `ye` at the end of the last word yanks just that word).
     let Some(start) = next_non_blank(buf, buf.next_char_offset(offset).unwrap_or(offset)) else {
-        return buf.len();
+        return offset;
     };
     let class = class_at(buf, start, big).unwrap_or(Class::Word);
     let mut o = start;
@@ -160,10 +170,11 @@ pub fn prev_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
         };
         match buf.char_at(prev) {
             Some('\n') => {
-                // crossing a line upwards: blank lines are skipped freely
+                // crossing a line upwards: EMPTY lines are parked on,
+                // whitespace-only ones are skipped freely (mirror of `w`)
                 let line = buf.offset_to_line(prev);
                 o = prev;
-                if buf.line_is_blank(line) {
+                if is_empty_line(buf, line) {
                     return buf.line_start(line);
                 }
             }
