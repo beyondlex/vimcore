@@ -895,3 +895,47 @@ fn bare_colon_s_repeat_drops_substitute_flags() {
     f.feed(["s", "<CR>"]);
     assert_eq!(f.text(), "xBxBx\nxBxax\n");
 }
+
+// ---- mark 跳转作为算子目标（d'a / d`a / y'a / c'a，vim 探针实证）-------------
+
+/// `d'a` 行级删除「当前行..mark 行」，与方向无关（vim 9.1：光标第 2 行、
+/// mark 第 3 行时删 2-3 行）。旧实现在 complete_char_arg 里只挪光标，
+/// 算子悬空——`d'a` 静默不动，下一个键还会被悬空的 d 污染。
+#[test]
+fn operator_with_mark_jump_deletes_through_mark_line() {
+    // 光标第 1 行、mark 第 2 行：删 1-2 行
+    let mut f = Fixture::new("aaa\nbbb\nccc\n");
+    f.feed(["j", "m", "a", "k", "d", "'", "a"]);
+    assert_eq!(f.text(), "ccc\n");
+
+    // 反方向：光标第 2 行、mark 第 1 行，删的也是两行
+    let mut f = Fixture::new("aaa\nbbb\nccc\n");
+    f.feed(["m", "a", "j", "d", "'", "a"]);
+    assert_eq!(f.text(), "ccc\n");
+}
+
+/// `y'a` 行级 yank 到 mark 行；`p` 把两行贴回去。
+#[test]
+fn yank_with_mark_jump_is_linewise() {
+    let mut f = Fixture::new("aaa\nbbb\nccc\n");
+    f.feed(["m", "a", "j", "k", "y", "'", "a", "j", "p"]);
+    assert_eq!(f.text(), "aaa\nbbb\naaa\nccc\n");
+}
+
+/// ``d`a`` 字级删「光标..mark」排他区间（vim 探针：'one two' 的 two 的 t
+/// 上设 mark，下一行行首 ``d`a`` → 'one three four'）。
+#[test]
+fn operator_with_backtick_mark_is_charwise_exclusive() {
+    let mut f = Fixture::new("one two\nthree four\n");
+    f.feed(["0", "f", "t", "m", "a", "j", "0", "d", "`", "a"]);
+    assert_eq!(f.text(), "one three four\n");
+}
+
+/// mark 未设置时 `d'a` 响铃且缓冲不动（plain `'x` 同款反馈）。
+#[test]
+fn operator_with_unset_mark_bells_without_editing() {
+    let mut f = Fixture::new("aaa\nbbb\n");
+    f.feed(["d", "'", "x"]);
+    assert_eq!(f.text(), "aaa\nbbb\n");
+    assert!(f.host.bells > 0);
+}

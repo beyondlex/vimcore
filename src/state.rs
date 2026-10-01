@@ -3662,25 +3662,28 @@ impl VimState {
                     None => ctx.host.bell(),
                 }
             }
-            CharArgCmd::JumpMark { linewise } => match self.marks.resolve(c) {
-                Some(offset) => {
-                    let origin = self.cursor.offset;
-                    let offset = crate::buffer::floor_to_char_boundary(ctx.buf, offset);
-                    if linewise {
-                        let line = ctx.buf.offset_to_line(offset);
-                        let target = ctx.buf.first_non_blank(line);
-                        self.cursor.offset = target;
-                        self.cursor.desired_col = None;
-                        ctx.host.scroll_to_line(line);
-                    } else {
-                        self.cursor.offset = offset;
-                        self.cursor.desired_col = None;
-                        ctx.host.scroll_to_line(ctx.buf.offset_to_line(offset));
+            CharArgCmd::JumpMark { linewise } => {
+                // Mirror of the Find arm: under an operator the mark jump is
+                // the SPAN target (`d'a` linewise-deletes through the mark's
+                // line, `d`a` charwise cursor..mark — direction-independent,
+                // vim 9.1 probes); without one it is a plain jump. Both go
+                // through Motion::MarkJump::target, which resolves
+                // `self.char_arg` (set above).
+                let motion = Motion::MarkJump { linewise };
+                let count = self.take_total_count();
+                if self.op.is_some() {
+                    let result = motion.target(self, ctx, count);
+                    if !result.moved {
+                        ctx.host.bell();
+                        self.reset_pending();
+                        return ProcessOutcome::Consumed;
                     }
-                    self.record_jump(origin, self.cursor.offset);
+                    let span = ops::span_from_motion(self, ctx.buf, motion, result);
+                    self.complete_operator_with_span(ctx, span);
+                } else if !self.goto_motion(ctx, motion, count) {
+                    ctx.host.bell();
                 }
-                None => ctx.host.bell(),
-            },
+            }
         }
         self.char_arg = None;
         self.end_command();
