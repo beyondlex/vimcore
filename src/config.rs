@@ -7,13 +7,15 @@ use crate::key::{parse_key_sequence, Key, KeyKind};
 use crate::keymap::ModeClass;
 use std::path::PathBuf;
 
-/// One `set` item. `On`/`Off`/`Toggle` are booleans; `Value` is `name=value`.
+/// One `set` item. `On`/`Off`/`Toggle` are booleans; `Value` is `name=value`;
+/// `Reset` is the `name&` default-reset form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Setting {
     On(String),
     Off(String),
     Toggle(String),
     Value(String, String),
+    Reset(String),
 }
 
 /// One mapping from the `:map` family, resolved against the file's
@@ -49,11 +51,41 @@ fn default_leader() -> Key {
     Key::char('\\')
 }
 
+/// Bind one `let mapleader = "x"`-style line into `target`. The variable
+/// name must end at the assignment (`let mapleader2` is an unrelated
+/// variable, not a leader binding); a matched-but-malformed line consumes
+/// nothing so it falls through to `ignored` with a trace.
+fn bind_let_leader(line: &str, prefix: &str, target: &mut Key) -> bool {
+    let Some(rest) = line.strip_prefix(prefix) else {
+        return false;
+    };
+    // word boundary + an actual `=` (after optional spaces)
+    let boundary_ok = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        && rest.trim_start().starts_with('=');
+    if !boundary_ok {
+        return false;
+    }
+    // let mapleader = " " / "," / "<Space>" — a bare space parses to
+    // Char(' ') via parse_key_sequence, and `<Space>` normalizes to
+    // Char(' ') in Key::parse_angle, so both spellings converge.
+    if let Some(value) = rest.split('=').nth(1) {
+        let value = value.trim().trim_matches('"');
+        if let Some(key) = parse_key_sequence(value).first() {
+            *target = key.clone();
+        }
+    }
+    true
+}
+
 /// Parse a configuration text. `mapleader` (via `let mapleader = "x"`)
 /// affects subsequent `<Leader>` occurrences, like vim.
 pub fn parse(text: &str) -> Config {
     let mut config = Config::default();
     let mut leader = default_leader();
+    let mut local_leader = default_leader();
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -63,31 +95,32 @@ pub fn parse(text: &str) -> Config {
             continue;
         }
 
-        // `let mapleader` and the `g:`-scoped spelling common in real vimrcs
-        // both bind the leader (`let g:mapleader = ","` used to fall through
-        // to `ignored` and every `<Leader>` mapping silently kept the
-        // default `\`)
-        let let_rest = line
-            .strip_prefix("let mapleader")
-            .or_else(|| line.strip_prefix("let g:mapleader"));
-        if let Some(rest) = let_rest {
-            // let mapleader = " " / "," / "<Space>" — a bare space parses to
-            // Char(' ') via parse_key_sequence, and `<Space>` normalizes to
-            // Char(' ') in Key::parse_angle, so both spellings converge.
-            if let Some(value) = rest.split('=').nth(1) {
-                let value = value.trim().trim_matches('"');
-                if let Some(key) = parse_key_sequence(value).first() {
-                    leader = key.clone();
-                }
-            }
+        // `let mapleader` / `let g:mapleader` / `let maplocalleader` /
+        // `let g:maplocalleader` bind the two leader keys. The variable name
+        // must END at the `=`: the old bare strip_prefix also swallowed
+        // `let mapleader2 = ";"` — an unrelated variable silently rebinding
+        // every `<Leader>` mapping with no trace in `ignored` (round 14).
+        if bind_let_leader(line, "let mapleader", &mut leader)
+            || bind_let_leader(line, "let g:mapleader", &mut leader)
+            || bind_let_leader(line, "let maplocalleader", &mut local_leader)
+            || bind_let_leader(line, "let g:maplocalleader", &mut local_leader)
+        {
+            // a leader binding never reaches the map family
             continue;
         }
 
         if let Some(rest) = line
             .strip_prefix("set")
-            .filter(|r| r.is_empty() || r.starts_with(' '))
+            .filter(|r| r.is_empty() || r.starts_with(' ') || r.starts_with('\t'))
         {
             for arg in rest.split_whitespace() {
+                // a `"` starts a comment to end of line (vim: `set ts=4 "
+                // note` sets quietly — the old parser emitted garbage
+                // On("\"")/On("note") settings that inflated
+                // ConfigStats::ignored at apply time)
+                if arg.starts_with('"') {
+                    break;
+                }
                 // Branch order matters twice over: `=` must win over `no`
                 // (`set no=3`? unlikely, but `name=value` is never a negation),
                 // and a leading `no` is only negation when the remainder names
@@ -97,6 +130,18 @@ pub fn parse(text: &str) -> Config {
                     Setting::Value(name.to_owned(), value.to_owned())
                 } else if let Some(name) = arg.strip_suffix('!') {
                     Setting::Toggle(name.to_owned())
+                } else if let Some(name) = arg
+                    .strip_suffix("&vim")
+                    .or_else(|| arg.strip_suffix("&vi"))
+                    .or_else(|| arg.strip_suffix('&'))
+                {
+                    // `set ts&` resets to the default (ex_set parity)
+                    Setting::Reset(name.to_owned())
+                } else if arg.ends_with('?') {
+                    // a query (`set ic?`) DISPLAYS a value; a config file has
+                    // no message channel, so the token is dropped quietly
+                    // instead of becoming a garbage On("ts?") setting
+                    continue;
                 } else if let Some(name) = arg
                     .strip_prefix("no")
                     .filter(|n| crate::options::is_bool_option(n))
@@ -110,7 +155,10 @@ pub fn parse(text: &str) -> Config {
             continue;
         }
 
-        if let Some(path) = line.strip_prefix("source").filter(|r| r.starts_with(' ')) {
+        if let Some(path) = line
+            .strip_prefix("source")
+            .filter(|r| r.starts_with(' ') || r.starts_with('\t'))
+        {
             // tilde expansion is the loader's job (parse stays pure)
             config.sources.push(PathBuf::from(path.trim()));
             continue;
@@ -148,12 +196,12 @@ pub fn parse(text: &str) -> Config {
                 continue;
             }
         };
-        let lhs = parse_with_leader(lhs_str, &leader);
+        let lhs = parse_with_leader(lhs_str, &leader, &local_leader);
         if lhs.is_empty() {
             config.ignored.push(raw_line.to_owned());
             continue;
         }
-        let rhs = parse_with_leader(rhs_str, &leader);
+        let rhs = parse_with_leader(rhs_str, &leader, &local_leader);
         for class in classes {
             config.mappings.push(ConfigMapping {
                 class,
@@ -189,15 +237,18 @@ fn split_ws2(s: &str) -> Option<(&str, &str)> {
 /// (`<Leader>` parses to a `Named("leader")` marker key), never by string
 /// replacement: re-parsing `leader.notation()` shatters multi-char keys —
 /// a `<Space>` leader would come back as S,p,a,c,e.
-fn parse_with_leader(seq: &str, leader: &Key) -> Vec<Key> {
+fn parse_with_leader(seq: &str, leader: &Key, local_leader: &Key) -> Vec<Key> {
     parse_key_sequence(seq)
         .into_iter()
-        .map(|k| {
-            if matches!(&k.kind, KeyKind::Named(n) if n == "leader") {
-                leader.clone()
-            } else {
-                k
-            }
+        .map(|k| match &k.kind {
+            // `<Leader>`/`<LocalLeader>` are marker keys from the angle
+            // notation; resolve them against the file's two let-variables.
+            // An unresolved `<LocalLeader>` used to stay Named("localleader")
+            // — a key no keyboard can produce, so the mapping silently never
+            // fired.
+            KeyKind::Named(n) if n == "leader" => leader.clone(),
+            KeyKind::Named(n) if n == "localleader" => local_leader.clone(),
+            _ => k,
         })
         .collect()
 }
