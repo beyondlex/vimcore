@@ -289,6 +289,16 @@ impl Fixture {
         self.vim.insert_text_at_cursor(&mut ctx, s);
     }
 
+    /// Simulate the IME committed-composition replacement path
+    /// (`VimState::replace_range` — the host swapping a composition range).
+    pub fn ime_replace(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let mut ctx = Ctx {
+            buf: &mut self.buf,
+            host: &mut self.host,
+        };
+        self.vim.replace_range(&mut ctx, range, text);
+    }
+
     pub fn text(&self) -> String {
         self.buf.0.borrow().clone()
     }
