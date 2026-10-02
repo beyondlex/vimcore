@@ -216,10 +216,6 @@ fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     );
 }
 
-fn addressable(off: usize, text: &str) -> bool {
-    off <= text.len() && (off == text.len() || text.is_char_boundary(off))
-}
-
 fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
     assert_addressable("cursor", f.vim.cursor_offset(), text, ctx);
     for (name, off) in f.vim.marks.items() {
