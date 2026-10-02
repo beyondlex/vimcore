@@ -688,6 +688,12 @@ impl VimState {
                 // wiped freshly typed text
                 MappingStep::Wait | MappingStep::Done => {
                     self.map_depth = 0;
+                    // mirror the drain-time cleanup below: a stale flag with
+                    // an empty queue would keep the cmdline-break check (next
+                    // call) from breaking out of a mapping-entered prompt
+                    if self.pending_keys.is_empty() {
+                        self.expanding_mapping = false;
+                    }
                     return KeyResult::Consumed;
                 }
                 MappingStep::FallThrough => {}
@@ -1663,6 +1669,12 @@ impl VimState {
             if rep.text.contains('\n') {
                 return;
             }
+            // clamp FIRST: the overwrite span and the replacement text must
+            // walk off the same copy count, or a clamped repeat makes the
+            // span swallow more than the text replaces (both legs used to
+            // disagree — unreachable without an >8MB session, but the two
+            // legs sharing one number is the only safe shape)
+            let copies = crate::ops::clamped_repeat_count(rep.expanded.len(), copies);
             let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(self.cursor.offset));
             let chars_per_copy = rep.text.chars().count();
             let mut end = self.cursor.offset;
@@ -1672,7 +1684,6 @@ impl VimState {
                     _ => break,
                 }
             }
-            let copies = crate::ops::clamped_repeat_count(rep.expanded.len(), copies);
             let extra = rep.expanded.repeat(copies);
             self.edit_replace(ctx, self.cursor.offset..end, &extra);
             self.cursor.offset += extra.len();
@@ -4278,6 +4289,27 @@ impl VimState {
     /// for `` ` ``/`'`/`m`, a replacement char for `r`). Esc cancels the
     /// whole pending command; a non-printable key is swallowed as "still
     /// waiting" (vim ignores it too, e.g. `r` followed by a stray arrow).
+    /// Shared tail of the `f`/`t`/`F`/`T` and `'`/`` ` `` arms (they were
+    /// character-for-character copies): under an operator the motion is the
+    /// SPAN target, without one it is a plain jump. Returns false when the
+    /// motion failed (bell + reset done; the arm must early-return).
+    fn char_arg_motion_jump(&mut self, ctx: &mut Ctx, motion: Motion) -> bool {
+        let count = self.take_total_count();
+        if self.op.is_some() {
+            let result = motion.target(self, ctx, count);
+            if !result.moved {
+                ctx.host.bell();
+                self.reset_pending();
+                return false;
+            }
+            let span = ops::span_from_motion(self, ctx.buf, motion, result);
+            self.complete_operator_with_span(ctx, span);
+        } else if !self.goto_motion(ctx, motion, count) {
+            ctx.host.bell();
+        }
+        true
+    }
+
     fn complete_char_arg(&mut self, ctx: &mut Ctx, key: Key) -> ProcessOutcome {
         let Some(cmd) = self.char_arg_cmd.take() else {
             return ProcessOutcome::Consumed;
@@ -4303,19 +4335,8 @@ impl VimState {
         match cmd {
             CharArgCmd::Find { forward, till } => {
                 self.last_find = Some((c, forward, till));
-                let motion = Motion::FindChar { forward, till };
-                let count = self.take_total_count();
-                if self.op.is_some() {
-                    let result = motion.target(self, ctx, count);
-                    if !result.moved {
-                        ctx.host.bell();
-                        self.reset_pending();
-                        return ProcessOutcome::Consumed;
-                    }
-                    let span = ops::span_from_motion(self, ctx.buf, motion, result);
-                    self.complete_operator_with_span(ctx, span);
-                } else if !self.goto_motion(ctx, motion, count) {
-                    ctx.host.bell();
+                if !self.char_arg_motion_jump(ctx, Motion::FindChar { forward, till }) {
+                    return ProcessOutcome::Consumed;
                 }
             }
             CharArgCmd::Replace => {
@@ -4397,25 +4418,12 @@ impl VimState {
                 }
             }
             CharArgCmd::JumpMark { linewise } => {
-                // Mirror of the Find arm: under an operator the mark jump is
-                // the SPAN target (`d'a` linewise-deletes through the mark's
-                // line, `d`a` charwise cursor..mark — direction-independent,
-                // vim 9.1 probes); without one it is a plain jump. Both go
-                // through Motion::MarkJump::target, which resolves
-                // `self.char_arg` (set above).
-                let motion = Motion::MarkJump { linewise };
-                let count = self.take_total_count();
-                if self.op.is_some() {
-                    let result = motion.target(self, ctx, count);
-                    if !result.moved {
-                        ctx.host.bell();
-                        self.reset_pending();
-                        return ProcessOutcome::Consumed;
-                    }
-                    let span = ops::span_from_motion(self, ctx.buf, motion, result);
-                    self.complete_operator_with_span(ctx, span);
-                } else if !self.goto_motion(ctx, motion, count) {
-                    ctx.host.bell();
+                // Under an operator the mark jump is the SPAN target (`d'a`
+                // linewise-deletes through the mark's line, `d`a` charwise
+                // cursor..mark — direction-independent, vim 9.1 probes);
+                // without one it is a plain jump.
+                if !self.char_arg_motion_jump(ctx, Motion::MarkJump { linewise }) {
+                    return ProcessOutcome::Consumed;
                 }
             }
         }

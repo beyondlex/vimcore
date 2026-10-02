@@ -796,7 +796,8 @@ fn substitute_at_caret_prepends_to_the_line() {
     let mut f = Fixture::new("hello\nworld\n");
     f.feed([":", "s", "/", "^", "/", ">", "/", "<CR>"]);
     assert_eq!(f.text(), ">hello\nworld\n");
-    assert_eq!(f.host.statuses, ["1 substitutions"]);
+    // vim: exactly one substitution reports nothing (status stays empty)
+    assert_eq!(f.host.statuses, Vec::<String>::new());
 }
 
 #[test]
@@ -804,7 +805,7 @@ fn substitute_dollar_appends_across_range() {
     let mut f = Fixture::new("hello\nworld\n");
     f.feed([":", "%", "s", "/", "$", "/", "<", "/", "<CR>"]);
     assert_eq!(f.text(), "hello<\nworld<\n");
-    assert_eq!(f.host.statuses, ["2 substitutions"]);
+    assert_eq!(f.host.statuses, ["2 substitutions on 2 lines"]);
 }
 
 /// `a*` 在无 `a` 文本上每处都是零宽匹配：vim `:s/a*/-/` 得 "-bbb"。
@@ -813,7 +814,7 @@ fn substitute_star_pattern_replaces_empty_match() {
     let mut f = Fixture::new("bbb\n");
     f.feed([":", "s", "/", "a", "*", "/", "-", "/", "<CR>"]);
     assert_eq!(f.text(), "-bbb\n");
-    assert_eq!(f.host.statuses, ["1 substitutions"]);
+    assert_eq!(f.host.statuses, Vec::<String>::new());
 }
 
 // ---- 未设置 mark 的范围报错（vim 实证 E20）-----------------------------------

@@ -1589,8 +1589,12 @@ impl VimState {
                 ctx.host.bell();
                 return true;
             }
-            ctx.host
-                .status_message(&format!("{total} matches on {lines_with} lines"));
+            let msg = if lines_with == 1 {
+                format!("{total} match on 1 line")
+            } else {
+                format!("{total} matches on {lines_with} lines")
+            };
+            ctx.host.status_message(&msg);
             return true;
         }
         let mut builder = search::compile(self, &pattern);
@@ -1617,6 +1621,7 @@ impl VimState {
         let range_end = ctx.buf.line_end(last_line);
         let mut joined: Vec<String> = Vec::new();
         let mut total = 0usize;
+        let mut lines_with = 0usize;
         // the cursor lands on the LAST SUBSTITUTED line, at its first
         // non-blank (vim 9.1 probes: `%s` over lines where the tail has no
         // matches ends on the last line that changed). Line numbers are
@@ -1649,6 +1654,7 @@ impl VimState {
             .to_string();
             if hits > 0 {
                 total += hits;
+                lines_with += 1;
                 last_sub_line = Some(line_no);
             }
             joined.push(replaced);
@@ -1680,7 +1686,16 @@ impl VimState {
             self.cursor.desired_col = None;
         }
         self.bump(ctx);
-        ctx.host.status_message(&format!("{total} substitutions"));
+        // vim's report: exactly ONE substitution is silent (status empty);
+        // more read "{n} substitutions on {m} lines" with a singular "line"
+        if total > 1 {
+            let msg = if lines_with == 1 {
+                format!("{total} substitutions on 1 line")
+            } else {
+                format!("{total} substitutions on {lines_with} lines")
+            };
+            ctx.host.status_message(&msg);
+        }
         // `.` repeats the substitution at the cursor's line
         self.commit_change_record();
         true
