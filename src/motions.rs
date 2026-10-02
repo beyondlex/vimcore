@@ -40,6 +40,11 @@ pub enum Motion {
         reverse: bool,
     }, // ; ,
     MatchBracket, // %
+    /// Typed `1%`: the file-percentage form with the count NOT collapsed.
+    /// `1G` has the same absent-vs-typed-1 ambiguity and is rewritten to
+    /// `gg`; here the rewrite lands on this variant (state.rs) because the
+    /// percentage formula needs the original count.
+    GoToFilePercent,
     GoToLine {
         first: bool,
     }, // gg / G
@@ -130,6 +135,7 @@ impl Motion {
             Motion::Up
             | Motion::Down
             | Motion::GoToLine { .. }
+            | Motion::GoToFilePercent
             | Motion::ScreenTop
             | Motion::ScreenMiddle
             | Motion::ScreenBottom
@@ -366,10 +372,25 @@ impl Motion {
             }
             // %: jump to the bracket matching the one under the cursor.
             // With an explicit count vim jumps to that PERCENTAGE of the
-            // file instead (`50%` = halfway down, first non-blank).
+            // file instead (`50%` = halfway down, first non-blank); the
+            // typed `1%` form arrives as [`Motion::GoToFilePercent`].
+            //
+            // vim's formula is ceil on the 1-based line: `(count*total+99)/100`
+            // (nv_percent). The naive floor `count*total/100` was one line
+            // low whenever the product was an exact multiple of 100 (9.1:
+            // `2%` on 200 lines = line 4, not 5; `50%` = 100, not 101).
+            // Counts above 100 are rejected by vim (clearopbeep).
             Motion::MatchBracket if count > 1 => {
+                if count > 100 {
+                    return MotionResult::stuck(vim.cursor.offset);
+                }
                 let total = buf.line_count() as u64;
-                let line = (count as u64 * total / 100).clamp(0, total - 1) as usize;
+                let line = (((count as u64 * total + 99) / 100).clamp(1, total) - 1) as usize;
+                MotionResult::new(buf.line_start(line), MotionKind::Linewise)
+            }
+            Motion::GoToFilePercent => {
+                let total = buf.line_count().max(1) as u64;
+                let line = (((total + 99) / 100).clamp(1, total) - 1) as usize;
                 MotionResult::new(buf.line_start(line), MotionKind::Linewise)
             }
             Motion::MatchBracket => match word::match_bracket(buf, vim.cursor.offset) {

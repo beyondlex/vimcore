@@ -2730,6 +2730,18 @@ impl VimState {
                 {
                     motion = Motion::GoToLine { first: true };
                 }
+                // Same collapse for `%`: bare `%` matches the bracket under
+                // the cursor, but TYPED `1%` is the file-percentage form
+                // (vim's nv_percent accepts any count 1..=100). The old
+                // `count > 1` guard turned `1%` into a bracket search that
+                // belled on bracket-less lines (9.1: `1%` on 200 lines lands
+                // on line 2). GoToFilePercent computes the 1% line directly.
+                if motion == (Motion::MatchBracket)
+                    && self.count == Some(1)
+                    && self.op_count.is_none()
+                {
+                    motion = Motion::GoToFilePercent;
+                }
                 let count = self.take_total_count();
                 // Remember a `cw`-family command: its span gets special
                 // post-processing below. (The old approach rewrote the
