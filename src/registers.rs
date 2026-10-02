@@ -148,24 +148,19 @@ impl Registers {
     /// Yank semantics: explicit register, else `"0` + unnamed.
     pub fn store_yank(&mut self, explicit: Option<char>, text: String, kind: RegisterKind) {
         match explicit {
+            // `"_yy` writes NOTHING: vim keeps both the blackhole slot empty
+            // and the unnamed register untouched (9.1 probe: `"_yy` then `p`
+            // pastes nothing; `:h quote_`). The old fall-through re-pointed
+            // `last` at the yanked text anyway, so `p` resurrected it.
+            Some(BLACKHOLE) => {}
             Some(name) if name != UNNAMED => {
-                self.store(name, text.clone(), kind);
+                self.store(name, text, kind);
                 // an uppercase append re-points `last` at the MERGED register
-                // inside `store`; don't clobber it with the fragment below
-                if name.is_ascii_uppercase() {
-                    return;
-                }
+                // inside `store`; lowercase named stores do the same — no
+                // separate `last` write is needed or wanted here
             }
-            _ => self.store(YANK, text.clone(), kind),
+            _ => self.store(YANK, text, kind),
         }
-        // A yank ALWAYS re-points the unnamed register at what was written —
-        // including `"_yy`, where `store` skips the named slot but vim 9.1
-        // still serves the yanked text through `""`/`p` afterwards (the
-        // unnamed register is an alias for the last-written register).
-        // Deleting into `"_` (store_delete) is the opposite: vim keeps the
-        // previous unnamed register untouched there, which `store`'s early
-        // return gives us for free.
-        self.last = Some(Register { text, kind });
     }
 
     /// Delete semantics: explicit register, else the numbered ring for
