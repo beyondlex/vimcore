@@ -2793,14 +2793,29 @@ impl VimState {
                 ops::delete_chars(self, ctx, count, false, register);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
+                // commit like the trie-routed `x`: without it the Del is not
+                // `.`-repeatable and its recorded key lingers in the pending
+                // recording, baking into the NEXT change's replay record
+                self.end_command();
                 return Some(ProcessOutcome::Consumed);
             }
             _ => return None,
         };
+        // a navigation key completes a PENDING OPERATOR like any motion
+        // (`d<Down>` = `dj`, vim): route through execute_command so the
+        // count merges (2d3<Down>) and the operator pipeline runs whole
+        if self.op.is_some() {
+            return Some(self.execute_command(ctx, CmdKind::Motion(motion)));
+        }
         let count = self.count.take().unwrap_or(1);
         if !self.goto_motion(ctx, motion, count) {
             ctx.host.bell();
         }
+        // end-of-command bookkeeping, same as execute_command's Motion arm:
+        // without the commit, the recorded motion key survives into the NEXT
+        // change's `.` record (`<Down>` then `x` then `.` replayed
+        // [Down, x] — vim's redo buffer never contains plain motions)
+        self.end_command();
         Some(ProcessOutcome::Consumed)
     }
 
