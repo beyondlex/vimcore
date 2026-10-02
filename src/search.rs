@@ -189,7 +189,6 @@ pub fn search_word_under_cursor(
         let escaped = regex::escape(&literal);
         let pattern = format!(r"\b{escaped}\b");
         set_pattern_inner(vim, buf, host, pattern, forward);
-        vim.search.forward = forward;
         return true;
     }
     // a non-word, non-blank char: search it literally (no word boundaries —
@@ -198,7 +197,6 @@ pub fn search_word_under_cursor(
         Some(c) if !c.is_whitespace() => {
             let pattern = regex::escape(&c.to_string());
             set_pattern_inner(vim, buf, host, pattern, forward);
-            vim.search.forward = forward;
             true
         }
         _ => false,

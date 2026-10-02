@@ -105,8 +105,11 @@ impl Marks {
             return;
         }
         let delta = new_len as isize - (range.end - range.start) as isize;
-        // case operators replace with equal-length text: keep inner marks at
-        // their relative position, like vim's column-preserving adjustment
+        // equal-length replacement (case operators, `~`): inner marks keep
+        // their BYTE position untouched — the text at that byte changed but
+        // the length didn't. (`refloor_stored_offsets` still floors any mark
+        // that now sits mid-character after a same-length swap with wider
+        // chars, so this pass intentionally does no boundary checking.)
         let preserve_inner = new_len == range.end - range.start;
         self.for_each_pos(move |pos| {
             if *pos >= range.end {

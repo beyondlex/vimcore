@@ -367,6 +367,19 @@ pub fn yank_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: Opt
 }
 
 /// Apply an operator to a span (operator-pending and visual paths).
+/// `daw`/`caw` on whitespace whose word sits on a FOLLOWING line: vim merges
+/// that line away too (9.1 probe: `daw` on the blank line of
+/// ["foo","   ","bar"] leaves just ["foo"] — the word's line break goes with
+/// it). The fingerprint is a charwise span starting on whitespace, containing
+/// a newline, and ending right before the word's line break; both operators
+/// extend the span over that `\n`.
+fn merges_following_line_break(buf: &dyn VimBuffer, span: &OpSpan) -> bool {
+    !span.linewise
+        && buf.char_at(span.end) == Some('\n')
+        && matches!(buf.char_at(span.start), Some(c) if c.is_whitespace())
+        && buf.slice(span.start..span.end).contains('\n')
+}
+
 pub fn apply(
     vim: &mut VimState,
     ctx: &mut Ctx,
@@ -376,18 +389,8 @@ pub fn apply(
 ) {
     match op {
         Operator::Delete => {
-            // `daw` on whitespace whose word sits on a FOLLOWING line: vim's
-            // delete merges that line away too (9.1 probe: `daw` on the
-            // blank line of ["foo","   ","bar"] leaves just ["foo"] — the
-            // word's line break goes with it). The fingerprint is a
-            // charwise span starting on whitespace, containing a newline,
-            // and ending right before the word's line break.
             let mut span = *span;
-            if !span.linewise
-                && ctx.buf.char_at(span.end) == Some('\n')
-                && matches!(ctx.buf.char_at(span.start), Some(c) if c.is_whitespace())
-                && ctx.buf.slice(span.start..span.end).contains('\n')
-            {
+            if merges_following_line_break(ctx.buf, &span) {
                 span.end += 1;
             }
             delete_span(vim, ctx, &span, register)
@@ -415,13 +418,10 @@ pub fn apply(
                     linewise: false,
                 }
             } else {
-                // `caw` on whitespace shares the delete-side merge: the
-                // following line's break goes away with the word
+                // `caw` shares the delete-side merge (see
+                // [`merges_following_line_break`])
                 let mut merged = *span;
-                if ctx.buf.char_at(merged.end) == Some('\n')
-                    && matches!(ctx.buf.char_at(merged.start), Some(c) if c.is_whitespace())
-                    && ctx.buf.slice(merged.start..merged.end).contains('\n')
-                {
+                if merges_following_line_break(ctx.buf, &merged) {
                     merged.end += 1;
                 }
                 merged

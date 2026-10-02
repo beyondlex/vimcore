@@ -253,16 +253,16 @@ impl VimBuffer for TckStrBuf {
             .map(|c| offset - c.len_utf8())
     }
     fn line_range(&self, line: usize) -> Range<usize> {
-        if line >= self.line_count() {
-            return self.0.len()..self.0.len();
-        }
-        let parts = self.0.split('\n');
-        let total = self.line_count();
+        // single pass: walk the pieces once, counting as we go — the old
+        // shape called line_count() up front (a full split/count) and again
+        // for `total`, so every line_start/line_end/line_content via the
+        // trait defaults cost three O(text) scans per call
         let mut start = 0;
-        for (i, part) in parts.enumerate() {
+        let mut i = 0usize;
+        for part in self.0.split('\n') {
             if i == line {
                 // 终止 \n 存在就包含进 range；末行延伸到缓冲区尾
-                let end = if i + 1 < total {
+                let end = if start + part.len() < self.0.len() {
                     start + part.len() + 1
                 } else {
                     self.0.len()
@@ -270,8 +270,10 @@ impl VimBuffer for TckStrBuf {
                 return start..end;
             }
             start += part.len() + 1;
+            i += 1;
         }
-        unreachable!()
+        // line >= line_count: the phantom line past the end
+        self.0.len()..self.0.len()
     }
     fn offset_to_line(&self, offset: usize) -> usize {
         // offsets arrive from OUTSIDE (stored marks, host clicks) and can be
