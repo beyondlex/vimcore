@@ -981,3 +981,69 @@ fn c_a_on_octal_leading_zero_grows_width() {
     f.feed(["0", "l", "<C-a>"]);
     assert_eq!(f.text(), "x0100\n");
 }
+
+// ---- navigation keys (arrows / Del) vs the `.` record and operators ----------
+
+/// 方向键不属于「修改」，vim 的 redo 缓冲永远不含纯 motion：`<Down>` 后 `x`
+/// 再 `.`，只重放 `x`（在当前光标删一个字符），不下移。旧实现把
+/// `<Down>` 留在未提交的 recording 里，被下一条修改命令一并烤进
+/// `last_change`，`.` 变成「下移+删字符」。
+#[test]
+fn arrow_key_never_leaks_into_dot_replay() {
+    let mut f = Fixture::at("abc\ndef\nghi\n", 0, 0);
+    f.feed(["down", "x", "."]);
+    assert_eq!(f.text(), "abc\nf\nghi\n");
+}
+
+/// 同一污染窗口的镜像：修改提交后按方向键、再按一个纯 motion，
+/// 未提交的方向键不会活到下一条命令（此前依赖「后续 motion 的提交顺带
+/// 清掉」，方向键自身提交后该窗口彻底关闭）。
+#[test]
+fn arrow_key_after_commit_does_not_replay() {
+    let mut f = Fixture::at("abc\ndef\nghi\n", 0, 1);
+    f.feed(["x", "down", "j", "."]);
+    // `.` repeats just the `x`: deletes 'h' on line 3 (cursor moved 2 down)
+    assert_eq!(f.text(), "ac\ndef\ngi\n");
+}
+
+/// `<Del>` 是完整的删除命令：自身可被 `.` 重复（旧实现从不提交
+/// change record，`.` 重放的还是上上条命令或什么都没有）。
+#[test]
+fn delete_key_is_repeatable_by_dot() {
+    let mut f = Fixture::at("abc\n", 0, 0);
+    f.feed_raw(Key::named("delete"));
+    f.feed(["."]);
+    assert_eq!(f.text(), "c\n");
+}
+
+/// Del 删除后紧跟的下一命令的 `.` 记录不被 Del 污染。
+#[test]
+fn delete_key_pollutes_no_later_record() {
+    let mut f = Fixture::at("abc\ndef\n", 0, 0);
+    f.feed_raw(Key::named("delete"));
+    f.feed(["j", "d", "d"]);
+    assert_eq!(f.text(), "bc\n");
+    f.feed(["."]); // replays just dd
+    assert_eq!(f.text(), "");
+}
+
+/// 操作符可以吃方向键作为 motion：`d<Down>` = `dj`（vim 同款）。旧实现里
+/// 方向键绕过 operator 管线直接移动光标，操作符悬空、下一个键响铃取消。
+#[test]
+fn operator_completes_with_arrow_motion() {
+    let mut f = Fixture::at("abc\ndef\nghi\n", 0, 0);
+    f.feed(["d"]);
+    f.feed_raw(Key::named("down"));
+    assert_eq!(f.text(), "ghi\n");
+}
+
+/// 前缀计数并入 motion 计数走完整管线：`2d<Down>` = `d2<Down>`，从第 3 行
+/// 下移 2 行 → linewise 删 l3..l5 共 3 行（vim 计数规则：2d3w = 6w）。
+#[test]
+fn operator_arrow_count_merges() {
+    let mut f = Fixture::at("l1\nl2\nl3\nl4\nl5\nl6\nl7\n", 2, 0);
+    f.feed(["2"]);
+    f.feed(["d"]);
+    f.feed_raw(Key::named("down"));
+    assert_eq!(f.text(), "l1\nl2\nl6\nl7\n");
+}
