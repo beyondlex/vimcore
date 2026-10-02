@@ -30,6 +30,15 @@ impl VimState {
             return ProcessOutcome::Consumed;
         }
 
+        // <C-h> = Backspace (vim binds them identically in insert). Only the
+        // RAW `\x08` byte reached the backspace path before; gpui-style hosts
+        // deliver the normalized chord and it fell through as Unknown —
+        // swallowed, nothing deleted.
+        if key == Key::ctrl_char('h') {
+            self.insert_backspace(ctx);
+            return ProcessOutcome::Consumed;
+        }
+
         if key.modifiers.is_plain() {
             if let KeyKind::Named(name) = &key.kind {
                 match name.as_str() {
