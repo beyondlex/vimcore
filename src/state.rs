@@ -1548,6 +1548,33 @@ impl VimState {
             return;
         }
         let copies = rep.count - 1;
+        // Replace sessions OVERWRITE on repeat instead of inserting: each
+        // copy consumes as many characters as the typed text has (9.1:
+        // `3Rab<Esc>` on "abcdefghij" → "abababghij"). Still in Replace mode
+        // here — exit_insert flips to Normal after this runs. A session that
+        // typed a newline keeps the repeat off: the overwrite span and the
+        // seam line model both assume single-line typing (arrows/BS bail via
+        // the end-of-text invariant above; Enter does not).
+        if self.mode == Mode::Replace {
+            if rep.text.contains('\n') {
+                return;
+            }
+            let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(self.cursor.offset));
+            let chars_per_copy = rep.text.chars().count();
+            let mut end = self.cursor.offset;
+            for _ in 0..copies * chars_per_copy {
+                match ctx.buf.next_char_offset(end) {
+                    Some(next) if next <= line_end => end = next,
+                    _ => break,
+                }
+            }
+            let copies = crate::ops::clamped_repeat_count(rep.expanded.len(), copies);
+            let extra = rep.expanded.repeat(copies);
+            self.edit_replace(ctx, self.cursor.offset..end, &extra);
+            self.cursor.offset += extra.len();
+            self.cursor.desired_col = None;
+            return;
+        }
         if rep.linewise {
             if rep.text.contains('\n') {
                 return;
@@ -2876,13 +2903,15 @@ impl VimState {
             }
             CmdKind::EnterInsert(insert) => {
                 // vim's count-repeat insert: a count typed before i/a/I/A/
-                // gI/gi/o/O repeats the typed text that many times on exit
-                // (for c/s the count belongs to the motion; Replace and
-                // visual-block sessions never repeat)
+                // gI/gi/o/O/R repeats the typed text that many times on exit
+                // (for c/s the count belongs to the motion; visual-block
+                // sessions never repeat). Replace REPEATS (9.1 probe:
+                // `3Rab<Esc>` on "abcdefghij" → "abababghij") — the old
+                // exclusion silently dropped the count and typed one group.
                 let count = self.take_total_count();
                 self.start_insert(ctx, insert);
                 if count > 1
-                    && !matches!(insert, InsertKind::Change | InsertKind::Replace)
+                    && !matches!(insert, InsertKind::Change)
                     && self.block_insert.is_none()
                 {
                     self.insert_repeat = Some(InsertRepeat {
