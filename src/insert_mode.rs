@@ -243,6 +243,29 @@ impl VimState {
             return;
         }
 
+        // autoindent: BS at the end of an untouched whitespace-only line
+        // deletes the WHOLE autoindent in one stroke, not one char (vim 9.1
+        // probe S5: `o<BS>` leaves the line empty). Only fires while the
+        // line's indent is pure autoindent (`insert_did_ai`) — typing
+        // anything disarms it and BS degrades to per-char deletes.
+        if self.insert_did_ai && at > line_start {
+            let le = ctx.buf.line_end(ctx.buf.offset_to_line(at));
+            if at == le
+                && ctx
+                    .buf
+                    .slice(line_start..le)
+                    .chars()
+                    .all(char::is_whitespace)
+            {
+                self.begin_edit();
+                self.edit_delete(ctx, line_start..at);
+                self.cursor.offset = line_start;
+                self.republish_search(ctx);
+                ctx.host.changed();
+                return;
+            }
+        }
+
         if at > line_start {
             if let Some(prev) = ctx.buf.prev_char_offset(at) {
                 self.begin_edit();
