@@ -1071,23 +1071,27 @@ impl VimState {
             // group for a no-op edit, burning one `u` on unchanged text
             return;
         }
-        let mut lines: Vec<String> = (first..=last).map(|l| ctx.buf.line_content(l)).collect();
-        let lower = |s: &str| {
-            if ignore_case {
-                s.to_lowercase()
-            } else {
-                s.to_owned()
-            }
-        };
-        lines.sort_by_key(|s| lower(s));
-        if unique && ignore_case {
-            // vim folds the dedup when `i` is set (`%sort iu` on
-            // [foo,FOO,bar] → [bar,foo], probe). The stable case-insensitive
-            // sort puts the original-first variant ahead, so plain dedup_by
-            // keeps exactly the survivor vim keeps.
-            lines.dedup_by(|a, b| lower(a) == lower(b));
-        } else if unique {
-            lines.dedup();
+        // decorate-sort-undecorate: the sort key is computed ONCE per line
+        // instead of in every comparison (the old `sort_by_key(lower(s))`
+        // re-allocated the lowercased copy O(n log n) times)
+        let mut lines: Vec<(String, String)> = (first..=last)
+            .map(|l| {
+                let text = ctx.buf.line_content(l);
+                let key = if ignore_case {
+                    text.to_lowercase()
+                } else {
+                    text.clone()
+                };
+                (key, text)
+            })
+            .collect();
+        lines.sort_by(|a, b| a.0.cmp(&b.0));
+        if unique {
+            // case-insensitive dedup folds the variants vim keeps: the
+            // stable sort puts the original-first spelling ahead (`%sort iu`
+            // on [foo,FOO,bar] → [bar,foo], probe). Case-sensitive dedup
+            // compares the same key (it IS the line).
+            lines.dedup_by(|a, b| a.0 == b.0);
         }
         if reverse {
             lines.reverse();
@@ -1097,7 +1101,11 @@ impl VimState {
         // the range includes the last line's terminating newline — the join
         // must give it back or `:%sort` shaves the buffer's final newline
         let had_trailing_newline = ctx.buf.slice(start..end).ends_with('\n');
-        let mut new_text = lines.join("\n");
+        let mut new_text = lines
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
         if had_trailing_newline {
             new_text.push('\n');
         }
