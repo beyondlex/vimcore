@@ -212,7 +212,31 @@ pub fn object_span(
     buf: &dyn VimBuffer,
     object: objects::TextObject,
 ) -> Option<OpSpan> {
-    let range = objects::range(buf, vim.cursor.offset, object)?;
+    object_span_count(vim, buf, object, 1)
+}
+
+/// [`object_span`] with an explicit repetition count (`d2aw`, `v3ap`).
+pub fn object_span_count(
+    vim: &VimState,
+    buf: &dyn VimBuffer,
+    object: objects::TextObject,
+    count: usize,
+) -> Option<OpSpan> {
+    let mut range = objects::range(buf, vim.cursor.offset, object)?;
+    // a count repeats the object by RE-SCANNING from the span's end (vim
+    // 9.1: `v2aw` covers "foo bar ", `v2i"` both quoted strings, `v2i(`
+    // climbs to the enclosing block, `v2ap` the next paragraph — all fall
+    // out of scan-from-end). It even reproduces vim's odd inner-word
+    // counting: `2iw` = "foo " (word + its trailing blank run), `3iw` =
+    // "foo bar" on "foo bar baz". The old engine dropped the count
+    // entirely, so `d2aw` behaved as `daw`.
+    for _ in 1..count.max(1) {
+        let end = range.end.min(buf.len());
+        match objects::range(buf, end, object) {
+            Some(next) if next.end > range.end => range.end = next.end,
+            _ => break,
+        }
+    }
     Some(span_from_object(range))
 }
 
@@ -258,6 +282,7 @@ pub fn delete_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: O
         return;
     }
     let text = ctx.buf.slice(span.start..span.end);
+    crate::registers::sync_clipboard_host(ctx.host, register, &text);
     vim.registers
         .store_delete(register, text, register_kind(span));
     vim.edit_delete(ctx, span.start..span.end);
@@ -362,6 +387,7 @@ pub fn yank_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: Opt
         return;
     }
     let text = ctx.buf.slice(span.start..span.end);
+    crate::registers::sync_clipboard_host(ctx.host, register, &text);
     vim.registers
         .store_yank(register, text, register_kind(span));
 }
@@ -497,42 +523,56 @@ pub fn toggle_case(c: char) -> String {
     }
 }
 
-/// Shift one line by `shiftwidth` left or right.
+/// Shift one line left/right by `shiftwidth` — vim's COLUMN model: the
+/// indent's display column (tabstop-aware) moves ±sw, then the new indent is
+/// RE-EXPRESSED (as many whole tabs as fit under 'tabstop', the remainder in
+/// spaces, all spaces under 'expandtab'). vim 9.1 probes, noet ts=8 sw=4:
+/// `<<` on `\tx` → `    x`, on `\t\tx` → `\t    x`; `>>` on col-5 indent →
+/// `\t x`; et sw=4: `>>` on `x` → `    x`. The old model peeled bytes (a tab
+/// = a whole sw unit) and always inserted a raw tab, diverging on every
+/// ts≠sw or mixed-indent buffer.
 pub fn shift_line(vim: &mut VimState, ctx: &mut Ctx, line: usize, right: bool) {
     if line >= ctx.buf.line_count() {
         return;
     }
     let start = ctx.buf.line_start(line);
-    let (indent, blank) = ctx.buf.line_indent(line);
-    if blank {
+    let end = ctx.buf.line_end(line);
+    if end == start {
+        // an EMPTY line stays empty (vim skips it; 9.1 probe)
         return;
     }
-    let sw = vim.options.shiftwidth.max(1);
-    if right {
-        let unit = if vim.options.expandtab {
-            " ".repeat(sw)
-        } else {
-            "\t".to_owned()
-        };
-        vim.edit_insert(ctx, start, &unit);
-    } else if indent > 0 {
-        // remove up to `sw` columns of indent; a tab counts as a full unit
-        let indent_end = start + indent;
-        let mut removed = 0usize;
-        let mut o = start;
-        let mut cut = start;
-        while o < indent_end && removed < sw {
-            let Some(c) = ctx.buf.char_at(o) else { break };
-            let width = if c == '\t' { sw } else { 1 };
-            if removed + width > sw {
-                break;
-            }
-            removed += width;
-            o += c.len_utf8();
-            cut = o;
+    let (indent_bytes, _ws_only) = ctx.buf.line_indent(line);
+    let ts = vim.options.tabstop.max(1);
+    // display column of the first non-blank: a tab jumps to the next
+    // tabstop boundary, anything else (indent is only ' '/'\t') is width 1
+    let mut col = 0usize;
+    let mut o = start;
+    while o < start + indent_bytes {
+        match ctx.buf.char_at(o) {
+            Some('\t') => col = (col / ts + 1) * ts,
+            Some(_) => col += 1,
+            None => break,
         }
-        vim.edit_delete(ctx, start..cut);
+        o += ctx.buf.char_at(o).map_or(1, |c| c.len_utf8());
     }
+    let sw = vim.options.shiftwidth.max(1);
+    let target = if right {
+        col.saturating_add(sw)
+    } else {
+        col.saturating_sub(sw)
+    };
+    if target == col {
+        return;
+    }
+    let new_indent = if vim.options.expandtab {
+        " ".repeat(target)
+    } else {
+        let tabs = target / ts;
+        let mut s = "\t".repeat(tabs);
+        s.push_str(&" ".repeat(target - tabs * ts));
+        s
+    };
+    vim.edit_replace(ctx, start..start + indent_bytes, &new_indent);
 }
 
 /// `gq`/`gw`: reflow the span's lines to `textwidth` as one paragraph per

@@ -235,6 +235,12 @@ pub struct VimState {
     /// Set while `.` replays: keys flow through the pipeline but recording
     /// and committing are suppressed so `last_change` stays put.
     replaying: bool,
+    /// Recording stays LIVE during `@` macro playback (vim treats macro keys
+    /// as typed input — each change inside the macro refreshes the redo
+    /// buffer, so `.` after `@a` repeats the macro's last change, not
+    /// whatever preceded the macro; 9.1 probe `qaxq~0@a.`). Only `.`'s own
+    /// replay keeps it off, or the replay would append to its own source.
+    replay_records: bool,
     replay_texts: VecDeque<String>,
     /// Hosts suppress recording while IME composition previews mutate the
     /// buffer; only the committed text becomes part of a `.` repeat.
@@ -383,6 +389,7 @@ impl VimState {
             recording_mutated: false,
             recording_blocked: false,
             replaying: false,
+            replay_records: false,
             replay_texts: VecDeque::new(),
             recording_suppressed: false,
             macros: HashMap::new(),
@@ -646,7 +653,7 @@ impl VimState {
         if matches!(self.mode, Mode::CommandLine { .. }) {
             // the pipeline loop never runs in cmdline mode — record here so
             // `.` can replay Ex commands typed into the prompt
-            if !self.replaying {
+            if self.recording_active() {
                 self.record_key(&key);
             }
             return self.cmdline_key(ctx, key);
@@ -666,6 +673,7 @@ impl VimState {
                 self.reset_pending();
                 self.discard_change_record();
                 self.replaying = false;
+                self.replay_records = false;
                 self.replay_texts.clear();
                 return KeyResult::Consumed;
             }
@@ -698,11 +706,11 @@ impl VimState {
             // itself) are popped again below — the text placement records
             // the Text step instead, exactly once. Otherwise every typed
             // char would replay twice.
-            if !self.replaying {
+            if self.recording_active() {
                 self.record_key(&front);
             }
             let outcome = self.process_key(ctx, front);
-            if !self.replaying && outcome == ProcessOutcome::Unknown {
+            if self.recording_active() && outcome == ProcessOutcome::Unknown {
                 self.unrecord_key();
             }
             match outcome {
@@ -726,6 +734,7 @@ impl VimState {
         self.map_depth = 0;
         if self.pending_keys.is_empty() && self.replaying {
             self.replaying = false;
+            self.replay_records = false;
             self.expanding_mapping = false;
             self.replay_texts.clear();
             self.recording.clear();
@@ -840,7 +849,7 @@ impl VimState {
                 let kind = *kind;
                 let queued: Vec<Key> = self.pending_keys.drain(..).collect();
                 self.cmd_seq.clear();
-                if !self.replaying {
+                if self.recording_active() {
                     for k in &queued {
                         self.record_key(k);
                     }
@@ -855,8 +864,10 @@ impl VimState {
     }
 
     /// Push one key onto the `.` recording and the active macro capture.
-    /// Callers gate on `replaying`: a replay must not append to the
-    /// recording (its steps come FROM the recording).
+    /// Callers gate on [`Self::recording_active`]: a `.` replay must not
+    /// append to the recording (its steps come FROM the recording), while an
+    /// `@` replay keeps recording so the macro's changes land in
+    /// `last_change`.
     fn record_key(&mut self, key: &Key) {
         self.recording.push(RecordedStep::Key(key.clone()));
         if let Some((_, keys)) = &mut self.macro_capture {
@@ -870,6 +881,13 @@ impl VimState {
         if let Some((_, keys)) = &mut self.macro_capture {
             keys.pop();
         }
+    }
+
+    /// Recording is live for real keystrokes AND during `@` macro playback
+    /// (vim's redo model: macro keys count as typed input). Only `.`'s own
+    /// replay keeps it off.
+    fn recording_active(&self) -> bool {
+        !self.replaying || self.replay_records
     }
 
     /// Enter replay mode (`.` repeat / `@` macro): pipeline results are no
@@ -1335,7 +1353,7 @@ impl VimState {
         if text.is_empty() {
             return;
         }
-        if !self.replaying {
+        if self.recording_active() {
             self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
@@ -1372,7 +1390,7 @@ impl VimState {
         if range.start >= range.end {
             return;
         }
-        if !self.replaying {
+        if self.recording_active() {
             self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
@@ -1436,7 +1454,7 @@ impl VimState {
         if range.start >= range.end {
             return self.edit_insert(ctx, range.start, text);
         }
-        if !self.replaying {
+        if self.recording_active() {
             self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
@@ -2012,7 +2030,7 @@ impl VimState {
     /// mid-block-session), and the replica must only carry text that actually
     /// landed in the buffer. `insert_text_at_cursor` appends on success.
     pub fn record_typed_text(&mut self, text: &str) {
-        if text.is_empty() || self.replaying || self.recording_suppressed {
+        if text.is_empty() || !self.recording_active() || self.recording_suppressed {
             return;
         }
         if self.insert_session.is_some() {
@@ -2193,9 +2211,11 @@ impl VimState {
                     }
                     texts.push(text);
                 }
+                let block_text = texts.join("\n");
+                crate::registers::sync_clipboard_host(ctx.host, self.register, &block_text);
                 self.registers.store_yank(
                     self.register,
-                    texts.join("\n"),
+                    block_text,
                     crate::registers::RegisterKind::Blockwise,
                 );
                 self.cursor.offset =
@@ -2902,8 +2922,17 @@ impl VimState {
                 self.last_macro_played = Some(reg);
             }
             // `q` takes no count (vim drops it): a count typed before the
-            // stop (`2q`) must not silently scale the NEXT command
+            // stop (`2q`) must not silently scale the NEXT command. The stop
+            // key was already pushed onto the `.` log, and the in-session
+            // changes committed earlier — without clearing, the stray `q`
+            // bakes into the NEXT change's recording and `.` would replay a
+            // MacroRecord that wedges the engine in a recording session
+            // (round17: `qaxq` + `J` + `.`).
+            self.recording.clear();
+            self.recording_mutated = false;
             self.count = None;
+            self.register = None;
+            self.register_pending = false;
             return ProcessOutcome::Consumed;
         }
         // char-argument commands wait for their argument first
@@ -3033,10 +3062,13 @@ impl VimState {
                 ProcessOutcome::Consumed
             }
             CmdKind::Object(object) => {
+                // the pending count belongs to the OBJECT (`d2aw` = two
+                // objects; vim extends the selection the same way under `v`)
+                let count = self.take_total_count().max(1);
                 match self.mode {
                     Mode::Visual { .. } => {
                         // extend the selection to the object
-                        let Some(span) = ops::object_span(self, ctx.buf, object) else {
+                        let Some(span) = ops::object_span_count(self, ctx.buf, object, count) else {
                             ctx.host.bell();
                             return ProcessOutcome::Consumed;
                         };
@@ -3057,7 +3089,7 @@ impl VimState {
                         self.marks.active_visual = Some((span.start, span.end));
                     }
                     _ if self.op.is_some() => {
-                        let Some(span) = ops::object_span(self, ctx.buf, object) else {
+                        let Some(span) = ops::object_span_count(self, ctx.buf, object, count) else {
                             ctx.host.bell();
                             self.reset_pending();
                             return ProcessOutcome::Consumed;
@@ -3250,7 +3282,7 @@ impl VimState {
     /// billion: counts arrive unvalidated from the keyboard, and `3p` scales
     /// the register text by the count — an absurd count must not multiply
     /// into an unbounded allocation downstream.
-    fn take_total_count(&mut self) -> usize {
+    pub(crate) fn take_total_count(&mut self) -> usize {
         const COUNT_CAP: usize = 1_000_000_000;
         let pre = self.count.take().unwrap_or(1);
         let post = self.op_count.take().unwrap_or(1);
@@ -3306,7 +3338,7 @@ impl VimState {
     /// command mutated the buffer. An active insert session commits later,
     /// in `exit_insert` (the session is part of the same change).
     pub(crate) fn commit_change_record(&mut self) {
-        if self.replaying {
+        if self.replaying && !self.replay_records {
             return;
         }
         if self.recording_blocked {
@@ -3678,7 +3710,14 @@ impl VimState {
                 if Self::bump_redo_register(&mut steps) {
                     self.last_change = steps.clone();
                 }
+                // a `.` typed INSIDE a macro playback keeps the macro's
+                // recording live (see `replay_records`); only a fresh `.`
+                // suppresses recording
+                let fresh = !self.replaying;
                 self.begin_replay();
+                if fresh {
+                    self.replay_records = false;
+                }
                 self.enqueue_replay(&steps, count);
             }
             // g; / g,: walk the changelist. Hits the edge → vim's E662/E664
@@ -4340,7 +4379,11 @@ impl VimState {
                         // key is '@' itself, which is not a stored macro
                         self.last_macro_played = Some(r);
                         let count = self.take_total_count().max(1);
+                        // macro keys replay as typed input: recording stays
+                        // live so the LAST change inside the macro becomes
+                        // `last_change` (`.` after `@a` repeats it — vim 9.1)
                         self.begin_replay();
+                        self.replay_records = true;
                         self.enqueue_replay(&keys, count);
                     }
                     None => ctx.host.bell(),

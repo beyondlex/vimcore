@@ -437,8 +437,12 @@ impl VimState {
             return;
         }
         match line {
-            "noh" | "nohl" | "nohls" | "nohlsearch" | "noh!" | "nohl!" | "nohls!"
-            | "nohlsearch!" => {
+            // vim's abbreviation rule accepts every unambiguous prefix of
+            // `nohlsearch` — the old list stopped at `nohls` and E492'd on
+            // the trained-muscle `:nohlse` (round17)
+            "noh" | "nohl" | "nohls" | "nohlse" | "nohlsea" | "nohlsear" | "nohlsearc"
+            | "nohlsearch" | "noh!" | "nohl!" | "nohls!" | "nohlse!" | "nohlsea!"
+            | "nohlsear!" | "nohlsearc!" | "nohlsearch!" => {
                 search::clear_highlights(self, ctx);
                 return;
             }
@@ -589,7 +593,7 @@ impl VimState {
         // any given count, even 1, re-anchors)
         if let Some(rest) = DELETE_SPELLINGS
             .iter()
-            .find_map(|cmd| Self::boundary_cmd(line, cmd))
+            .find_map(|cmd| Self::boundary_cmd_count(line, cmd))
         {
             // `:d!` is not a thing in vim — E477, nothing deleted (probe 9.1)
             if rest.starts_with('!') {
@@ -618,7 +622,7 @@ impl VimState {
         // :{range}y[ank] [x] [count] — yank the range's lines into a register
         if let Some(rest) = YANK_SPELLINGS
             .iter()
-            .find_map(|cmd| Self::boundary_cmd(line, cmd))
+            .find_map(|cmd| Self::boundary_cmd_count(line, cmd))
         {
             // `:y!` is E477 like `:d!` (probe 9.1)
             if rest.starts_with('!') {
@@ -649,7 +653,7 @@ impl VimState {
         // NOTES 分歧 #26).
         if let Some(rest) = JOIN_SPELLINGS
             .iter()
-            .find_map(|cmd| Self::boundary_cmd(line, cmd))
+            .find_map(|cmd| Self::boundary_cmd_count(line, cmd))
         {
             self.ex_join(ctx, range, rest.trim(), addr_count, &full_line);
             return;
@@ -663,6 +667,18 @@ impl VimState {
     fn boundary_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
         line.strip_prefix(cmd)
             .filter(|rest| rest.is_empty() || rest.starts_with(' ') || rest.starts_with('!'))
+    }
+    /// Same, but a DIGIT also ends the command name — vim's ex parser turns
+    /// `:d2`/`:j2` into name + count (`:h :d` accepts the packed form; the
+    /// engine used to E492 on anything but space/`!`). Only for commands that
+    /// actually take a count; `:sort2` stays an unknown-command error.
+    fn boundary_cmd_count<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
+        line.strip_prefix(cmd).filter(|rest| {
+            rest.is_empty()
+                || rest.starts_with(' ')
+                || rest.starts_with('!')
+                || rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+        })
     }
 
     /// [`Self::substitute_without_flags`] for callers outside this module
@@ -889,13 +905,20 @@ impl VimState {
                 let end = digits
                     .find(|c: char| !c.is_ascii_digit())
                     .unwrap_or(digits.len());
-                // an offset that overflows usize is NOT a zero offset —
+                // a BARE `+`/`-` (no digits: `:+d`, `:.-2`'s tail) means 1 —
+                // vim's `:h :range`: "If a number is omitted, 1 is used". The
+                // engine used to E1247 on the empty string and run nothing.
+                // An offset that overflows usize is NOT a zero offset —
                 // `unwrap_or(0)` used to turn `:1+<21 digits>d` into +0 and
                 // silently delete line 1. vim 9.1 reports E1247 for both
                 // directions (`:1+<huge>d`, `:5-<huge>d`) and runs nothing.
-                let n: usize = match digits[..end].parse() {
-                    Ok(n) => n,
-                    Err(_) => return Err("E1247: Line number out of range".to_owned()),
+                let n: usize = if end == 0 {
+                    1
+                } else {
+                    match digits[..end].parse() {
+                        Ok(n) => n,
+                        Err(_) => return Err("E1247: Line number out of range".to_owned()),
+                    }
                 };
                 value = if sign {
                     value.saturating_add(n)
@@ -1481,11 +1504,35 @@ impl VimState {
         // EMPTY one — vim deletes the match (9.1 probe), it does not reuse
         // the last command's replacement
         let replacement = Self::unescape_replacement(parts.next().unwrap_or(""), sep);
-        let flags = parts.next().unwrap_or("");
+        let flags_raw = parts.next().unwrap_or("");
         if parts.next().is_some() {
             ctx.host.bell();
             return true;
         }
+        // a trailing COUNT (`:s/a/X/ 3`, `:s/a/X/3`, `:s/a/X/g2`) adjusts the
+        // range to {count} lines ending count-1 lines BELOW the range's last
+        // line (vim 9.1 probes: `:s/a/X/ 3` from line 1 replaces lines 1-3,
+        // `:1,2s/a/X/2` replaces lines 2-3). The engine used to drop it, so
+        // the command silently ran on fewer lines than vim.
+        let (flags, count) = match flags_raw.split_once(|c: char| c.is_ascii_digit()) {
+            Some((head, tail)) => match tail.parse::<usize>() {
+                Ok(n) => (head, Some(n)),
+                // digits mixed with junk (`:s/a/X/2x`) is trailing garbage
+                Err(_) => {
+                    Self::report_trailing(ctx, tail, line);
+                    return true;
+                }
+            },
+            None => (flags_raw, None),
+        };
+        let range = match count {
+            Some(n) if n >= 1 => {
+                let buf_last = ctx.buf.line_count().saturating_sub(1);
+                let last = range.1.saturating_add(n - 1).min(buf_last);
+                (last.saturating_sub(n - 1), last)
+            }
+            _ => range,
+        };
 
         // an empty pattern reuses the last search, like vim
         let pattern = if pattern.is_empty() {

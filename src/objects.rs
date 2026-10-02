@@ -192,29 +192,60 @@ fn blank_run_plus_next_word(buf: &dyn VimBuffer, big: bool, run_start: usize) ->
 
 fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {
     let start = word::prev_sentence(buf, (offset + 1).min(buf.len()));
-    let end = word::next_sentence(buf, offset);
+    let next = word::next_sentence(buf, offset);
+    // `is` stops AT the sentence terminator — vim 9.1: `dis` on "Aaa. Bbb."
+    // deletes "Aaa." and keeps the trailing space in the next sentence's
+    // leading whitespace. `next_sentence` already skips that whitespace run
+    // (it returns the NEXT sentence's first char), so the inner end is the
+    // first terminator at/after the sentence start; a sentence without one
+    // runs to end-of-buffer.
+    let term_end = (start..next)
+        .find(|&o| matches!(buf.char_at(o), Some('.' | '!' | '?')))
+        .map(|o| o + buf.char_at(o).map_or(1, |c| c.len_utf8()))
+        .unwrap_or(next);
     if !inner {
-        // outer: include trailing whitespace
-        let mut o = end;
+        // outer (`as`): sentence + TRAILING whitespace, capped at a
+        // paragraph-boundary line (blank lines stay — vim 9.1: `das` on
+        // ["Aaa.","","Bbb."] keeps the empty line). When the sentence has NO
+        // trailing whitespace (last sentence of the buffer/paragraph), the
+        // LEADING run is taken instead (vim: `das` on the tail of
+        // ["Aaa.","","Bbb."] removes the blank line between them).
+        let mut o = term_end;
         while let Some(c) = buf.char_at(o) {
-            if c.is_whitespace() {
-                o += c.len_utf8();
-            } else {
+            if !c.is_whitespace() {
                 break;
             }
+            let line = buf.offset_to_line(o);
+            // a blank line is a boundary: stop before consuming any of it
+            if buf.line_is_blank(line) {
+                break;
+            }
+            o += c.len_utf8();
         }
-        return Some(ObjectRange::charwise(start, o.max(end)));
+        if o > term_end {
+            return Some(ObjectRange::charwise(start, o));
+        }
+        let mut lead = start;
+        while let Some(prev) = buf.prev_char_offset(lead) {
+            match buf.char_at(prev) {
+                Some(c) if c.is_whitespace() => lead = prev,
+                _ => break,
+            }
+        }
+        return Some(ObjectRange::charwise(lead, term_end.max(lead)));
     }
-    // inner: trim leading whitespace
-    let mut trimmed_start = start;
-    while let Some(c) = buf.char_at(trimmed_start) {
+    // inner: `is` excludes LEADING whitespace too (`:h is`) — only reachable
+    // for a first sentence that starts after buffer-start indentation, since
+    // `prev_sentence` already skips the run after a terminator
+    let mut trimmed = start;
+    while let Some(c) = buf.char_at(trimmed) {
         if c.is_whitespace() {
-            trimmed_start += c.len_utf8();
+            trimmed += c.len_utf8();
         } else {
             break;
         }
     }
-    Some(ObjectRange::charwise(trimmed_start, end.max(trimmed_start)))
+    Some(ObjectRange::charwise(trimmed, term_end.max(trimmed)))
 }
 
 fn paragraph_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {
