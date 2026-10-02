@@ -159,6 +159,33 @@ pub enum CharArgCmd {
     VisualReplace,
 }
 
+impl CharArgCmd {
+    /// The command key that opened this wait — what `showcmd` displays while
+    /// the argument is pending (`r`, `f`, `'`, …; vim's showcmd shows the
+    /// partial command, and the old implementation showed nothing here).
+    pub(crate) fn pending_key(self) -> &'static str {
+        match self {
+            CharArgCmd::Find { forward, till } => match (forward, till) {
+                (true, false) => "f",
+                (true, true) => "t",
+                (false, false) => "F",
+                (false, true) => "T",
+            },
+            CharArgCmd::Replace | CharArgCmd::VisualReplace => "r",
+            CharArgCmd::MarkSet => "m",
+            CharArgCmd::JumpMark { linewise } => {
+                if linewise {
+                    "'"
+                } else {
+                    "`"
+                }
+            }
+            CharArgCmd::MacroRecord => "q",
+            CharArgCmd::MacroPlay => "@",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Cursor {
     pub offset: usize,
@@ -444,13 +471,11 @@ impl VimState {
         for key in &self.cmd_seq {
             s.push_str(&key.notation());
         }
-        if self.char_arg_cmd.is_some() {
-            s.push_str(
-                self.char_arg
-                    .map(|c| c.to_string())
-                    .as_deref()
-                    .unwrap_or(""),
-            );
+        if let Some(cmd) = self.char_arg_cmd {
+            s.push_str(cmd.pending_key());
+            if let Some(c) = self.char_arg {
+                s.push(c);
+            }
         }
         if matches!(self.mode, Mode::Visual { .. }) {
             if let Some((_, _, kind)) = self.visual_selection() {
