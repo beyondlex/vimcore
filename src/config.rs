@@ -109,9 +109,16 @@ pub fn parse(text: &str) -> Config {
             continue;
         }
 
-        if let Some(rest) = line
-            .strip_prefix("set")
-            .filter(|r| r.is_empty() || r.starts_with(' ') || r.starts_with('\t'))
+        // `set`, `setlocal`/`setl` (single-buffer engine: identical to
+        // `set`, same as the runtime `:setl`), and `setglobal` all feed the
+        // same parser — the rc parser used to recognize only the `set`
+        // spelling, silently dropping `setlocal ts=4` into `ignored`
+        if let Some(rest) = ["setlocal", "setl", "setglobal", "set"]
+            .iter()
+            .find_map(|cmd| {
+                line.strip_prefix(cmd)
+                    .filter(|r| r.is_empty() || r.starts_with(' ') || r.starts_with('\t'))
+            })
         {
             for arg in rest.split_whitespace() {
                 // a `"` starts a comment to end of line (vim: `set ts=4 "

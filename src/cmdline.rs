@@ -119,6 +119,13 @@ impl VimState {
                 // vim reports E35 instead of a silent no-op (probe:
                 // `/<CR>` with no previous search sets v:errmsg to E35)
                 None => {
+                    // drop the pending count along with everything else —
+                    // the count is consumed per executed search, and a
+                    // cancelled/failed prompt must not arm it for a later
+                    // caller of execute_search (round15: no observable
+                    // consumer today, but every new call site would inherit
+                    // the stale count silently)
+                    self.cmdline.search_count = 0;
                     ctx.host
                         .status_message("E35: No previous regular expression");
                     ctx.host.bell();
@@ -514,7 +521,12 @@ impl VimState {
         const BPREV_SPELLINGS: &[&str] = &[
             "bprevious", "bpreviou", "bprevio", "bprevi", "bprev", "bpre", "bpr", "bp", "bN",
         ];
-        const BFIRST_SPELLINGS: &[&str] = &["bfirst", "bfirs", "bfir", "bfi", "bf", "brewind"];
+        // `:br`/`:bre` stay out on purpose: vim has `:break` (script
+        // debugging), so those prefixes are ambiguous there (E464); from
+        // `:brew` on the spelling is unambiguous.
+        const BFIRST_SPELLINGS: &[&str] = &[
+            "bfirst", "bfirs", "bfir", "bfi", "bf", "brewind", "brewin", "brewi", "brew",
+        ];
         const BLAST_SPELLINGS: &[&str] = &["blast", "blas", "bla", "bl"];
         if BNEXT_SPELLINGS.contains(&line) {
             if !ctx.host.cycle_buffer(true) {
@@ -1283,7 +1295,11 @@ impl VimState {
                 .next()
                 .map(|n| {
                     let n = n.strip_prefix("no").unwrap_or(n);
-                    matches!(n, "ic" | "ignorecase" | "isc" | "smartcase" | "hls" | "hlsearch")
+                    // vim's real spellings only: `ic`(ignorecase),
+                    // `scs`(smartcase), `hls`(hlsearch). The old list had a
+                    // phantom `isc` and missed `scs`, so `:set scs` changed
+                    // the matching rule without dropping the highlight cache.
+                    matches!(n, "ic" | "ignorecase" | "scs" | "smartcase" | "hls" | "hlsearch")
                 })
                 .unwrap_or(false);
             let ok = if let Some(name) = arg.strip_suffix('!') {
