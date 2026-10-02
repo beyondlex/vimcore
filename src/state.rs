@@ -2007,6 +2007,12 @@ impl VimState {
         if self.in_block_insert() {
             return;
         }
+        // a click during an open prompt must not move the buffer cursor:
+        // vim ignores it, and the engine's cmdline range defaults read this
+        // offset when the command executes
+        if matches!(self.mode, Mode::CommandLine { .. }) {
+            return;
+        }
         let offset = crate::buffer::floor_to_char_boundary(buf, offset);
         let offset = clamp_cursor(buf, offset);
         self.cursor.offset = offset;
@@ -2028,8 +2034,18 @@ impl VimState {
     /// Host-initiated visual selection (e.g. a mouse drag). Both ends are
     /// floored to char boundaries, like [`VimState::set_cursor_offset`].
     /// Ignored mid-block-insert-session, same as clicks.
+    ///
+    /// Also ignored OUTSIDE normal/visual modes entirely: a drag delivered
+    /// during an open insert session or prompt used to overwrite
+    /// `self.mode` with `Visual` while `insert_session`/the cmdline state
+    /// stayed alive — the mode machine then split in two (Esc ran
+    /// `exit_visual` but never closed the insert session's undo group).
+    /// vim never starts a selection outside normal/visual.
     pub fn set_visual_range(&mut self, buf: &dyn VimBuffer, anchor: usize, cursor: usize) {
         if self.in_block_insert() {
+            return;
+        }
+        if !matches!(self.mode, Mode::Normal | Mode::Visual { .. }) {
             return;
         }
         let anchor = crate::buffer::floor_to_char_boundary(buf, anchor);
