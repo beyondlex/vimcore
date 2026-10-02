@@ -1344,7 +1344,28 @@ impl VimState {
         self.marks.adjust_insert(at, len);
         Self::adjust_positions(&mut self.changes, |p| if p > at { p + len } else { p });
         Self::adjust_positions(&mut self.jumps, |p| if p > at { p + len } else { p });
+        // the raw selection fields live outside the marks map and miss the
+        // relative shift: a host IME insert while a visual selection is live
+        // used to strand the anchor mid-character in the inserted text
+        // (fuzz round 16 — the delete/replace funnels already handled their
+        // shapes through refloor_stored_offsets)
+        if let Some(anchor) = self.visual_anchor.as_mut() {
+            if *anchor > at {
+                *anchor += len;
+            }
+        }
+        if let Some((_, a, c)) = self.cmdline_visual.as_mut() {
+            if *a > at {
+                *a += len;
+            }
+            if *c > at {
+                *c += len;
+            }
+        }
         self.edit_generation += 1;
+        // same standing addressability pass as delete/replace: a pre-existing
+        // stale offset must not survive any of the three funnels
+        self.refloor_stored_offsets(ctx);
     }
 
     pub(crate) fn edit_delete(&mut self, ctx: &mut Ctx, range: Range<usize>) {
@@ -2012,15 +2033,31 @@ impl VimState {
     }
 
     /// Replace an arbitrary range (IME committed composition text).
+    ///
+    /// The range is floored to char boundaries first, like
+    /// [`VimState::set_cursor_offset`]: a host converting from a UTF-16
+    /// text-model coordinate space can hand over a mid-character byte
+    /// offset, and the raw buffer write would panic the host from a legal
+    /// engine call path (fuzz round 16 injected exactly that).
     pub fn replace_range(&mut self, ctx: &mut Ctx, range: Range<usize>, text: &str) {
+        let range = crate::buffer::floor_to_char_boundary(ctx.buf, range.start)
+            ..crate::buffer::floor_to_char_boundary(ctx.buf, range.end);
         self.begin_edit();
         self.edit_replace(ctx, range.clone(), text);
         // place the cursor at the end of the replacement when it touches it
         if range.contains(&self.cursor.offset) || self.cursor.offset == range.end {
             self.cursor.offset = range.start + text.len();
         } else if self.cursor.offset > range.end {
-            self.cursor.offset += text.len().saturating_sub(range.len());
+            // signed delta: a SHRINKING replacement must pull the cursor
+            // back — the old saturating_sub turned the negative delta into 0
+            // and left the cursor past the new buffer end (fuzz round 16)
+            let delta = text.len() as isize - range.len() as isize;
+            self.cursor.offset = (self.cursor.offset as isize + delta).max(0) as usize;
         }
+        // the cursor is caller-managed through the edit funnels; this is the
+        // one host path that rewrites arbitrary ranges, so keep its outcome
+        // inside the standing addressability invariant
+        self.cursor.offset = crate::buffer::floor_to_char_boundary(ctx.buf, self.cursor.offset);
         // committed text is a real edit: keep the published highlights and
         // the match cache in step with the buffer, like every other path
         self.republish_search(ctx);
