@@ -3298,6 +3298,10 @@ impl VimState {
                 ops::delete_chars(self, ctx, count, false, register);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
+                // a full no-op (empty line) is vim's bell, not silence
+                if self.edit_generation == gen {
+                    ctx.host.bell();
+                }
             }
             // X: delete count chars before the cursor (never crosses the
             // line start)
@@ -3309,6 +3313,10 @@ impl VimState {
                 ops::delete_chars(self, ctx, count, true, register);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
+                // line start: nothing backward to delete — vim beeps
+                if self.edit_generation == gen {
+                    ctx.host.bell();
+                }
             }
             // s: like x, but drop into insert (one undo group covers the
             // delete AND the typed replacement via `begin_insert`'s group
@@ -3319,6 +3327,11 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, false, register);
+                // the delete half failing (empty line) still beeps like a
+                // failed `x`, but the insert half runs (vim same)
+                if self.edit_generation == gen {
+                    ctx.host.bell();
+                }
                 self.start_insert(ctx, InsertKind::Change);
                 self.bump_if_edited(ctx, gen);
             }
@@ -3379,6 +3392,10 @@ impl VimState {
                     self.begin_edit();
                     ops::apply(self, ctx, Operator::Delete, &span, self.register);
                     self.bump(ctx);
+                } else {
+                    // D on an empty (or cursor-at-line-end-blank) line
+                    // deletes nothing — vim beeps
+                    ctx.host.bell();
                 }
             }
             // Y: yank count whole lines (linewise, so `p` opens lines)
@@ -3432,18 +3449,26 @@ impl VimState {
                 let count = self.take_total_count();
                 let gen = self.edit_generation;
                 self.begin_edit();
-                ops::join_lines(self, ctx, count, false);
+                let performed = ops::join_lines(self, ctx, count, false);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
+                // at EOF there is no next line to join — vim beeps (a count
+                // running past the buffer end beeps after the partial joins)
+                if performed < count.max(2) - 1 {
+                    ctx.host.bell();
+                }
             }
             // gJ: join without any separator, keep the next line's indent
             NormalCmd::JoinLiteral => {
                 let count = self.take_total_count();
                 let gen = self.edit_generation;
                 self.begin_edit();
-                ops::join_lines(self, ctx, count, true);
+                let performed = ops::join_lines(self, ctx, count, true);
                 self.end_edit();
                 self.bump_if_edited(ctx, gen);
+                if performed < count.max(2) - 1 {
+                    ctx.host.bell();
+                }
             }
             // u: step the HOST undo stack back count times. The host swaps
             // the buffer text underneath the engine, so the cached search
@@ -3959,11 +3984,17 @@ impl VimState {
                 let count = self.take_total_count();
                 let first = ctx.buf.offset_to_line(span.start);
                 let last = ops::last_line_of_span(ctx.buf, &span);
+                let requested = (last - first + 1).max(count);
                 self.begin_edit();
                 self.cursor.offset = span.start;
-                ops::join_lines(self, ctx, (last - first + 1).max(count), literal);
+                let performed = ops::join_lines(self, ctx, requested, literal);
                 self.end_edit();
                 self.bump(ctx);
+                // a selection/count reaching past the buffer's last line
+                // leaves joins undone — vim beeps
+                if performed < requested.max(2) - 1 {
+                    ctx.host.bell();
+                }
                 self.finish_visual_op(ctx);
             }
             // `r{char}` waits for its argument: the replacement is applied

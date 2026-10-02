@@ -791,14 +791,18 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
 }
 
 /// `J` / `gJ`: join `count` lines (at least one join). `literal` = `gJ`
-/// (no separator, keep the next line's indent).
-pub fn join_lines(vim: &mut VimState, ctx: &mut Ctx, count: usize, literal: bool) {
+/// (no separator, keep the next line's indent). Returns the number of
+/// joins actually performed — a shortfall means the buffer ran out of
+/// lines (callers turn that into vim's bell; Ex callers stay silent).
+pub fn join_lines(vim: &mut VimState, ctx: &mut Ctx, count: usize, literal: bool) -> usize {
     let joins = count.max(2) - 1;
+    let mut performed = 0usize;
     for _ in 0..joins {
         let line = ctx.buf.offset_to_line(vim.cursor.offset);
         if line + 1 >= ctx.buf.line_count() {
             break;
         }
+        performed += 1;
         let join_at = ctx.buf.line_end(line);
         let next_start = ctx.buf.line_start(line + 1);
 
@@ -833,6 +837,7 @@ pub fn join_lines(vim: &mut VimState, ctx: &mut Ctx, count: usize, literal: bool
         vim.cursor.offset = join_at;
     }
     vim.cursor.desired_col = None;
+    performed
 }
 
 /// Advance over up to `count` grapheme clusters (emoji and combining-mark
