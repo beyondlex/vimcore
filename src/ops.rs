@@ -737,8 +737,11 @@ pub(crate) fn clamped_repeat_count(per: usize, count: usize) -> usize {
 /// pushed down, never merged into. The cursor sits on the first pasted
 /// character. `count` repeats each row horizontally (vim's blockwise count).
 fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, after: bool) {
+    // NO trailing-newline trim: the block yank stores rows joined by `\n`
+    // with no terminator, but an EMPTY last row legitimately produces a
+    // trailing `\n` ("cde\n" = rows ["cde", ""]) — trimming it dropped the
+    // row on paste (round15; reachable through the host block API)
     let rows: Vec<String> = text
-        .trim_end_matches('\n')
         .split('\n')
         .map(|row| row.repeat(count))
         .collect();
