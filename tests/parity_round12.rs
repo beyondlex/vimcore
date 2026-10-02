@@ -76,7 +76,7 @@ fn ye_at_last_word_end_yanks_word_only() {
     let mut f = edit("abc\n", 0, 2, &["y", "e"]);
     let unnamed = f.vim.registers.get('"').map(|r| r.text.clone());
     assert_eq!(unnamed.as_deref(), Some("c"));
-    f.feed(&["p"]);
+    f.feed(["p"]);
     assert_eq!(f.text(), "abcc\n");
 }
 
@@ -189,7 +189,7 @@ fn ciquote_between_strings_replaces_gap() {
     // vim: 左引号作开引号,配下一个引号 → ' then ' 被替换
     let mut f = edit("say \"hi\" then \"bye\"\n", 0, 13, &["c", "i", "\""]);
     f.type_text("X");
-    f.feed(&["<Esc>"]);
+    f.feed(["<Esc>"]);
     assert_eq!(f.text(), "say \"hi\"X\"bye\"\n");
 }
 
@@ -197,7 +197,7 @@ fn ciquote_between_strings_replaces_gap() {
 fn ciquote_before_first_string_takes_first_pair() {
     let mut f = edit("say \"hi\" then \"bye\"\n", 0, 0, &["c", "i", "\""]);
     f.type_text("X");
-    f.feed(&["<Esc>"]);
+    f.feed(["<Esc>"]);
     assert_eq!(f.text(), "say \"X\" then \"bye\"\n");
 }
 
@@ -205,7 +205,7 @@ fn ciquote_before_first_string_takes_first_pair() {
 fn ciquote_inside_string_unchanged() {
     let mut f = edit("say \"hi\" then \"bye\"\n", 0, 5, &["c", "i", "\""]);
     f.type_text("X");
-    f.feed(&["<Esc>"]);
+    f.feed(["<Esc>"]);
     assert_eq!(f.text(), "say \"X\" then \"bye\"\n");
 }
 
@@ -215,8 +215,8 @@ fn ciquote_inside_string_unchanged() {
 fn substitute_replay_honors_explicit_range() {
     // :3,4s 重放作用于 3-4(旧实现丢范围落光标行)
     let mut f = edit("a\naxa\naxa\naxa\na\n", 0, 0, &[":", "2", ",", "4", "s", "/", "a", "/", "b", "/", "\r"]);
-    f.feed(&["g", "g"]);
-    f.feed(&[":", "3", ",", "4", "s", "\r"]);
+    f.feed(["g", "g"]);
+    f.feed([":", "3", ",", "4", "s", "\r"]);
     assert_eq!(lines(&f), vec!["a\n", "bxa\n", "bxb\n", "bxb\n", "a\n"]);
 }
 
@@ -226,7 +226,7 @@ fn substitute_updates_search_state() {
     let mut f = edit("axa\nbxb\n", 0, 0, &[":", "s", "/", "x", "/", "Y", "/", "\r"]);
     let slash = f.vim.registers.get('/').map(|r| r.text.clone());
     assert_eq!(slash.as_deref(), Some("x"));
-    f.feed(&["n"]);
+    f.feed(["n"]);
     assert_eq!(f.cursor(), 5); // 第二个 x
 }
 
@@ -272,7 +272,7 @@ fn set_noic_refreshes_live_highlights() {
     // :set noic 后既有高亮按新规则重发布(Foo 掉出)
     let mut f = edit("Foo\nfoo\n", 0, 0, &["/", "f", "o", "o", "\r"]);
     assert_eq!(f.host.highlights.len(), 2);
-    f.feed(&[":", "s", "e", "t", " ", "n", "o", "i", "c", "\r"]);
+    f.feed([":", "s", "e", "t", " ", "n", "o", "i", "c", "\r"]);
     assert_eq!(f.host.highlights.len(), 1);
 }
 
@@ -312,13 +312,13 @@ fn shift_in_range_reports_e16_when_out_of_range() {
 fn visual_scroll_commands_keep_selection() {
     // visual 模式 zz/zt/zb:滚动上报 + 保留选区(round11 悬置闭环,vim 行为)
     let mut f = edit("one\ntwo\nthree\nfour\nfive\n", 0, 0, &["V", "j"]);
-    f.feed(&["z", "z"]);
+    f.feed(["z", "z"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }), "selection survives zz");
     assert_eq!(f.host.scrolled_to.last(), Some(&1));
-    f.feed(&["z", "t"]);
+    f.feed(["z", "t"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
     assert_eq!(f.host.scrolled_to.last(), Some(&1));
-    f.feed(&["z", "b"]);
+    f.feed(["z", "b"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
     assert_eq!(f.host.scrolled_to.last(), Some(&1));
 }
@@ -327,7 +327,7 @@ fn visual_scroll_commands_keep_selection() {
 fn marks_listing_dedupes_user_set_dot() {
     // m. 设过 . mark 后,:marks 只列一行 .(旧实现 items + last_change 各一行)
     let mut f = edit("a\nb\n", 0, 0, &["m", "."]);
-    f.feed(&[":", "m", "a", "r", "k", "s", "\r"]);
+    f.feed([":", "m", "a", "r", "k", "s", "\r"]);
     let dot_rows = f.host.statuses.iter().filter(|s| s.starts_with(". ")).count();
     assert_eq!(dot_rows, 1, "dot mark listed once, got {:?}", f.host.statuses);
 }

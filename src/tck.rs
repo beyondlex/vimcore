@@ -300,8 +300,7 @@ impl VimBuffer for TckStrBuf {
         // for `total`, so every line_start/line_end/line_content via the
         // trait defaults cost three O(text) scans per call
         let mut start = 0;
-        let mut i = 0usize;
-        for part in self.0.split('\n') {
+        for (i, part) in self.0.split('\n').enumerate() {
             if i == line {
                 // 终止 \n 存在就包含进 range；末行延伸到缓冲区尾
                 let end = if start + part.len() < self.0.len() {
@@ -312,7 +311,6 @@ impl VimBuffer for TckStrBuf {
                 return start..end;
             }
             start += part.len() + 1;
-            i += 1;
         }
         // line >= line_count: the phantom line past the end
         self.0.len()..self.0.len()

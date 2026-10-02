@@ -383,7 +383,7 @@ fn fuzz_round14_semantic_invariants() {
             // 1) till 重复语义：停车位之后 `;` 必须前进或失败（ bell），
             //    绝不允许 moved=true 且偏移不变
             let find_char = ['2', '3', 'x', '中']
-                [(fuzz_xorshift(&mut state) as usize) % 4] as char;
+                [(fuzz_xorshift(&mut state) as usize) % 4];
             f.feed(["t"]);
             f.type_text(&find_char.to_string());
             let before = f.vim.cursor_offset();
