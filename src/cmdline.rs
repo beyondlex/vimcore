@@ -11,9 +11,20 @@ use crate::state::{Ctx, KeyResult, VimState};
 /// Platforms may deliver Enter, Backspace and Tab as bare control characters
 /// through the text-input path (`"\n"`, `"\x7f"`, `"\t"`). Normalize them so
 /// the prompt treats them like their named keys instead of pattern text.
-/// C-h folds to Backspace too (crossterm-style hosts deliver it raw; vim
-/// binds C-h = BS at the prompt).
+/// C-h folds to Backspace in BOTH delivery forms: the raw `\x08` byte
+/// (crossterm-style hosts) and the normalized `Key::ctrl_char('h')` (gpui-
+/// style hosts) — vim binds C-h = BS at the prompt, and the old bare-byte
+/// arm left the ctrl form falling through to the silent-swallow arm.
 fn normalize_control_char(key: Key) -> Key {
+    if let Key {
+        kind: KeyKind::Char('h'),
+        modifiers,
+    } = &key
+    {
+        if modifiers.control {
+            return Key::backspace();
+        }
+    }
     if !key.modifiers.is_plain() {
         return key;
     }
