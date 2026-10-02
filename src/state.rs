@@ -3690,7 +3690,9 @@ impl VimState {
         let cursor_to = block.rows.first().map(|r| r.start).unwrap_or(0);
         match data.kind {
             crate::registers::RegisterKind::Blockwise => {
-                let rows: Vec<&str> = data.text.trim_end_matches('\n').split('\n').collect();
+                // plain split, no trailing-\n trim: an empty last block row
+                // yields a legitimate trailing `\n` (see put_blockwise)
+                let rows: Vec<&str> = data.text.split('\n').collect();
                 for (i, range) in block.rows.iter().enumerate().rev() {
                     if range.is_empty() {
                         continue;
