@@ -260,7 +260,7 @@ fn delete_explicit_count_one_anchors_at_last_line() {
 
 #[test]
 fn yank_explicit_count_one_takes_last_line_only() {
-    let mut f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "y", " ", "1", "\r"]);
+    let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "y", " ", "1", "\r"]);
     let zero = f.vim.registers.get('0').map(|r| r.text.clone());
     assert_eq!(zero.as_deref(), Some("b\n"));
 }
