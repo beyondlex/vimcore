@@ -1514,15 +1514,20 @@ impl VimState {
         // line (vim 9.1 probes: `:s/a/X/ 3` from line 1 replaces lines 1-3,
         // `:1,2s/a/X/2` replaces lines 2-3). The engine used to drop it, so
         // the command silently ran on fewer lines than vim.
-        let (flags, count) = match flags_raw.split_once(|c: char| c.is_ascii_digit()) {
-            Some((head, tail)) => match tail.parse::<usize>() {
-                Ok(n) => (head, Some(n)),
-                // digits mixed with junk (`:s/a/X/2x`) is trailing garbage
-                Err(_) => {
-                    Self::report_trailing(ctx, tail, line);
-                    return true;
+        // find (not split_once — the pattern char itself must stay in the
+        // tail or `:s/a/X/3` parses "" and falsely reports E488)
+        let (flags, count) = match flags_raw.find(|c: char| c.is_ascii_digit()) {
+            Some(i) => {
+                let tail = flags_raw[i..].trim_end();
+                match tail.parse::<usize>() {
+                    Ok(n) => (&flags_raw[..i], Some(n)),
+                    // digits mixed with junk (`:s/a/X/2x`) is trailing garbage
+                    Err(_) => {
+                        Self::report_trailing(ctx, tail, line);
+                        return true;
+                    }
                 }
-            },
+            }
             None => (flags_raw, None),
         };
         let range = match count {

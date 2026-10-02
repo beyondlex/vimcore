@@ -697,6 +697,13 @@ impl VimState {
             // replayed text is applied inline, not through the key pipeline
             if front.kind == KeyKind::Named(DOT_TEXT_MARKER.to_owned()) {
                 if let Some(text) = self.replay_texts.pop_front() {
+                    // an `@` replay re-records the text step (the interactive
+                    // path gets it from the host's record_typed_text), or the
+                    // macro's insert session commits as [i, Esc] and `.` after
+                    // the macro replays an EMPTY insert
+                    if !text.is_empty() && self.recording_active() {
+                        self.record_typed_text(&text);
+                    }
                     self.insert_text_at_cursor(ctx, &text);
                 }
                 continue;

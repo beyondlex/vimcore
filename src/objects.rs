@@ -206,13 +206,18 @@ fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Obj
     if !inner {
         // outer (`as`): sentence + TRAILING whitespace, capped at a
         // paragraph-boundary line (blank lines stay — vim 9.1: `das` on
-        // ["Aaa.","","Bbb."] keeps the empty line). When the sentence has NO
-        // trailing whitespace (last sentence of the buffer/paragraph), the
-        // LEADING run is taken instead (vim: `das` on the tail of
-        // ["Aaa.","","Bbb."] removes the blank line between them).
+        // ["Aaa.","","Bbb."] keeps the empty line) and at the buffer-final
+        // newline (the last line's terminator is not "following white
+        // space": vim 9.1 `das` on "Aaa. Bbb." deletes " Bbb." — the
+        // leading fallback fires, and the buffer stays a proper single
+        // line). When there is NO trailing whitespace, the LEADING run is
+        // taken instead (`:h as`).
         let mut o = term_end;
         while let Some(c) = buf.char_at(o) {
             if !c.is_whitespace() {
+                break;
+            }
+            if c == '\n' && o + 1 == buf.len() {
                 break;
             }
             let line = buf.offset_to_line(o);
@@ -225,8 +230,14 @@ fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Obj
         if o > term_end {
             return Some(ObjectRange::charwise(start, o));
         }
+        // the leading fallback stays WITHIN the sentence's own line (vim
+        // 9.1: `das` on the tail of ["Aaa.","","Bbb."] removes the sentence
+        // only — the blank line and its newlines stay put; `das` on the mid-
+        // line tail of "Aaa. Bbb." takes the single leading space)
         let mut lead = start;
-        while let Some(prev) = buf.prev_char_offset(lead) {
+        let line_start = buf.line_start(buf.offset_to_line(start));
+        while lead > line_start {
+            let Some(prev) = buf.prev_char_offset(lead) else { break };
             match buf.char_at(prev) {
                 Some(c) if c.is_whitespace() => lead = prev,
                 _ => break,
