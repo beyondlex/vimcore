@@ -224,7 +224,10 @@ pub struct VimState {
 
     /// `.` repeat: the last change as replayable steps, plus the in-progress
     /// recording. Text typed during an insert session is recorded as
-    /// [`RecordedStep::Text`]. Visual-mode changes are not repeatable (v1).
+    /// [`RecordedStep::Text`]. Visual-mode changes ARE repeatable —
+    /// `finish_visual_op` commits the recording after the mode drop, and the
+    /// replay re-enters visual mode and rebuilds the selection (block
+    /// replication is excluded via `recording_blocked`).
     last_change: Vec<RecordedStep>,
     recording: Vec<RecordedStep>,
     recording_mutated: bool,
@@ -1726,10 +1729,13 @@ impl VimState {
             // typing row's edits and skip replication.
             let cur_len =
                 ctx.buf.line_end(block.typing_line) - ctx.buf.line_start(block.typing_line);
-            let delta = (cur_len as isize - block.typing_line_len as isize) as usize;
-            let pure_typing = delta == block.text.len();
+            // signed on purpose: a session that NET-DELETED (arrows + BS)
+            // would wrap a usize subtraction into a huge positive "delta";
+            // the mismatch check must see it as negative
+            let delta = cur_len as isize - block.typing_line_len as isize;
+            let pure_typing = delta >= 0 && delta as usize == block.text.len();
             if !block.text.is_empty() && pure_typing {
-                let shift = delta as isize;
+                let shift = delta;
                 let mut rows: Vec<usize> = block
                     .rows
                     .into_iter()

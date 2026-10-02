@@ -290,13 +290,13 @@ impl VimState {
 
     fn insert_tab(&mut self, ctx: &mut Ctx) {
         if self.options.expandtab {
-            let sw = self.options.tabstop.max(1);
             // align by DISPLAY column (wide chars cover two cells): vim pads
             // to the next multiple of 'tabstop' of the virtual column (9.1
             // probe: '中文' + Tab at display col 4, ts=4 → four spaces; the
             // old BYTE-column math (6 % 4) gave two and broke the grid)
+            let ts = self.options.tabstop.max(1);
             let col = crate::buffer::display_column(ctx.buf, self.cursor.offset);
-            let spaces = sw - (col % sw);
+            let spaces = ts - (col % ts);
             self.insert_text_at_cursor(ctx, &" ".repeat(spaces));
         } else {
             self.insert_text_at_cursor(ctx, "\t");
