@@ -642,10 +642,7 @@ impl Motion {
                 if cur < count {
                     MotionResult::stuck(vim.cursor.offset)
                 } else {
-                    MotionResult::new(
-                        buf.first_non_blank(cur - count),
-                        MotionKind::Linewise,
-                    )
+                    MotionResult::new(buf.first_non_blank(cur - count), MotionKind::Linewise)
                 }
             }
         }

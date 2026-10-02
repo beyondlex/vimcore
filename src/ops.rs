@@ -741,10 +741,7 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
     // with no terminator, but an EMPTY last row legitimately produces a
     // trailing `\n` ("cde\n" = rows ["cde", ""]) — trimming it dropped the
     // row on paste (round15; reachable through the host block API)
-    let rows: Vec<String> = text
-        .split('\n')
-        .map(|row| row.repeat(count))
-        .collect();
+    let rows: Vec<String> = text.split('\n').map(|row| row.repeat(count)).collect();
     let cur_col = crate::buffer::display_column(ctx.buf, vim.cursor.offset);
     let col = if after { cur_col + 1 } else { cur_col };
 

@@ -69,8 +69,6 @@ impl<T> Trie<T> {
         }
     }
 
-
-
     /// The longest PROPER prefix of `keys` that terminates on a LEAF node,
     /// with its value. A leaf cannot wait for more keys, so when the queue
     /// continues past a complete stored sequence — a mapping RHS expansion,
