@@ -348,12 +348,15 @@ pub fn match_bracket(buf: &dyn VimBuffer, offset: usize) -> Option<usize> {
     None
 }
 
-/// `}`: start of the next paragraph boundary (a blank line), buffer end.
+/// `}`: start of the next paragraph boundary, buffer end. vim's paragraph
+/// boundary is a truly EMPTY line only — a whitespace-only line does NOT
+/// stop `}` (9.1 probe: `}` over `aaa | "   " | bbb` lands at buffer end;
+/// the old `line_is_blank` check parked on the whitespace line instead).
 pub fn next_paragraph(buf: &dyn VimBuffer, offset: usize) -> usize {
     let line = buf.offset_to_line(offset);
     let mut line = line + 1;
     while line < buf.line_count() {
-        if buf.line_is_blank(line) {
+        if is_empty_line(buf, line) {
             return buf.line_start(line);
         }
         line += 1;
@@ -361,12 +364,12 @@ pub fn next_paragraph(buf: &dyn VimBuffer, offset: usize) -> usize {
     buf.len()
 }
 
-/// `{`: start of the previous paragraph boundary.
+/// `{`: start of the previous paragraph boundary (see [`next_paragraph`]).
 pub fn prev_paragraph(buf: &dyn VimBuffer, offset: usize) -> usize {
     let line = buf.offset_to_line(offset);
     let mut line = line.saturating_sub(1);
     while line > 0 {
-        if buf.line_is_blank(line) {
+        if is_empty_line(buf, line) {
             return buf.line_start(line);
         }
         line -= 1;
