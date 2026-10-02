@@ -1665,44 +1665,52 @@ impl VimState {
         self.cursor.desired_col = None;
     }
 
-    /// The Esc side of the `insert_did_ai` contract: delete the CURRENT
-    /// line's leading whitespace when the line is whitespace-only and the
-    /// session's last insert was an untouched autoindent (see the field
-    /// doc). Cursor ends at the line start, like vim (probe S1: `o<Esc>`
-    /// parks at (2,1), not one left of the stripped indent).
-    fn strip_did_ai_line(&mut self, ctx: &mut Ctx) {
-        if !self.insert_did_ai {
-            return;
+    /// The Esc side of the `insert_did_ai` contract: delete the leading
+    /// whitespace of `line` when it is whitespace-only (an untouched
+    /// autoindent — see the field doc). Returns the number of bytes removed
+    /// (0 when the line has content or is empty); callers adjust the cursor
+    /// when the stripped line sits above it.
+    fn strip_ai_line(&mut self, ctx: &mut Ctx, line: usize) -> usize {
+        if !self.insert_did_ai || line >= ctx.buf.line_count() {
+            return 0;
         }
-        let line = ctx.buf.offset_to_line(self.cursor.offset);
         let ls = ctx.buf.line_start(line);
         let le = ctx.buf.line_end(line);
-        if le > ls
-            && ctx
-                .buf
-                .slice(ls..le)
-                .chars()
-                .all(char::is_whitespace)
-        {
+        if le > ls && ctx.buf.slice(ls..le).chars().all(char::is_whitespace) {
             self.begin_edit();
             self.edit_delete(ctx, ls..le);
-            self.cursor.offset = ls;
-            self.cursor.desired_col = None;
+            le - ls
+        } else {
+            0
         }
     }
 
     pub(crate) fn exit_insert(&mut self, ctx: &mut Ctx) {
-        // autoindent: a whitespace-only line the session never typed into
-        // loses its indent at Esc (vim's did_ai, probes S1/S3/S6/S8). Runs
-        // BEFORE the count-repeat so `3o<Esc>`'s empty copies append below
-        // an already-stripped typing line — a non-empty session (`3ofoo`)
-        // never strips here (typing cleared the flag), so the replicate's
-        // indent read below is unaffected.
-        self.strip_did_ai_line(ctx);
         // count-repeat insert (`3ifoo<Esc>`): replicate the typed text while
         // the session's undo group is open and BEFORE the exit cursor
-        // step-back, so the cursor lands one left of the LAST copy (vim)
+        // step-back, so the cursor lands one left of the LAST copy (vim).
+        // Runs BEFORE the did_ai strip: the replicate reads the typing
+        // line's indent for non-empty copies (`3ofoo<Esc>` → "    foo" per
+        // copy, probe R2) and the anchor check needs the cursor unmoved.
+        let typing_line = ctx.buf.offset_to_line(self.cursor.offset);
         self.replicate_count_insert(ctx);
+        // autoindent strip (probes S1/S3/S6/S8): the TYPING line may differ
+        // from the cursor line here (a count-repeat moved the cursor onto
+        // the last copy — `3o<Esc>` must strip the opened line too, probe
+        // R1), so both get the treatment
+        if self.insert_did_ai {
+            let cursor_line = ctx.buf.offset_to_line(self.cursor.offset);
+            if self.strip_ai_line(ctx, cursor_line) > 0 {
+                self.cursor.offset = ctx.buf.line_start(cursor_line);
+            }
+            if typing_line != cursor_line {
+                let removed = self.strip_ai_line(ctx, typing_line);
+                if typing_line < cursor_line {
+                    self.cursor.offset = self.cursor.offset.saturating_sub(removed);
+                }
+            }
+            self.cursor.desired_col = None;
+        }
         // back one char unless at the line start (Replace mode too: vim
         // leaves the cursor on the last replaced character)
         let line_start = ctx
