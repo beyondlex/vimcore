@@ -344,20 +344,24 @@ fn quote_range(
     }
     if chosen.is_none() {
         let left = positions.iter().rev().find(|&&p| p < offset).copied();
-        match left {
-            Some(l) => {
-                let right = positions.iter().copied().find(|&p| p > l);
-                chosen = right.map(|r| (l, r));
-            }
+        match left.and_then(|l| {
+            let right = positions.iter().copied().find(|&p| p > l);
+            right.map(|r| (l, r))
+        }) {
+            Some(pair) => chosen = Some(pair),
+            // no left quote at all — OR a left quote with no right partner
+            // (a dangling closer past the cursor): vim falls back to the
+            // FIRST pair of the line. 9.1 probe: `say "hi" then "bye" end`
+            // with the cursor after `"bye"` → `ci"` replaces `hi`. The old
+            // code only scanned pairs opening AFTER the cursor here, which
+            // found nothing past the last quote and belled.
             None => {
                 for pair in positions.chunks(2) {
                     if pair.len() < 2 {
                         break;
                     }
-                    if pair[0] > offset {
-                        chosen = Some((pair[0], pair[1]));
-                        break;
-                    }
+                    chosen = Some((pair[0], pair[1]));
+                    break;
                 }
             }
         }
