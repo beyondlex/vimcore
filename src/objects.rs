@@ -485,6 +485,11 @@ fn tag_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRa
                 tags.push((i, i + close_rel + 1, name, is_open));
                 i += close_rel + 1;
                 continue;
+            } else {
+                // no `>` ahead of this `<` means none ahead of any later
+                // `<` either — stop instead of rescanning the tail per `<`
+                // (a template fragment of bare `<`s made this quadratic)
+                break;
             }
         }
         i += 1;

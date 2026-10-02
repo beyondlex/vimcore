@@ -122,10 +122,14 @@ pub fn next_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
             }
         }
     }
-    // on a run end / blank: jump to the end of the next run. When no run
-    // follows (cursor on the last word's end), the motion is a no-op —
-    // returning `buf.len()` made `ye`/`de` swallow the trailing newline
-    // (9.1 probe: `ye` at the end of the last word yanks just that word).
+    // on a run end / blank: jump to the end of the next run. On the last
+    // word's end the FIXED POINT (returning `offset` unchanged) is correct
+    // vim behavior, NOT a failure: `ye`/`de` there yank/delete exactly the
+    // cursor character (9.1 probe: `ye` at the end of the last word yanks
+    // just that char; the inclusive-span pipeline treats the unchanged
+    // landing as a 1-char span). Returning `buf.len()` instead made them
+    // swallow the trailing newline. Callers that repeat with a count guard
+    // the fixed point themselves (motions.rs WordEnd).
     let Some(start) = next_non_blank(buf, buf.next_char_offset(offset).unwrap_or(offset)) else {
         return offset;
     };

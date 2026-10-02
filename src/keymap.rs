@@ -35,10 +35,6 @@ pub enum Walk<'a, T> {
 }
 
 impl<T> Trie<T> {
-    pub fn is_empty(&self) -> bool {
-        self.children.is_empty() && self.value.is_none()
-    }
-
     pub fn insert(&mut self, keys: &[Key], value: T) {
         let mut node = self;
         for key in keys {

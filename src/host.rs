@@ -25,6 +25,13 @@ pub trait VimHost {
     fn viewport(&self) -> (usize, usize);
 
     /// Make sure `line` is visible.
+    ///
+    /// Must be a MINIMAL scroll: if the line is already on screen the
+    /// implementation is a no-op, never a re-centering. `C-e`/`C-y` free
+    /// scrolling depends on this — the engine scrolls the view first and
+    /// then calls this only to keep the cursor in view; a host that jumps
+    /// the line to the viewport edge would drag the cursor back on every
+    /// keypress and silently disable free scrolling.
     fn scroll_to_line(&mut self, line: usize);
 
     /// Make `line` visible with a specific anchor (`zz`/`zt`/`zb`). The

@@ -754,13 +754,8 @@ impl Motion {
                 None => MotionResult::stuck(start),
             };
         }
-        MotionResult::new(
-            o,
-            if till {
-                MotionKind::Exclusive
-            } else {
-                MotionKind::Inclusive
-            },
-        )
+        // `till` always returned above (skip / repeat paths); plain `f`/`F`
+        // land INCLUSIVE on the matched char
+        MotionResult::new(o, MotionKind::Inclusive)
     }
 }

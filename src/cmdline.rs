@@ -473,15 +473,16 @@ impl VimState {
             }
             // :marks — named marks plus the specials, `mark  line  col  text`
             "marks" => {
-                for (name, offset) in self.marks.items() {
+                let listed = self.marks.items();
+                for (name, offset) in &listed {
                     ctx.host
-                        .status_message(&Self::mark_line(ctx.buf, name, offset));
+                        .status_message(&Self::mark_line(ctx.buf, *name, *offset));
                 }
                 // items() already carries a user-set `.` mark (m.) — only
                 // append the engine-tracked row when it is not listed yet,
                 // or the listing shows two rows for one mark
                 if let Some(offset) = self.marks.last_change {
-                    if !self.marks.items().iter().any(|(n, _)| *n == '.') {
+                    if !listed.iter().any(|(n, _)| *n == '.') {
                         ctx.host
                             .status_message(&Self::mark_line(ctx.buf, '.', offset));
                     }
@@ -1181,13 +1182,13 @@ impl VimState {
                 return;
             }
         };
-        let (mut first, last) = (first, last);
+        let (mut first, mut last) = (first, last);
         // any EXPLICIT count (even 1) re-anchors at the range's last line
         // (vim: `:1,2y 1` yanks just line 2)
         if count >= 1 {
             first = last;
         }
-        let last = last
+        last = last
             .saturating_add(count.saturating_sub(1))
             .min(ctx.buf.line_count().saturating_sub(1));
         let first = first.min(last);

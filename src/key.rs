@@ -227,16 +227,6 @@ impl Key {
                 kind: KeyKind::Named(rest.to_ascii_lowercase()),
             },
         };
-        if modifiers.control {
-            if let KeyKind::Char(c) = key.kind {
-                // keep the full modifier set (M-<C-a>, <C-S-a> …) instead of
-                // re-wrapping with ctrl_char, which would drop the others
-                return Key {
-                    modifiers,
-                    kind: KeyKind::Char(c),
-                };
-            }
-        }
         key
     }
 }
