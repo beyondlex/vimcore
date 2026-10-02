@@ -356,6 +356,25 @@ fn ex_substitute_trailing_count() {
     assert_eq!(f.text(), "XXX\nXXX\n", "g flag + count combine");
 }
 
+/// `:s` 的报告格式对齐 vim：恰好 1 处替换静默；多条读
+/// "{n} substitutions on {m} lines"（单数 line）。
+#[test]
+fn substitute_report_format_matches_vim() {
+    // 1 处替换 = 静默（vim v:statusmsg 为空）
+    let mut f = Fixture::new("aaa\n");
+    f.feed([":", "s", "/", "a", "/", "X", "/", "<CR>"]);
+    assert_eq!(f.text(), "Xaa\n");
+    assert_eq!(f.host.statuses, Vec::<String>::new(), "single sub is silent");
+    // 同一行 2 处（g 旗标）= "on 1 line" 单数
+    let mut f = Fixture::new("aa\n");
+    f.feed([":", "s", "/", "a", "/", "X", "/", "g", "<CR>"]);
+    assert_eq!(f.host.statuses, ["2 substitutions on 1 line"]);
+    // 跨行 = "on N lines"
+    let mut f = Fixture::new("a1\na2\na3\n");
+    f.feed([":", "1", ",", "3", "s", "/", "a", "/", "X", "/", "<CR>"]);
+    assert_eq!(f.host.statuses, ["3 substitutions on 3 lines"]);
+}
+
 // ---- :nohlsearch 缩写前缀（T11）---------------------------------------------
 
 /// vim 缩写规则：nohlsearch 的全部无歧义前缀可用（旧实现停在 nohls）。

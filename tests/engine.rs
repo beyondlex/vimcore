@@ -1401,7 +1401,7 @@ fn ex_feedback_goes_through_status_channel() {
     ]);
     assert_eq!(
         f.host.statuses.last().map(String::as_str),
-        Some("2 substitutions")
+        Some("2 substitutions on 1 line")
     );
 
     // unknown command: E492
