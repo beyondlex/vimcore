@@ -282,26 +282,33 @@ impl Motion {
                 let line =
                     (buf.offset_to_line(vim.cursor.offset) + count - 1).min(buf.line_count() - 1);
                 let end = buf.line_end(line);
+                let start = buf.line_start(line);
+                let mut found: Option<usize> = None;
                 let mut o = end;
                 while let Some(prev) = buf.prev_char_offset(o) {
-                    if prev < buf.line_start(line) {
+                    if prev < start {
                         break;
                     }
                     match buf.char_at(prev) {
                         Some(c) if c != ' ' && c != '\t' => {
-                            o = prev;
+                            found = Some(prev);
                             break;
                         }
                         _ => o = prev,
                     }
                 }
-                if o == end {
-                    // whitespace-only line: no non-blank to land on; an
-                    // Inclusive span at the newline position would swallow
-                    // the line break (same hazard as `d$` on an empty line)
-                    MotionResult::new(buf.line_start(line), MotionKind::Exclusive)
-                } else {
-                    MotionResult::new(o, MotionKind::Inclusive)
+                match found {
+                    Some(pos) => MotionResult::new(pos, MotionKind::Inclusive),
+                    // whitespace-only OR empty line: span [line_start, cursor).
+                    // vim 9.1 on `   `: `dg_` from c1/c2/c3 deletes 1/2/3
+                    // chars, `cg_` replaces the run before the cursor, plain
+                    // `g_` parks on col 1 — all five fit the exclusive span
+                    // [line_start, cursor). The old `o == end` guard only
+                    // fired on EMPTY lines: a whitespace-only line walked `o`
+                    // down to line_start, missed the guard, and returned an
+                    // INCLUSIVE line_start — `dg_` then deleted THROUGH the
+                    // cursor instead of up to it.
+                    None => MotionResult::new(start, MotionKind::Exclusive),
                 }
             }
             // w / W: start of the next word run

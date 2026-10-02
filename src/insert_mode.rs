@@ -315,6 +315,26 @@ impl VimState {
     fn insert_delete_word_before(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
+        // whitespace between the line start and the cursor goes in ONE
+        // stroke (vim 9.1 probes: `i<C-w>` from c2/c3 of `  y` wipes the run
+        // back to col 1 — the autoindent wipe; the old code fell through to
+        // the JOIN branch because prev_word_start crosses the line, and then
+        // peeled exactly one byte per press). A JOIN stays a col-1-only
+        // stroke: mid-run presses never merge lines.
+        if at > line_start
+            && ctx
+                .buf
+                .slice(line_start..at)
+                .chars()
+                .all(char::is_whitespace)
+        {
+            self.begin_edit();
+            self.edit_delete(ctx, line_start..at);
+            self.cursor.offset = line_start;
+            self.republish_search(ctx);
+            ctx.host.changed();
+            return;
+        }
         let target = word::prev_word_start(ctx.buf, at, false);
         if target >= line_start {
             if target < at {

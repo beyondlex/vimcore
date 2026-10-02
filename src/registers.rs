@@ -44,6 +44,17 @@ pub(crate) fn clamped_repeat(text: &str, count: usize) -> String {
     text.repeat(count)
 }
 
+/// Push an explicit `"+` store to the host side (`VimHost::clipboard_write`).
+/// The register file has no host access, so the yank/delete funnels call this
+/// right after storing; without it `"+yy` wrote a named slot that
+/// [`Registers::get_for_paste`] (which reads the HOST clipboard) never saw,
+/// and `"+p` pasted stale external content instead.
+pub fn sync_clipboard_host(host: &mut dyn VimHost, name: Option<char>, text: &str) {
+    if name == Some(CLIPBOARD) {
+        host.clipboard_write(text);
+    }
+}
+
 impl Registers {
     pub fn get(&self, name: char) -> Option<&Register> {
         match name {
@@ -72,14 +83,23 @@ impl Registers {
     /// the `clipboard=unnamed` behavior through the host).
     pub fn get_for_paste(&self, name: char, host: &dyn VimHost) -> Option<Register> {
         match name {
-            CLIPBOARD => host.clipboard_read().map(|text| Register {
-                kind: if text.contains('\n') {
-                    RegisterKind::Linewise
-                } else {
-                    RegisterKind::Charwise
-                },
-                text,
-            }),
+            CLIPBOARD => host
+                .clipboard_read()
+                .filter(|text| !text.is_empty())
+                .map(|text| Register {
+                    kind: if text.contains('\n') {
+                        RegisterKind::Linewise
+                    } else {
+                        RegisterKind::Charwise
+                    },
+                    text,
+                })
+                // a host whose clipboard is a no-op (or was empty at read
+                // time) still gets the `"+yy` → `"+p` roundtrip through the
+                // named-slot mirror that [`crate::ops`] keeps in sync — the
+                // old code read ONLY the host side, so a yank into `+`
+                // vanished into a slot no paste could reach
+                .or_else(|| self.get(CLIPBOARD).cloned()),
             _ => self.get(name).cloned(),
         }
     }
