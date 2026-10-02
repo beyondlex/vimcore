@@ -2831,13 +2831,13 @@ impl VimState {
                         // unrelated earlier search.
                         if matches!(motion, Motion::StarSearch { .. }) {
                             let line = ctx.buf.offset_to_line(self.cursor.offset);
-                            let line_blank = ctx.buf
+                            let line_blank = ctx
+                                .buf
                                 .slice(ctx.buf.line_start(line)..ctx.buf.line_end(line))
                                 .chars()
                                 .all(char::is_whitespace);
                             if line_blank {
-                                ctx.host
-                                    .status_message("E348: No string under cursor");
+                                ctx.host.status_message("E348: No string under cursor");
                                 ctx.host.bell();
                             } else {
                                 self.report_search_miss(ctx);
@@ -2910,9 +2910,7 @@ impl VimState {
                 // exclusion silently dropped the count and typed one group.
                 let count = self.take_total_count();
                 self.start_insert(ctx, insert);
-                if count > 1
-                    && !matches!(insert, InsertKind::Change)
-                    && self.block_insert.is_none()
+                if count > 1 && !matches!(insert, InsertKind::Change) && self.block_insert.is_none()
                 {
                     self.insert_repeat = Some(InsertRepeat {
                         expanded: String::new(),
@@ -3089,8 +3087,9 @@ impl VimState {
             RecordedStep::Key(k) if f(k) => true,
             _ => false,
         };
-        let plain_digit =
-            |k: &Key| k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit());
+        let plain_digit = |k: &Key| {
+            k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit())
+        };
         let mut i = 0;
         while i < steps.len() && plain_key(&steps[i], &plain_digit) {
             i += 1;
@@ -3105,8 +3104,7 @@ impl VimState {
         if !steps.get(i + 1).is_some_and(|k| plain_key(k, &reg_ok)) {
             return false;
         }
-        let put_ok =
-            |k: &Key| k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char('p' | 'P'));
+        let put_ok = |k: &Key| k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char('p' | 'P'));
         if !steps.last().is_some_and(|k| plain_key(k, &put_ok)) {
             return false;
         }

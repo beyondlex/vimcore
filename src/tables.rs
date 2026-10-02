@@ -500,9 +500,18 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["z", "t"], CmdKind::Normal(NormalCmd::ScrollTop));
     b.normal(&["z", "b"], CmdKind::Normal(NormalCmd::ScrollBottom));
     // visual 模式同款:滚动 + 保留选区(round11 悬置闭环,vim 行为)
-    b.visual(&["z", "z"], CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Center)));
-    b.visual(&["z", "t"], CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Top)));
-    b.visual(&["z", "b"], CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Bottom)));
+    b.visual(
+        &["z", "z"],
+        CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Center)),
+    );
+    b.visual(
+        &["z", "t"],
+        CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Top)),
+    );
+    b.visual(
+        &["z", "b"],
+        CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Bottom)),
+    );
     b.normal(&["g", "v"], CmdKind::Normal(NormalCmd::RestoreVisual));
     b.normal(&["Z", "Z"], CmdKind::Normal(NormalCmd::WriteQuit));
     b.normal(&["Z", "Q"], CmdKind::Normal(NormalCmd::QuitNoSave));
@@ -557,13 +566,28 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // Y/D/X/C/S are vim's LINEWISE visual commands (see VisualCmd::LinewiseOp;
     // 9.1 probes: `vlY` yanks the line, `vlD` deletes the line whole, `v_x`
     // stays charwise and `v_s` stays charwise change)
-    b.visual(&["Y"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Yank)));
+    b.visual(
+        &["Y"],
+        CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Yank)),
+    );
     b.visual(&["c"], CmdKind::Operator(Operator::Change));
     b.visual(&["s"], CmdKind::Operator(Operator::Change));
-    b.visual(&["C"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)));
-    b.visual(&["S"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)));
-    b.visual(&["D"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)));
-    b.visual(&["X"], CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)));
+    b.visual(
+        &["C"],
+        CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)),
+    );
+    b.visual(
+        &["S"],
+        CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)),
+    );
+    b.visual(
+        &["D"],
+        CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)),
+    );
+    b.visual(
+        &["X"],
+        CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)),
+    );
     b.visual(&[">"], CmdKind::Operator(Operator::IndentRight));
     b.visual(&["<"], CmdKind::Operator(Operator::IndentLeft));
     b.visual(&["u"], CmdKind::Operator(Operator::Lowercase));

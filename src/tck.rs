@@ -112,7 +112,9 @@ pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), Strin
         if c.len_utf8() > 1 {
             for mid in (o + 1)..(o + c.len_utf8()) {
                 if buf.char_at(mid).is_some() {
-                    return Err(format!("char_at({mid}) = Some：多字节字符中间必须返回 None"));
+                    return Err(format!(
+                        "char_at({mid}) = Some：多字节字符中间必须返回 None"
+                    ));
                 }
                 let (a, b) = (buf.offset_to_line(mid), buf.offset_to_line(o));
                 if a != b {

@@ -505,13 +505,10 @@ impl VimState {
         // `:se[t]` and `:setl[ocal]` — in a single-buffer engine setlocal
         // has no scope to differ, so it IS `:set` (vim accepts both spellings)
         const SET_SPELLINGS: &[&str] = &["set", "se", "setlocal", "setl"];
-        if let Some(rest) = SET_SPELLINGS
-            .iter()
-            .find_map(|cmd| {
-                line.strip_prefix(cmd)
-                    .filter(|rest| rest.is_empty() || rest.starts_with(' '))
-            })
-        {
+        if let Some(rest) = SET_SPELLINGS.iter().find_map(|cmd| {
+            line.strip_prefix(cmd)
+                .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+        }) {
             self.ex_set(ctx, rest.trim_start());
             return;
         }
@@ -520,7 +517,15 @@ impl VimState {
         // `:bl[ast]` — every prefix of the full name works (`:bne`, `:bpr`…)
         const BNEXT_SPELLINGS: &[&str] = &["bnext", "bnex", "bne", "bn"];
         const BPREV_SPELLINGS: &[&str] = &[
-            "bprevious", "bpreviou", "bprevio", "bprevi", "bprev", "bpre", "bpr", "bp", "bN",
+            "bprevious",
+            "bpreviou",
+            "bprevio",
+            "bprevi",
+            "bprev",
+            "bpre",
+            "bpr",
+            "bp",
+            "bN",
         ];
         // `:br`/`:bre` stay out on purpose: vim has `:break` (script
         // debugging), so those prefixes are ambiguous there (E464); from
@@ -835,7 +840,21 @@ impl VimState {
                     // mark *names*, E20 for unset ones.
                     let name = other[1..].chars().next().unwrap_or('\'');
                     if !name.is_ascii_alphanumeric()
-                        && !matches!(name, '"' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | '.' | '^' | '\'' | '`')
+                        && !matches!(
+                            name,
+                            '"' | '<'
+                                | '>'
+                                | '['
+                                | ']'
+                                | '('
+                                | ')'
+                                | '{'
+                                | '}'
+                                | '.'
+                                | '^'
+                                | '\''
+                                | '`'
+                        )
                     {
                         return Err("E78: Unknown mark".to_owned());
                     }
@@ -906,9 +925,7 @@ impl VimState {
             // branch above, and letting a bare `>` into the range made
             // `:5>` (the shift command, E492 here) parse as a bogus range
             // and report a misleading E16
-            if c.is_ascii_digit()
-                || matches!(c, '.' | '$' | '%' | ',' | ';' | '+' | '-' | ' ')
-            {
+            if c.is_ascii_digit() || matches!(c, '.' | '$' | '%' | ',' | ';' | '+' | '-' | ' ') {
                 i += 1;
                 range_end = i;
                 continue;
@@ -971,7 +988,11 @@ impl VimState {
                     addresses[addresses.len() - 2],
                     addresses[addresses.len() - 1],
                 );
-                Ok((Some((a.min(b), a.max(b))), addresses.len(), rest.trim_start()))
+                Ok((
+                    Some((a.min(b), a.max(b))),
+                    addresses.len(),
+                    rest.trim_start(),
+                ))
             }
         }
     }
@@ -1291,7 +1312,8 @@ impl VimState {
                 }
                 continue;
             }
-            let search_rule = arg.trim_end_matches(['!', '?', '='])
+            let search_rule = arg
+                .trim_end_matches(['!', '?', '='])
                 .split('=')
                 .next()
                 .map(|n| {
@@ -1300,7 +1322,10 @@ impl VimState {
                     // `scs`(smartcase), `hls`(hlsearch). The old list had a
                     // phantom `isc` and missed `scs`, so `:set scs` changed
                     // the matching rule without dropping the highlight cache.
-                    matches!(n, "ic" | "ignorecase" | "scs" | "smartcase" | "hls" | "hlsearch")
+                    matches!(
+                        n,
+                        "ic" | "ignorecase" | "scs" | "smartcase" | "hls" | "hlsearch"
+                    )
                 })
                 .unwrap_or(false);
             let ok = if let Some(name) = arg.strip_suffix('!') {
@@ -1378,7 +1403,14 @@ impl VimState {
         // (`:su`, `:sub`, …) are accepted spellings of `s` (vim's
         // abbreviation rule)
         const SUBST_ABBREVS: &[&str] = &[
-            "substitute", "substitut", "substitu", "substit", "substi", "subst", "subs", "sub",
+            "substitute",
+            "substitut",
+            "substitu",
+            "substit",
+            "substi",
+            "subst",
+            "subs",
+            "sub",
             "su",
         ];
         let normalized;

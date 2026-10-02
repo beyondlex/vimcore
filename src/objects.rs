@@ -164,11 +164,7 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
 /// (blank lines belong to it), matching vim (9.1 probes: `yaw` on the gap of
 /// "foo   bar" yanks "   bar"; on a whitespace-only/empty line the object
 /// reaches the next line's word, so `daw` merges that line away).
-fn blank_run_plus_next_word(
-    buf: &dyn VimBuffer,
-    big: bool,
-    run_start: usize,
-) -> ObjectRange {
+fn blank_run_plus_next_word(buf: &dyn VimBuffer, big: bool, run_start: usize) -> ObjectRange {
     let mut o = run_start;
     while let Some(c) = buf.char_at(o) {
         if c.is_whitespace() {
