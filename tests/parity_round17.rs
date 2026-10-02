@@ -46,7 +46,7 @@ fn register_prefix_cleared_by_macro_stop() {
 /// 旧实现 @ 期间抑制提交，`.` 重复的是宏前的 `~`（得到 'Cdef'）。
 #[test]
 fn dot_after_macro_replays_macro_last_change() {
-    let mut f = edit("abcdef\n", 0, 0, &["q", "a", "x", "q"]);
+    let f = edit("abcdef\n", 0, 0, &["q", "a", "x", "q"]);
     let mut f = f;
     f.feed(["~"]); // 'b'→'B'
     assert_eq!(f.text(), "Bcdef\n");
@@ -59,7 +59,7 @@ fn dot_after_macro_replays_macro_last_change() {
 /// `.` 自身重放仍不自我扩展（T2 对照）：`x.` 之后 last_change 停在一份 x。
 #[test]
 fn dot_replay_still_does_not_self_extend() {
-    let mut f = edit("abcdef\n", 0, 0, &["x", "."]);
+    let f = edit("abcdef\n", 0, 0, &["x", "."]);
     assert_eq!(f.text(), "cdef\n", "one repeat, not a self-feeding loop");
 }
 
@@ -125,39 +125,39 @@ fn clipboard_paste_falls_back_to_named_slot() {
 /// 旧实现吞掉句尾空格（得到 "Bbb." 而非 " Bbb."）。
 #[test]
 fn inner_sentence_stops_at_terminator() {
-    let mut f = edit("Aaa. Bbb.\n", 0, 0, &["d", "i", "s"]);
+    let f = edit("Aaa. Bbb.\n", 0, 0, &["d", "i", "s"]);
     assert_eq!(f.text(), " Bbb.\n", "T4a: trailing space stays with next");
-    let mut f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["5", "l", "d", "i", "s"]);
+    let f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["5", "l", "d", "i", "s"]);
     assert_eq!(f.text(), "Aaa.  Ccc.\n", "middle sentence, both spaces kept");
 }
 
 /// PROBE T4b: `das` = 句子+尾随空白（句中）；末句无尾随时回退取前导空白。
 #[test]
 fn outer_sentence_trailing_then_leading_fallback() {
-    let mut f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["5", "l", "d", "a", "s"]);
+    let f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["5", "l", "d", "a", "s"]);
     assert_eq!(f.text(), "Aaa. Ccc.\n", "mid sentence takes its trailing ws");
-    let mut f = edit("Aaa. Bbb.\n", 0, 0, &["5", "l", "d", "a", "s"]);
+    let f = edit("Aaa. Bbb.\n", 0, 0, &["5", "l", "d", "a", "s"]);
     assert_eq!(f.text(), "Aaa.\n", "last sentence falls back to leading ws");
 }
 
 /// PROBE T4c: `as` 的尾随空白在段界（空行）封顶 —— 空行保留。
 #[test]
 fn outer_sentence_blank_line_is_boundary() {
-    let mut f = edit("Aaa.\n\nBbb.\n", 0, 0, &["d", "a", "s"]);
+    let f = edit("Aaa.\n\nBbb.\n", 0, 0, &["d", "a", "s"]);
     assert_eq!(f.text(), "\nBbb.\n", "T4c: the empty line survives");
     // 光标在 Bbb 上：无同行前导空白 → 只删句子（空行与换行都保留；
     // vim 探针 ['Aaa.', '', '|'] 逐字节一致）
-    let mut f = edit("Aaa.\n\nBbb.\n", 2, 0, &["d", "a", "s"]);
+    let f = edit("Aaa.\n\nBbb.\n", 2, 0, &["d", "a", "s"]);
     assert_eq!(f.text(), "Aaa.\n\n\n", "sentence only; gap whitespace stays");
     // 同行的前导空白可以带上（vim ['Aaa.', '', 'Bbb.']）
-    let mut f = edit("Aaa.\n\nBbb. Ccc.\n", 2, 9, &["d", "a", "s"]);
+    let f = edit("Aaa.\n\nBbb. Ccc.\n", 2, 9, &["d", "a", "s"]);
     assert_eq!(f.text(), "Aaa.\n\nBbb.\n", "same-line leading space goes too");
 }
 
 /// PROBE T4d: `2das` 删两句（连各自尾随空白）。
 #[test]
 fn outer_sentence_count_two() {
-    let mut f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["2", "d", "a", "s"]);
+    let f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["2", "d", "a", "s"]);
     assert_eq!(f.text(), "Ccc.\n");
 }
 
@@ -166,9 +166,9 @@ fn outer_sentence_count_two() {
 /// PROBE T5a: `d2aw` 删两个词（旧实现等价 `daw`）。
 #[test]
 fn count_repeats_text_object() {
-    let mut f = edit("foo bar baz\n", 0, 0, &["d", "2", "a", "w"]);
+    let f = edit("foo bar baz\n", 0, 0, &["d", "2", "a", "w"]);
     assert_eq!(f.text(), "baz\n", "T5a: d2aw deletes two words");
-    let mut f = edit("foo bar baz\n", 0, 0, &["2", "d", "a", "w"]);
+    let f = edit("foo bar baz\n", 0, 0, &["2", "d", "a", "w"]);
     assert_eq!(f.text(), "baz\n", "pre-count multiplies too");
     let mut f = edit("foo bar baz\n", 0, 0, &["c", "3", "a", "w"]);
     f.type_text("X");
@@ -180,18 +180,18 @@ fn count_repeats_text_object() {
 /// `3iw` 到 "foo bar"。
 #[test]
 fn inner_word_count_matches_vim_quirk() {
-    let mut f = edit("foo bar baz\n", 0, 0, &["d", "2", "i", "w"]);
+    let f = edit("foo bar baz\n", 0, 0, &["d", "2", "i", "w"]);
     assert_eq!(f.text(), "bar baz\n", "2iw covers 'foo ' like vim");
-    let mut f = edit("foo bar baz\n", 0, 0, &["d", "3", "i", "w"]);
+    let f = edit("foo bar baz\n", 0, 0, &["d", "3", "i", "w"]);
     assert_eq!(f.text(), " baz\n", "3iw covers 'foo bar' (blank stays)");
 }
 
 /// PROBE T5c: visual 下同样扩展；`v2i(` 攀到外层括号。
 #[test]
 fn visual_object_count_extends() {
-    let mut f = edit("foo bar baz\n", 0, 0, &["v", "2", "a", "w", "y", "0", "P"]);
+    let f = edit("foo bar baz\n", 0, 0, &["v", "2", "a", "w", "y", "0", "P"]);
     assert_eq!(f.text(), "foo bar foo bar baz\n", "v2aw yanks two words");
-    let mut f = edit("f (1 + (2)) g\n", 0, 7, &["v", "2", "i", "(", "y", "0", "P"]);
+    let f = edit("f (1 + (2)) g\n", 0, 7, &["v", "2", "i", "(", "y", "0", "P"]);
     assert_eq!(f.text(), "1 + (2)f (1 + (2)) g\n", "v2i( climbs one level");
 }
 
@@ -201,18 +201,18 @@ fn visual_object_count_extends() {
 /// [line_start, cursor)。旧实现 Inclusive(line_start) 把 c1 也删成空行。
 #[test]
 fn g_underscore_whitespace_line_spans_to_cursor() {
-    let mut f = edit("   \nfoo\n", 0, 0, &["d", "g", "_"]);
+    let f = edit("   \nfoo\n", 0, 0, &["d", "g", "_"]);
     assert_eq!(f.text(), "  \nfoo\n", "c1 deletes one char");
-    let mut f = edit("   \nfoo\n", 0, 1, &["d", "g", "_"]);
+    let f = edit("   \nfoo\n", 0, 1, &["d", "g", "_"]);
     assert_eq!(f.text(), " \nfoo\n", "c2 deletes two");
-    let mut f = edit("   \nfoo\n", 0, 2, &["d", "g", "_"]);
+    let f = edit("   \nfoo\n", 0, 2, &["d", "g", "_"]);
     assert_eq!(f.text(), "\nfoo\n", "c3 deletes three");
     let mut f = edit("   \n", 0, 1, &["c", "g", "_"]);
     f.type_text("X");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "X \n", "cg_ replaces the run through the cursor");
     // 非空白行不变：g_ 落最后非空白字符
-    let mut f = edit("a  b\n", 0, 1, &["d", "g", "_"]);
+    let f = edit("a  b\n", 0, 1, &["d", "g", "_"]);
     assert_eq!(f.text(), "a\n");
 }
 
@@ -312,24 +312,24 @@ fn shift_on_whitespace_only_and_empty_lines() {
 /// used"）。旧实现对空数字串报 E1247。
 #[test]
 fn ex_bare_plus_minus_offsets() {
-    let mut f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "+", "d", "<CR>"]);
+    let f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "+", "d", "<CR>"]);
     assert_eq!(f.text(), "aaa\nccc\n", ":+d deletes the next line");
-    let mut f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", "-", "d", "<CR>"]);
+    let f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", "-", "d", "<CR>"]);
     assert_eq!(f.text(), "bbb\nccc\n", ":-d deletes the previous line");
-    let mut f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "5", "+", "d", "<CR>"]);
+    let f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "5", "+", "d", "<CR>"]);
     assert_eq!(
         f.text(),
         "aaa\nbbb\nccc\n",
         ":5+d past the end runs nothing (vim E16)"
     );
     assert!(f.host.statuses.iter().any(|s| s.contains("E16")));
-    let mut f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", ".", "-", "d", "<CR>"]);
+    let f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", ".", "-", "d", "<CR>"]);
     assert_eq!(f.text(), "bbb\nccc\n", ":.-d deletes the line above");
     // 链式偏移里的裸符号：:+-d = +1-1 = 当前行
-    let mut f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", "+", "-", "d", "<CR>"]);
+    let f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", "+", "-", "d", "<CR>"]);
     assert_eq!(f.text(), "aaa\nccc\n", ":+-d re-anchors at the cursor line");
     // 数字溢出仍报 E1247（round15 行为保持）
-    let mut f = edit("aaa\nbbb\n", 0, 0, &[":", "1", "+", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "d", "<CR>"]);
+    let f = edit("aaa\nbbb\n", 0, 0, &[":", "1", "+", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "d", "<CR>"]);
     assert_eq!(f.text(), "aaa\nbbb\n", "huge offset still refused");
     assert!(f.host.statuses.iter().any(|s| s.contains("E1247")));
 }
@@ -337,20 +337,20 @@ fn ex_bare_plus_minus_offsets() {
 /// PROBE T10a: `:d2` 直连数字 = `:d 2`（vim ex 解析：数字终止命令名）。
 #[test]
 fn ex_packed_count_for_delete() {
-    let mut f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "d", "2", "<CR>"]);
+    let f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "d", "2", "<CR>"]);
     assert_eq!(f.text(), "ccc\n", ":d2 deletes two lines");
 }
 
 /// PROBE T10b: `:s` 尾 count = 从范围末行起数 N 行。
 #[test]
 fn ex_substitute_trailing_count() {
-    let mut f = edit("aaa\naaa\naaa\n", 0, 0, &[":", "s", "/", "a", "/", "X", "/", " ", "3", "<CR>"]);
+    let f = edit("aaa\naaa\naaa\n", 0, 0, &[":", "s", "/", "a", "/", "X", "/", " ", "3", "<CR>"]);
     assert_eq!(f.text(), "Xaa\nXaa\nXaa\n", "count 3 from line 1");
-    let mut f = edit("aaa\naaa\naaa\n", 0, 0, &[
+    let f = edit("aaa\naaa\naaa\n", 0, 0, &[
         ":", "1", ",", "2", "s", "/", "a", "/", "X", "/", "2", "<CR>",
     ]);
     assert_eq!(f.text(), "aaa\nXaa\nXaa\n", ":1,2s count 2 = lines 2-3");
-    let mut f = edit("aaa\naaa\n", 0, 0, &[
+    let f = edit("aaa\naaa\n", 0, 0, &[
         ":", "s", "/", "a", "/", "X", "/", "g", "2", "<CR>",
     ]);
     assert_eq!(f.text(), "XXX\nXXX\n", "g flag + count combine");

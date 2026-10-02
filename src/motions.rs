@@ -407,12 +407,12 @@ impl Motion {
                     return MotionResult::stuck(vim.cursor.offset);
                 }
                 let total = buf.line_count() as u64;
-                let line = (((count as u64 * total + 99) / 100).clamp(1, total) - 1) as usize;
+                let line = ((count as u64 * total).div_ceil(100).clamp(1, total) - 1) as usize;
                 MotionResult::new(buf.line_start(line), MotionKind::Linewise)
             }
             Motion::GoToFilePercent => {
                 let total = buf.line_count().max(1) as u64;
-                let line = (((total + 99) / 100).clamp(1, total) - 1) as usize;
+                let line = ((total).div_ceil(100).clamp(1, total) - 1) as usize;
                 MotionResult::new(buf.line_start(line), MotionKind::Linewise)
             }
             Motion::MatchBracket => match word::match_bracket(buf, vim.cursor.offset) {

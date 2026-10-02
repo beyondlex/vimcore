@@ -394,12 +394,9 @@ fn quote_range(
             // code only scanned pairs opening AFTER the cursor here, which
             // found nothing past the last quote and belled.
             None => {
-                for pair in positions.chunks(2) {
-                    if pair.len() < 2 {
-                        break;
-                    }
-                    chosen = Some((pair[0], pair[1]));
-                    break;
+                // "first pair of the line" — only a complete pair qualifies
+                if let Some(&[a, b]) = positions.first_chunk::<2>() {
+                    chosen = Some((a, b));
                 }
             }
         }

@@ -3314,9 +3314,8 @@ impl VimState {
     /// digits, ending in `p`/`P`. Anything else (a yank into `"1`, a named
     /// register, a delete) is left alone — vim only walks the ring for puts.
     fn bump_redo_register(steps: &mut [RecordedStep]) -> bool {
-        let plain_key = |k: &RecordedStep, f: &dyn Fn(&Key) -> bool| match k {
-            RecordedStep::Key(k) if f(k) => true,
-            _ => false,
+        let plain_key = |k: &RecordedStep, f: &dyn Fn(&Key) -> bool| {
+            matches!(k, RecordedStep::Key(k) if f(k))
         };
         let plain_digit = |k: &Key| {
             k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit())
