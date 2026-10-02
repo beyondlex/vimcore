@@ -71,7 +71,11 @@ fn bind_let_leader(line: &str, prefix: &str, target: &mut Key) -> bool {
     // let mapleader = " " / "," / "<Space>" — a bare space parses to
     // Char(' ') via parse_key_sequence, and `<Space>` normalizes to
     // Char(' ') in Key::parse_angle, so both spellings converge.
-    if let Some(value) = rest.split('=').nth(1) {
+    // split_once('='), not split('=').nth(1): a leader VALUE containing
+    // `=` (`let mapleader = "="`) must survive — the nth(1) form took the
+    // piece between the first two `=`s (` "`), trimmed to nothing and
+    // silently kept the default leader.
+    if let Some((_, value)) = rest.split_once('=') {
         let value = value.trim().trim_matches('"');
         if let Some(key) = parse_key_sequence(value).first() {
             *target = key.clone();
@@ -302,5 +306,16 @@ mod tests {
         // is silently ignored at apply time (like IdeaVim's unknown sets)
         let config = parse("set wrap");
         assert_eq!(config.settings, vec![Setting::On("wrap".to_owned())]);
+    }
+
+    #[test]
+    fn leader_value_containing_equals_survives() {
+        // `let mapleader = "="` — split('=').nth(1) took the piece between
+        // the FIRST TWO `=`s (` "`), trimmed to nothing and silently kept
+        // the default `\` leader. split_once feeds the whole tail after the
+        // first `=` to the value.
+        let config = parse("let mapleader = \"=\"\nmap <Leader>x ihllo");
+        assert_eq!(config.mappings[0].lhs.first(), Some(&Key::char('=')));
+        assert_eq!(config.mappings[0].lhs.get(1), Some(&Key::char('x')));
     }
 }
