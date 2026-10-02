@@ -3078,6 +3078,51 @@ impl VimState {
         pre.saturating_mul(post).min(COUNT_CAP)
     }
 
+    /// `:h redo-register`: rewrite the recorded steps of a put from a
+    /// numbered register in place, bumping `"1`→`"2` … capped at `"9`. The
+    /// recognized shape is what the put pipeline records: optional leading
+    /// count digits, the `"` prefix, the register digit 1-8, optional count
+    /// digits, ending in `p`/`P`. Anything else (a yank into `"1`, a named
+    /// register, a delete) is left alone — vim only walks the ring for puts.
+    fn bump_redo_register(steps: &mut [RecordedStep]) -> bool {
+        let plain_key = |k: &RecordedStep, f: &dyn Fn(&Key) -> bool| match k {
+            RecordedStep::Key(k) if f(k) => true,
+            _ => false,
+        };
+        let plain_digit =
+            |k: &Key| k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit());
+        let mut i = 0;
+        while i < steps.len() && plain_key(&steps[i], &plain_digit) {
+            i += 1;
+        }
+        let quote = |k: &Key| k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char('"'));
+        if !steps.get(i).is_some_and(|k| plain_key(k, &quote)) {
+            return false;
+        }
+        let reg_ok = |k: &Key| {
+            k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char(c) if matches!(c, '1'..='8'))
+        };
+        if !steps.get(i + 1).is_some_and(|k| plain_key(k, &reg_ok)) {
+            return false;
+        }
+        let put_ok =
+            |k: &Key| k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char('p' | 'P'));
+        if !steps.last().is_some_and(|k| plain_key(k, &put_ok)) {
+            return false;
+        }
+        if let Some(RecordedStep::Key(Key {
+            kind: KeyKind::Char(c),
+            ..
+        })) = steps.get(i + 1)
+        {
+            let bumped = Key::char((*c as u8 + 1) as char);
+            steps[i + 1] = RecordedStep::Key(bumped);
+            true
+        } else {
+            false
+        }
+    }
+
     /// End of a complete top-level command: commit the recording if the
     /// command mutated the buffer. An active insert session commits later,
     /// in `exit_insert` (the session is part of the same change).
@@ -3419,7 +3464,16 @@ impl VimState {
                     ctx.host.bell();
                     return;
                 }
-                let steps = self.last_change.clone();
+                let mut steps = self.last_change.clone();
+                // redo-register (`:h redo-register`): `.` repeating a PUT
+                // from a numbered register walks the ring (`"1P` then `.`
+                // pastes "2, then "3 …). vim increments the register per
+                // `.` invocation regardless of replay success, so the
+                // bumped steps also become the recorded change — the probe
+                // (`dd dd "1P .` on one/two/three) restores both lines.
+                if Self::bump_redo_register(&mut steps) {
+                    self.last_change = steps.clone();
+                }
                 self.begin_replay();
                 self.enqueue_replay(&steps, count);
             }
