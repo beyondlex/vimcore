@@ -308,10 +308,14 @@ impl Motion {
             Motion::WordStart { big } => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::next_word_start(buf, o, big);
-                    if o >= buf.len() {
+                    let next = word::next_word_start(buf, o, big);
+                    // buffer end or a self-returning step stops the count
+                    // (see the paragraph loops below for the spin hazard)
+                    if next == o || next >= buf.len() {
+                        o = next;
                         break;
                     }
+                    o = next;
                 }
                 MotionResult::new(o.min(buf.len()), MotionKind::Exclusive)
             }
@@ -319,7 +323,15 @@ impl Motion {
             Motion::WordEnd { big } => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::next_word_end(buf, o, big);
+                    let next = word::next_word_end(buf, o, big);
+                    // fixed point (cursor on the buffer-final word char):
+                    // stop counting — `999999999e` used to run the full
+                    // word scan a billion times instead of bell-returning
+                    // like vim's motion loop does (WordEndBack's guard, twin)
+                    if next == o {
+                        break;
+                    }
+                    o = next;
                 }
                 MotionResult::new(o, MotionKind::Inclusive)
             }
@@ -327,7 +339,11 @@ impl Motion {
             Motion::WordBack { big } => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::prev_word_start(buf, o, big);
+                    let next = word::prev_word_start(buf, o, big);
+                    if next == o {
+                        break;
+                    }
+                    o = next;
                 }
                 MotionResult::new(o, MotionKind::Exclusive)
             }
@@ -411,10 +427,20 @@ impl Motion {
                 MotionResult::new(buf.line_start(line), MotionKind::Linewise)
             }
             // }: next paragraph boundary (blank line)
+            //
+            // The repeat loops below all stop at a fixed point: at buffer
+            // end / offset 0 every further step returns the same offset and
+            // a huge count used to spin the full line walk per iteration
+            // (`999999999}` on a 1MB buffer ≈ forever; vim's motion loop
+            // gives up at the first non-advancing step).
             Motion::ParaNext => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::next_paragraph(buf, o);
+                    let next = word::next_paragraph(buf, o);
+                    if next == o {
+                        break;
+                    }
+                    o = next;
                 }
                 MotionResult::new(o, MotionKind::Exclusive)
             }
@@ -422,7 +448,11 @@ impl Motion {
             Motion::ParaPrev => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::prev_paragraph(buf, o);
+                    let next = word::prev_paragraph(buf, o);
+                    if next == o {
+                        break;
+                    }
+                    o = next;
                 }
                 MotionResult::new(o, MotionKind::Exclusive)
             }
@@ -431,7 +461,11 @@ impl Motion {
             Motion::SentenceNext => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::next_sentence(buf, o);
+                    let next = word::next_sentence(buf, o);
+                    if next == o {
+                        break;
+                    }
+                    o = next;
                 }
                 MotionResult::new(o, MotionKind::Exclusive)
             }
@@ -439,7 +473,11 @@ impl Motion {
             Motion::SentencePrev => {
                 let mut o = vim.cursor.offset;
                 for _ in 0..count {
-                    o = word::prev_sentence(buf, o);
+                    let next = word::prev_sentence(buf, o);
+                    if next == o {
+                        break;
+                    }
+                    o = next;
                 }
                 MotionResult::new(o, MotionKind::Exclusive)
             }
