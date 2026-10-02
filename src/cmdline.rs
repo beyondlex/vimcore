@@ -830,7 +830,7 @@ impl VimState {
                     .ok_or_else(|| "E16: Invalid range".to_owned()),
             }
         }
-        fn with_offset(base: usize, spec: &str) -> usize {
+        fn with_offset(base: usize, spec: &str) -> Result<usize, String> {
             // Chained offsets accumulate (`:5+2+1d` = line 8 — 9.1 probe);
             // only the first run of `+`/`-` segments belongs to this address.
             let mut value = base;
@@ -846,7 +846,14 @@ impl VimState {
                 let end = digits
                     .find(|c: char| !c.is_ascii_digit())
                     .unwrap_or(digits.len());
-                let n: usize = digits[..end].parse().unwrap_or(0);
+                // an offset that overflows usize is NOT a zero offset —
+                // `unwrap_or(0)` used to turn `:1+<21 digits>d` into +0 and
+                // silently delete line 1. vim 9.1 reports E1247 for both
+                // directions (`:1+<huge>d`, `:5-<huge>d`) and runs nothing.
+                let n: usize = match digits[..end].parse() {
+                    Ok(n) => n,
+                    Err(_) => return Err("E1247: Line number out of range".to_owned()),
+                };
                 value = if sign {
                     value.saturating_add(n)
                 } else {
@@ -854,7 +861,7 @@ impl VimState {
                 };
                 rest = &digits[end..];
             }
-            value
+            Ok(value)
         }
         // split off the range part: a command starts at the first letter
         // that is not part of a `'<` / `'>` mark spec. Scan the allowed
@@ -912,14 +919,14 @@ impl VimState {
             // "fix" of the correct code). Whitespace before the offset
             // (`:5 +2d`) is skipped like vim does.
             let value = match base_line(base_str.trim_end(), vim, ctx)? {
-                Base::Line(base) => with_offset(base, off_str),
+                Base::Line(base) => with_offset(base, off_str)?,
                 // mid-range `%` = `1,$` collapsed to its LAST line: only the
                 // final two addresses survive a longer chain anyway, so
                 // `:1,%d` deletes the whole file exactly like vim
                 Base::Unusable if base_str == "%" => last,
                 Base::Unusable => {
                     let base = addresses.last().copied().unwrap_or(cursor_line);
-                    with_offset(base, off_str)
+                    with_offset(base, off_str)?
                 }
             };
             // vim reports E16 for an address PAST the last line and runs
