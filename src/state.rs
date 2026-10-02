@@ -94,9 +94,14 @@ struct InsertRepeat {
     count: usize,
     linewise: bool,
     text: String,
+    /// Cursor offset right after `start_insert` — the anchor of the
+    /// navigation guard below. Unlike `insert_change_pos` (set on the FIRST
+    /// typed char) this exists even when nothing is typed, which is what
+    /// makes `3o<Esc>` replicable (vim 9.1 probe: count empty `o` copies).
+    anchor: usize,
     /// What the session actually put in the buffer: `text` with autoindent
     /// expanded at every newline. The exit invariant compares the cursor
-    /// against `start + expanded.len()`: with `autoindent` the buffer grows
+    /// against `anchor + expanded.len()`: with `autoindent` the buffer grows
     /// by MORE than `text` at each `<CR>`, so the old raw-length check
     /// failed and `3ifoo<CR>bar<Esc>` silently dropped the count (vim 9.1
     /// probe P24: three foo/bar pairs, indent included). Keeping the
@@ -1519,11 +1524,17 @@ impl VimState {
 
     /// Count-repeat insert on session exit: `3ifoo<Esc>` typed "foo" once,
     /// this appends two more copies. Only plain type-then-escape sessions
-    /// replicate: the cursor must still sit at the end of the typed text and
-    /// the text must be single-line (arrows/backspace/enter set no flag but
-    /// move the cursor or add `\n`, both of which bail out). Linewise
-    /// (`3ofoo<Esc>`) copies get their own lines below, each with the opened
-    /// line's indent.
+    /// replicate: the cursor must still sit exactly at `anchor +
+    /// expanded.len()` — any arrow move / backspace / external edit drifts
+    /// it off and skips replication. Linewise (`3ofoo<Esc>`) copies get
+    /// their own lines below, each with the opened line's indent.
+    ///
+    /// An EMPTY linewise session still replicates: vim 9.1 opens [count]
+    /// lines for `3o<Esc>` (probe round 16: `2o<Esc>` → two empty lines).
+    /// The copies are PLAIN empty lines — the opened line's autoindent is
+    /// dropped, matching how vim strips a whitespace-only autoindented line
+    /// at Esc (see `insert_did_ai`). Charwise kinds (`3i`/`3A`/`3R`) with
+    /// nothing typed repeat nothing.
     fn replicate_count_insert(&mut self, ctx: &mut Ctx) {
         let Some(rep) = self.insert_repeat.take() else {
             return;
@@ -1534,20 +1545,27 @@ impl VimState {
         if self.block_insert.is_some() {
             return;
         }
-        if rep.text.is_empty() {
-            return;
-        }
-        let Some(start) = self.insert_change_pos else {
-            return;
-        };
         // the cursor must sit exactly at the end of what the session wrote —
         // any arrow move / backspace / external edit drifts it off and skips
         // replication (the same no-move guarantee as before, now measured in
         // EXPANDED bytes so autoindent sessions don't false-bail)
-        if self.cursor.offset != start + rep.expanded.len() {
+        if self.cursor.offset != rep.anchor + rep.expanded.len() {
             return;
         }
         let copies = rep.count - 1;
+        if rep.text.is_empty() {
+            if !rep.linewise {
+                return;
+            }
+            // vim probe R1/R7: empty `o` copies carry NO indent — the
+            // ai-indent of an untouched line never survives Esc
+            let extra = "\n".repeat(crate::ops::clamped_repeat_count(1, copies));
+            let at = ctx.buf.line_end(ctx.buf.offset_to_line(self.cursor.offset));
+            self.edit_insert(ctx, at, &extra);
+            self.cursor.offset = at + extra.len();
+            self.cursor.desired_col = None;
+            return;
+        }
         // Replace sessions OVERWRITE on repeat instead of inserting: each
         // copy consumes as many characters as the typed text has (9.1:
         // `3Rab<Esc>` on "abcdefghij" → "abababghij"). Still in Replace mode
@@ -2917,6 +2935,7 @@ impl VimState {
                         count,
                         linewise: matches!(insert, InsertKind::OpenLine { .. }),
                         text: String::new(),
+                        anchor: self.cursor.offset,
                     });
                 }
                 self.end_command();
