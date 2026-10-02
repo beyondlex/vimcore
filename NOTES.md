@@ -5,6 +5,142 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十五轮检视增补（2026-10-02，回归测试在
+`tests/parity_round15.rs`（16 例）、fuzz 在 `tests/fuzz_round15.rs`（11.5
+万步 + 巨 count 终止断言））
+
+本轮三个独立读码 agent 分域扫 cmdline/config/options/keymap/key、
+ops/motions/objects/word/search、insert/registers/marks/buffer/host/tck，
+共产出约 25 条候选。**全部语义修复先经引擎探针实证再改**——其中三条被
+证伪或改写：Replace 模式多字节 BS 的位置栈失配（实测正确，读码推断有
+误）、`d{` 反向「三行全删」断言（vim 实测留 `bbb`，agent 把 `d}` 的结论
+错套给了 `d{`）、`:s` 重放损坏的实际表现与预测不同（真实根因在首次执行
+的 replacement 转义缺失，非重放切分）。两条早前修复被新探针**推翻**：
+参考宿主 `offset_to_line` 的 mid-char 守卫（round13 #26）实为恒等函数、
+`:s` 的转义分隔符修复（round14 #20）只覆盖了模式侧。
+
+### 语义修复（均 vim 9.1 探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **`:s` 的 replacement 转义整面缺失** | `:s/a/b\/c/` 得 `b\/c`（vim `b/c`）、`:s/a/b\\c/` 得 `b\\c`（vim `b\c`）。round14 #20 只修了模式侧切分；replacement 走 regex expand（反斜杠不特殊）。现 `unescape_replacement` 折叠 `\{sep}`/`\\`，未知转义保持原样 |
+| 2 | **`&`/裸 `:s` 重放损坏 replacement** | 重建用朴素 `split(sep)`：`s/a/b\/c/` 的字段被切碎，重放结果与首次执行不一致（`:h :&` 要求相同替换串）。重放改经共享 `split_escaped_fields` |
+| 3 | **越界地址偏移 `unwrap_or(0)` 静默删错行** | `:1+<21 位 9>d` parse 溢出变 +0 → 删第 1 行。vim 9.1 双向报 **E1247** 且不执行（负向同）。`with_offset` 改 `Result` |
+| 4 | **`}`/`{` 把空白行当段落边界** | vim 只认**真空行**（探针：`aaa/␢␢␢/bbb` 上 `d}` 三行全删、`{` 落第 1 行）。`next_paragraph`/`prev_paragraph` 换 `is_empty_line`；`d{` 反向留 `bbb` 一并钉住（agent 原断言「三行全删」被探针推翻） |
+| 5 | **空行上的 `J` 插多余空格** | `["","def"]` 上 `J` 得 `" def"`（vim `"def"`）。接缝任一侧为空免分隔；`["def",""]` 同 |
+| 6 | **`ci"` 光标越行末引号响铃** | 末对闭引号作左回退后无右配对 → no-op。vim 回退到**行内第一对**（`say "hi" then "bye" end` 尾部改 `hi`）。悬空左引号（无右伴）同走该回退 |
+| 7 | **`N%` 文件百分比差一行** | 引擎 floor `count*total/100`（0-based）；vim nv_percent 是 1-based **ceil** `(count*total+99)/100`。`2%`@200 行曾落第 5 行（vim 第 4）。`count>100` 按 vim 拒绝 |
+| 8 | **键入 `1%` 被当裸 `%`（括号匹配）** | count 塌缩后 1 与「无 count」不可分——承 `1G`→`gg` 改写先例，新增 `Motion::GoToFilePercent`。200 行缓冲 `1%` 曾响铃原地（vim 第 2 行） |
+| 9 | **`"_yy` 污染 unnamed 寄存器** | store_yank fall-through 无条件重指 `last`：`"_yy` 后 `p` 贴出 yank 文本（vim 9.1：贴不出任何东西）。`"_dd` 早正确（store 早退），不对称即判据 |
+| 10 | **`3R{text}<Esc>` 丢弃 count** | Replace 被排除在 count-repeat 外。vim 重复整个输入并**按字符数覆盖**后续文本（`abcdefghij` 上 `3Rab` → `abababghij`）。退出路径新增 Replace 臂（字符遍历 span，行尾钳制即追加）；含换行会话保守跳过 |
+| 11 | **redo-register 缺失** | `"1P` 后 `.` 重贴同一寄存器。vim 的 `.` 递增寄存器号走编号环（`:h redo-register`：`dd dd "1P .` 恢复两行）。`bump_redo_register` 识别 `[count]"{1-8}[count]p|P` 形态改写并回写 last_change |
+| 12 | **`<C-h>` 规范 ctrl 形态被吞** | 提示符与插入模式只认裸 `\x08` 字节，gpui 风格 `Key::ctrl_char('h')` 静默无效果（注释自称「folds to Backspace」）。两处统一折叠为 BS；vim 绑定 C-h ≡ BS |
+| 13 | **visual 模式无 `'a`/`` `a ``** | 单键 trie Miss：响铃 + 清 pending。vim 中光标跳标记、选区跟随。补 visual 行走 CharArgCmd::JumpMark → goto_motion |
+| 14 | **`:s` 旗标 `e` 语义翻转**（记录不修） | 行内无匹配时 `:s/z/q/e` 引擎报 E486；vim 因 `e` 旗标静默。属旗标子集缺失但改变了报错行为，进分歧表 #42 |
+| 15 | **config 不识别 `setl[ocal]`/`setglobal`** | rc 行 `setlocal ts=4` 静默落 ignored（运行时 `:setl` round14 已支持）。config 侧补齐四种拼写 |
+| 16 | **search_rule 别名表臆造 `isc`、漏 `scs`** | `:set scs` 改变匹配规则但不触发高亮缓存失效。去臆造、补真实别名 |
+| 17 | **`:brew` 前缀 E492** | vim 缩写规则全前缀可用（round14 #23 修复面的漏网）；`:br`/`:bre` 因 `:break` 歧义保持排除 |
+| 18 | **块寄存器空末行被 put 吞掉** | yank 侧 `join("\n")` 无终止符，但空末行产出尾 `\n`；put 侧 `trim_end_matches('\n')` 连行界一起吃。改 plain split（宿主块 API 可达） |
+
+### 引擎外：参考宿主真 bug（新契约抓出）
+
+- **tck 参考宿主 `offset_to_line` 的 mid-char 守卫是恒等函数**：
+  `offset.min(ceil_char_boundary(offset))` 对中点偏移恒等于原值（ceil ≥
+  offset），照旧 `[..mid]` 切 panic——round13 #26 声称修掉的问题实际还在，
+  因为契约从未测过 mid-char。改 floor 到字符起始。buffer_read_contract
+  新增多字节中点断言（char_at/offset_to_line/prev_char_offset 的容忍
+  面），`offset_to_line(len)` 放行「钳末行」与「幻影行号」两种实现
+  （引擎对两种都容忍，tests 宿主与 tck 宿主各站一边）。
+
+### fuzz 抓取的引擎不变量 bug
+
+- 无新增（本轮 fuzz 的增量键表全部落在已修复路径上；巨 count 终止由
+  专用测试断言预算）。`last_matches` 可过期不变量沿用 round13 约束
+  （live update 关闭时允许陈旧，消费前重扫）。
+
+### 性能修复
+
+| # | 问题 | 修复 |
+|---|------|------|
+| P1 | **巨 count 在运动定点上空转** | `999999999e` 在缓冲末字符跑满 10⁹ 次全词扫描（姊妹实现 WordEndBack 有 `next == o break` 守卫，WordEnd 漏了）；`}`/`)`/`{`/`(`/`b`/`w` 同族在端点每步 O(行扫描)。全部补定点守卫，首个不前进的步即停（vim motion 循环同语义）。<150µs 返回 |
+| P2 | **tck 参考宿主 `line_range` 每调用三次全文扫描** | 守卫 + total + 枚举各一遍 O(text)，trait 默认的 line_start/line_end/line_content 每动作都过它。并单趟（照抄参考实现的宿主每按键省 2 次 O(全文)） |
+| P3 | **`tag_range` 裸 `<` 尾段二次方** | 无 `>` 的模板碎片上每个 `<` 重扫全文尾。find 返回 None 即 break（后面不可能再有闭合） |
+
+### 死代码清理
+
+- `key.rs` parse_angle 尾部逐字段重建自身等值 Key 的 ctrl 块（注释描述
+  的是旧实现）；`keymap::Trie::is_empty`（全仓零调用，承 round14 判据）；
+  `find_from` 末尾不可达的 till 分支（till 在上方必然 return）；search.rs
+  两处 `vim.search.forward = forward`（set_pattern_inner 已赋同值）。
+- `daw`/`caw` 逐字重复的换行合并条件块抽 `merges_following_line_break`；
+  `:marks` 的 `items()` 双调用并单次收集；`:y` 的无谓解构。
+
+### 注释纠偏（防未来误修）
+
+- `word.rs` `next_word_end` 定点返回曾注释为「no-op/motion 失败」——
+  实测 `ye`/`de` 在末词字符上**删/抽该字符恰是 vim 行为**（round12 的
+  措辞差点诱导成本轮把它改成 stuck()）。改为「fixed point 语义 + 调用方
+  守卫」表述。
+- `marks.rs` `adjust_replace` 的 preserve_inner 注释「column-preserving」
+  实为**字节**位置保持（等长替换时），与 refloor 的分工写明。
+- `host.rs` `scroll_to_line` 契约补「必须最小滚动」：C-e/C-y 自由滚动
+  依赖宿主的自律实现，重居中实现会静默禁用它（体验缺口，接 INTEGRATION
+  面）。tck 契约对应断言仍缺（悬置）。
+
+### 被探针证伪/关闭的读码候选（下轮免重查）
+
+- **Replace 多字节 BS 位置栈失配**（agent 高置信）：`R中<BS>` 在
+  `ax`/`xyz` 上实测恢复正确——等宽字节网格重画 + 偏移平移已自洽，关闭。
+- **`d{` 反向三行全删**：vim 留 `bbb`（agent 把 `d}` 的探针结论错套）。
+- **巨值负向偏移删行**：`with_offset` 的 saturating_sub 使 `:5-<巨值>d`
+  落 0 以内前就因 base 越界报 E16——本轮统一 E1247 后两个方向都显式。
+
+### 新增已知分歧（接全局序号）
+
+42. **`:s` 的 `e` 旗标翻转报错行为**：vim 中 `e` 吞掉 E486；引擎静默
+    丢弃旗标照常报 E486。与 `c` 旗标（#40）同属旗标子集，但 `e` 改变
+    的是可观测报错而非执行语义。
+43. **`3R` 含换行会话不重复**：`3Rab<CR>cd<Esc>` 的重复未实现（span
+    与 seam 行模型都假设单行 typing）；vim 会连换行一起重复。保守跳过。
+44. **块寄存器文本的 put 路径对 linewise/charwise 寄存器与可视块替换
+    的组合仍用 `trim_end_matches`**（state.rs 3711 行）：多空行 linewise
+    寄存器在该路径的精确 vim 语义未探针，维持旧行为。
+
+### 悬而未决（更新）
+
+- **insert `<C-r>` 特殊寄存器面**（`C-r .`/`C-r C-w`/`C-r %`…）：现静默
+  插空、无 E353 反馈；`%` 已在 host.rs 挂账。涉及 last-insert 文本跟踪
+  与 cmdline 侧光标词读取，留待专项。
+- **`display_column` 每键 O(行字节)**：`j`/`k` 在 `desired_col == None`
+  时每次从行首逐字符重算（1MB 单行场景退化）。修法需在纵向移动里传递
+  上一列或按行缓存，动 `apply_motion_result` 面，留 0.2。
+- **`:set sw=0`/`ts=0` 语义**：vim 的 `sw=0` 表示跟随 tabstop、`ts=0`
+  应报 E487；引擎无下限。与 #41（so 负值）同批，留 0.2 breaking 窗口。
+- **`:set ts=4 ?`（值形态 + 空格问号）**：引擎报错且丢赋值；vim 对混合
+  形态的接受度未探针。
+- **tck 缺口**：scroll_to_line 最小滚动无可执行断言；IME 回程路径
+  （take_pending_unknown_chars）无 smoke 覆盖；空缓冲幻影行检查仍在
+  （line_count==1 时跳过）。
+- config.rs 与 ex_set 的 set 解析两套实现（round14 悬置维持——本轮
+  config 侧又补了 setlocal/setglobal，分歧进一步收窄，抽共享函数仍待做）。
+
+### 体验备注（本轮）
+
+- `<C-h>` 在 gpui 风宿主（规范 ctrl 形态）曾是「按了没反应」的哑键，
+  现两种投递形态一致折叠 BS。
+- visual 模式 `'a`/`` `a `` 从「响铃 + 丢 pending」变为可用的选区跳转。
+- 巨 count 误击（`999999999e`）从近似死机变为即时返回。
+- 越界 Ex 地址的报错从「删错行/钳制执行」变为 vim 同款 E1247/E16 且
+  不动缓冲——错误消息通道（status_message）让宿主状态栏可显示原因。
+
+### 性能备注（本轮复核）
+
+- bench_probe 未复跑（本轮改动不在 motion/search 热路径的量测点上：
+  定点守卫只在端点生效、tck 参考宿主不在 bench 路径、tag_range 是
+  文本对象慢路径）。round14 的结论（绝对值以同次运行为准）维持。
+- fuzz round15 与 round14 同预算（16 种子 × 60 轮 × 120 步），全量
+  套件 503 例（round14 基线 486）。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十四轮检视增补（2026-10-02，回归测试在
 `tests/parity_round14.rs`（48 例）、fuzz 在 `tests/fuzz_round14.rs`）
 
@@ -235,7 +371,9 @@ mark、宏字符面纳入键表——五个新 bug 全部由这轮 fuzz 的新�
 33. **`:>`/`:m`/`:t`/`:co`/`:k` 等 Ex 命令缺失** → E492。`:` 移动/复制/
     缩进是 vim 常用命令；本轮把 `:5>` 从伪 E16 修正为如实 E492。
 34. **地址偏移巨值饱和**：`:1+99999999999999999999` 引擎 saturating 到末
-    行；vim 报 E16 类错误（溢出检测）。
+    行；vim 报 E16 类错误（溢出检测）。（**round15 已关闭**：实测 vim 报
+    E1247 且不执行；round12 #2 的偏移链重写把该路径变成 `unwrap_or(0)`
+    ——比本条记录的「饱和」更糟，删错行。现两方向都显式 E1247。）
 
 ### 悬而未决（本轮记录、未改动）
 
