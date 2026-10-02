@@ -5,6 +5,120 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十六轮检视增补（2026-10-02，回归测试在
+`tests/parity_round16.rs`（17 例）、fuzz 在 `tests/fuzz_round16.rs`
+（11.5 万步 + 每步 1/8 概率宿主事件注入 + 巨 count 空复制预算断言））
+
+本轮单线读码（全部 `src/` 重读一遍）加探针。两条读码候选被探针**证伪**
+免修：`ge` 于无词尾可寻时落词首（vim 同款落法，P1/P2/Q7——`prev_word_end`
+从头扫起的行为恰好正确）；`~`/`x` 的计数跨行（vim 计数到行尾即停，
+引擎的 limit 守卫已对，P6-P9）。fuzz 的**宿主事件注入**（拖选/点击/
+IME 文本/IME 替换在任意模式投递）是本轮最大收获：首轮即抓出两个
+读码扫不出的宿主路径不变量违规。
+
+### 语义修复（均 vim 9.1 探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **空文本 linewise 计数重复整段缺失** | `3o<Esc>` 只开 1 行（`rep.text` 为空即放弃）；vim 9.1 开 count 行（探针 R1/R7）。复制单元改纯换行（空复制**不带缩进**——vim 对未触打的 ai 行剥缩进）；charwise 空会话（`3i/3A/3R`）维持 no-op（Q3-Q5）。导航守卫从 `insert_change_pos`（首打字位，空会话为 None）改挂 `InsertRepeat.anchor`（会话起点位），空会话同样受箭头漂移保护 |
+| 2 | **autoindent 空行生命周期（vim `did_ai`）整面缺失** | vim 的「未触打的纯缩进行」规则引擎没有：`o<Esc>` 留缩进（vim 留纯空行，S1/S6）、`o<CR><Esc>` 两行都留（vim 都空，S3）、`o<BS>` 只删一字符（vim 一笔画掉整段，S5）、`cc<Esc>` 留缩进（vim 空，S8）。新增会话级 `insert_did_ai`：o/O 开行、linewise change 恢复缩进、`<CR>` 携 ai 拆行时置位（置位点统一在 `begin_insert` **之后**——会话起点清位）；任何非换行打字清除（S4：打满再删光仍保缩进）。三条生效路径：Esc 剥当前纯空白行（光标落行首）、CR 拆行前剥被拆行的陈旧缩进、BS 于行尾一笔删整段 |
+
+### 语义修复的跟进（次序交互，回归抓出）
+
+- 剥离原置于 replicate **之前**：光标被移到行首后 `anchor` 守卫把
+  `3o<Esc>` 的复制整段跳过。现 replicate 先行（非空复制读打字行缩进
+  ——探针 R2 的 `3ofoo` 三份都带缩进；anchor 校验需要光标未动），
+  剥离后置并**同时覆盖打字行与光标行**——计数复制把光标带到末份复制
+  上，打开行的缩进仍须剥（R1）。上方行剥离后按删除字节数平移光标。
+
+### fuzz 抓取的引擎不变量 bug（宿主事件注入，2 个）
+
+| # | 问题 | 根因 |
+|---|------|------|
+| 1 | **`replace_range` 非边界 range 透传 + 光标 delta 饱和** | IME 提交替换路径把宿主 range 原样写进 buffer——宿主从 UTF-16 坐标换算可交来 mid-char 字节偏移，裸写 panic 宿主。另：光标调整 `text.len().saturating_sub(range.len())` 把**缩短**替换的负 delta 钳成 0，光标留在越过新缓冲末尾的位置。修：range 先 floor 到字符边界（与 `set_cursor_offset` 同款防御）；delta 改带符号；出口 floor 收尾 |
+| 2 | **`edit_insert` 漏调 `visual_anchor`/`cmdline_visual`** | 两个裸字段活在 marks 之外，错过 `adjust_insert` 的相对平移——visual 选区存活期间的宿主 IME 插入把锚点留在新插文本的多字节字符中间（delete/replace 漏斗经 `refloor_stored_offsets` 有收尾，insert 漏了）。补相对平移 + 同款 refloor |
+
+### 引擎健壮性（宿主 API 守卫，非探针）
+
+- **`set_visual_range` 于 insert 会话/提示符期间撕裂模式机**：宿主拖选
+  把 `self.mode` 整个改写成 Visual，而 `insert_session`/cmdline 状态
+  仍存活——Esc 走 `exit_visual` 但 undo 组与 `last_insert_exit` 永不
+  闭合。现仅 Normal/Visual 接受拖选。
+- **`set_cursor_offset` 于提示符期移动缓冲光标**：Ex 范围默认地址读
+  这个偏移，vim 在 cmdline 期忽略点击——同款忽略。
+
+### 体验修复
+
+- **失败删除/接合族响铃**（vim 同款）：空行 `x`、行首 `X`、空行 `D`、
+  EOF 的 `J`/`gJ` 旧实现全静默。`s` 的删除半失败响铃但照常进插入；
+  `join_lines` 返回执行数——`3J` 于 EOF-1 对够不着的接缝响铃，
+  `2J`（单接缝）成功不响（探针 R3 无铃，顺带钉住）。
+- **showcmd 补 char-arg 命令字母**：`r`/`f`/`t`/`F`/`T`/`m`/`q`/`@`/
+  `'`/`` ` `` 等待参数期间旧实现什么都不显示（vim 显示部分命令如
+  `4r`）。新增 `CharArgCmd::pending_key`，参数已知时一并显示。
+
+### 性能修复
+
+| # | 问题 | 修复 |
+|---|------|------|
+| P1 | **`:sort` 每次比较重新分配排序键** | `sort_by_key(lower(s))` 对每比较做一次 `to_lowercase` 分配。改 decorate-sort-undecorate：键每行算一次，dedup 比较同一键列（语义与 round6 探针结论不变） |
+
+### 死代码清理与注释纠偏
+
+- `tests/fuzz_round15.rs` 未用的 `addressable` 辅助、`parity_round12`
+  一处 `mut`（两处编译警告）。
+- `last_change` 字段注释纠偏：「visual 变更不可重放 (v1)」自 round8
+  起不实（`finish_visual_op` 落账后可 `.` 重放），按现实改写。
+- `exit_insert` 块复制 delta 保持 isize 直至比较（usize 装箱让净删除
+  会话的负 delta 回绕成巨正值，靠「不可能等于 text.len()」侥幸安全，
+  现显式判负）；`insert_tab` 局部变量 `sw` 实为 tabstop，改名。
+
+### 被探针证伪/关闭的读码候选（下轮免重查）
+
+- **`ge`/`gE` 无词尾可寻时落词首**：读码推断应失败响铃；探针 P1/Q7
+  实证 vim 同样落到 `'a`（`prev_word_end` 从光标前一位起扫、扫尽落 0
+  的行为恰好与 vim 一致）。引擎无错，关闭。
+- **`~`/`x` 计数跨行**：读码怀疑 `3~`/`2x` 该跨行；探针 P6-P9 实证
+  vim 计数到行尾即停——引擎的 grapheme/limit 守卫本就正确，关闭。
+- **`2J` 于 EOF-1**：一度想给「部分接合后」补铃；探针 R3 实证 `2J`
+  本就只有一个接缝、无失败无铃。按 `requested = count.max(2)-1` 建模
+  后自然正确。
+
+### 新增已知分歧（接全局序号）
+
+45. **带范围的 `:w`/`:q`/`:wq`/`:x` 丢弃范围**：`:2,5w` 照常全量
+    save。vim 的 `:[range]w` 写部分文件；宿主 `save()` 钩子没有范围
+    参数，接入方需知（静默接受 vs vim 的部分写/报错）。
+
+### 悬而未决（更新）
+
+- **insert `<C-r>` 特殊寄存器面**（`C-r .`/`C-r C-w`/`C-r %`…）：维持
+  （round15 挂账）。
+- **`display_column` 每键 O(行字节)**：维持 0.2（round15 挂账）。
+- **config.rs 与 ex_set 的 set 解析两套实现**：维持（round14 挂账）。
+- **tck 缺口**：scroll_to_line 最小滚动断言、IME 回程 smoke、空缓冲
+  幻影行检查——均维持。
+- **`:s` 的未知旗标静默忽略**（`e` 之外还有 `l`/`p`/`#` 等）：并入
+  分歧 #42 的旗标子集面，不单独追。
+
+### 体验备注（本轮）
+
+- fuzz round16 的宿主事件注入把「宿主在错误时机调 API」变成常驻压
+  力：拖选/点击/IME 四类事件在 insert/cmdline/visual/normal 全模式
+  随机投递，两个宿主路径真 bug 全部由它首轮抓出——下轮注入面继续扩。
+- 失败删除的响铃让「按键没生效」可感知（gpui-vim/crossterm-vim 的
+  bell 通道此前对这族命令从不触发）。
+- fuzz round16 与 round15 同预算（16 种子 × 60 轮 × 120 步），全量
+  套件 522 例（round15 基线 503）。
+
+### 性能备注（本轮复核）
+
+- bench_probe 全量复跑，与 round14 记录逐项一致：`w` 6.5µs/键、
+  1MB 单行 `w` 176µs、hlsearch 重扫 0.30ms、`:%s` 6.1ms、`n` 3.6µs/键
+  ——`edit_insert` 新增的 refloor 尾扫（O(存储偏移数)，x 删除路径早
+  就在付同款成本）无可测回归；ex_sort 的装饰排序在 bench 量测点之外
+  （probe 无 sort 行），量级按构造判断为单调改善。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十五轮检视增补（2026-10-02，回归测试在
 `tests/parity_round15.rs`（16 例）、fuzz 在 `tests/fuzz_round15.rs`（11.5
 万步 + 巨 count 终止断言））
