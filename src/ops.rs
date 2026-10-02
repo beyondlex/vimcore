@@ -439,6 +439,14 @@ pub fn apply(
             }
             vim.cursor.offset = typing_at;
             vim.begin_insert(InsertKind::Change);
+            // the restored indent is pure autoindent: an untouched
+            // whitespace-only line loses it at Esc (`cc<Esc>` → empty line,
+            // vim 9.1 probe S8) — arm the same did_ai contract an `o`/`O`
+            // open arms (see `VimState::insert_did_ai`). AFTER begin_insert,
+            // which clears the flag at session start.
+            if !indent_text.is_empty() {
+                vim.insert_did_ai = true;
+            }
         }
         Operator::IndentLeft | Operator::IndentRight => {
             let first = ctx.buf.offset_to_line(span.start);

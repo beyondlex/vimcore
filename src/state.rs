@@ -263,6 +263,16 @@ pub struct VimState {
     /// Plain `i`-sessions run no command `bump`, so this is what puts them
     /// on the changelist (vim's `g;` lands on the first inserted char).
     insert_change_pos: Option<usize>,
+    /// vim's `did_ai` flag, session-scoped: the CURRENT line's indentation
+    /// was inserted by the autoindent machinery (an `o`/`O` open, a linewise
+    /// change's indent restore, or a `<CR>` split) and NOTHING has been
+    /// typed since. While set, the three Esc/CR/BS paths below strip an
+    /// untouched whitespace-only line's indent, exactly like vim (round 16
+    /// probes S1/S3/S5/S8: `o<Esc>` leaves a PLAIN empty line, not the
+    /// indent; `o<CR><Esc>` leaves both lines empty; `o<BS>` deletes the
+    /// whole indent; `cc<Esc>` ditto). Typing any non-newline text clears
+    /// it — `ofoo<BS><BS><BS><Esc>` KEEPS the indent (probe S4).
+    pub(crate) insert_did_ai: bool,
 
     pub options: Options,
     pub registers: Registers,
@@ -363,6 +373,7 @@ impl VimState {
             insert_session: None,
             insert_register_pending: false,
             insert_change_pos: None,
+            insert_did_ai: false,
             options: Options::default(),
             registers: Registers::default(),
             marks: Marks::default(),
@@ -1514,6 +1525,7 @@ impl VimState {
         // execute_command re-arms the repeat AFTER start_insert returns, so a
         // plain `3i` keeps its count.
         self.insert_repeat = None;
+        self.insert_did_ai = false;
         self.mode = if kind == InsertKind::Replace {
             Mode::Replace
         } else {
@@ -1625,7 +1637,40 @@ impl VimState {
         self.cursor.desired_col = None;
     }
 
+    /// The Esc side of the `insert_did_ai` contract: delete the CURRENT
+    /// line's leading whitespace when the line is whitespace-only and the
+    /// session's last insert was an untouched autoindent (see the field
+    /// doc). Cursor ends at the line start, like vim (probe S1: `o<Esc>`
+    /// parks at (2,1), not one left of the stripped indent).
+    fn strip_did_ai_line(&mut self, ctx: &mut Ctx) {
+        if !self.insert_did_ai {
+            return;
+        }
+        let line = ctx.buf.offset_to_line(self.cursor.offset);
+        let ls = ctx.buf.line_start(line);
+        let le = ctx.buf.line_end(line);
+        if le > ls
+            && ctx
+                .buf
+                .slice(ls..le)
+                .chars()
+                .all(char::is_whitespace)
+        {
+            self.begin_edit();
+            self.edit_delete(ctx, ls..le);
+            self.cursor.offset = ls;
+            self.cursor.desired_col = None;
+        }
+    }
+
     pub(crate) fn exit_insert(&mut self, ctx: &mut Ctx) {
+        // autoindent: a whitespace-only line the session never typed into
+        // loses its indent at Esc (vim's did_ai, probes S1/S3/S6/S8). Runs
+        // BEFORE the count-repeat so `3o<Esc>`'s empty copies append below
+        // an already-stripped typing line — a non-empty session (`3ofoo`)
+        // never strips here (typing cleared the flag), so the replicate's
+        // indent read below is unaffected.
+        self.strip_did_ai_line(ctx);
         // count-repeat insert (`3ifoo<Esc>`): replicate the typed text while
         // the session's undo group is open and BEFORE the exit cursor
         // step-back, so the cursor lands one left of the LAST copy (vim)
@@ -1706,6 +1751,7 @@ impl VimState {
             self.record_change_position(pos);
         }
         self.insert_session = None;
+        self.insert_did_ai = false;
         // the live `'<`/`'>` range is dead once insert mode ends: a session
         // entered from visual (`viwc`, block `I`) leaves offsets pointing at
         // pre-edit bytes, and `parse_range` must fall back to the `'<`/`'>`
@@ -1751,6 +1797,30 @@ impl VimState {
         if let Some(block) = &mut self.block_insert {
             block.text.push_str(text);
         }
+        // autoindent lifecycle (see insert_did_ai): a `<CR>`-led split on an
+        // untouched whitespace-only line strips that line's indent first —
+        // vim probe S3: `o<CR><Esc>` leaves BOTH lines empty, because the CR
+        // removes the stale autoindent of the line being split. Then the
+        // flag transitions: text ending on `\n` re-arms it for the new line
+        // (with autoindent on), any typed non-newline char disarms it
+        // (probe S4: `ofoo<BS><BS><BS><Esc>` KEEPS the indent).
+        if text.starts_with('\n') && self.insert_did_ai {
+            let line = ctx.buf.offset_to_line(self.cursor.offset);
+            let ls = ctx.buf.line_start(line);
+            let le = ctx.buf.line_end(line);
+            if le > ls
+                && ctx
+                    .buf
+                    .slice(ls..le)
+                    .chars()
+                    .all(char::is_whitespace)
+            {
+                self.begin_edit();
+                self.edit_delete(ctx, ls..le);
+                self.cursor.offset = ls;
+            }
+        }
+        self.insert_did_ai = self.options.autoindent && text.ends_with('\n');
         self.begin_edit();
         let line_start = ctx
             .buf
@@ -4022,6 +4092,13 @@ impl VimState {
         self.begin_insert(kind);
         if kind == InsertKind::Replace {
             self.replace_overwritten.clear();
+        }
+        // the opened line's indent is pure autoindent: while nothing is
+        // typed on it, Esc/CR/BS may strip it (see `insert_did_ai`). Set
+        // AFTER `begin_insert` — the session start clears the flag, and the
+        // opened indent must survive that clear.
+        if matches!(kind, InsertKind::OpenLine { .. }) {
+            self.insert_did_ai = true;
         }
     }
 
