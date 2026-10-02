@@ -105,11 +105,51 @@ pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), Strin
         let Some(c) = buf.char_at(o) else {
             return Err(format!("char_at({o}) = None：字符边界上必须返回 Some"));
         };
+        // 多字节字符：中点偏移必须与边界同答——引擎的存储偏移兜底
+        // （refloor/floor_to_char_boundary）会把陈旧偏移落到「最近的边界」，
+        // 但落点之前的中间查询以任意字节发生，mid-char panic 的宿主会在
+        // 普通编辑后立即崩溃（round13 #26 的教训，反向断言在此钉住）
+        if c.len_utf8() > 1 {
+            for mid in (o + 1)..(o + c.len_utf8()) {
+                if buf.char_at(mid).is_some() {
+                    return Err(format!("char_at({mid}) = Some：多字节字符中间必须返回 None"));
+                }
+                let (a, b) = (buf.offset_to_line(mid), buf.offset_to_line(o));
+                if a != b {
+                    return Err(format!(
+                        "offset_to_line({mid}) = {a} ≠ offset_to_line(边界 {o}) = {b}：mid-char 偏移必须落到所属行"
+                    ));
+                }
+                if let Some(prev) = buf.prev_char_offset(mid) {
+                    // 引擎自己用 char_at+字节递减做 floor，从不要求宿主
+                    // 对 mid-char 偏移回退成功——只要求返回值若是 Some
+                    // 必须指向一个字符边界
+                    if buf.char_at(prev).is_none() {
+                        return Err(format!(
+                            "prev_char_offset({mid}) = Some({prev})：必须指向字符边界"
+                        ));
+                    }
+                }
+            }
+        }
         o += c.len_utf8();
     }
     if len > 0 {
         if buf.char_at(len).is_some() {
             return Err("char_at(len) 必须是 None".into());
+        }
+        // offset_to_line(len)：钳到末行（tests 宿主）或返回幻影行号
+        // （本参考宿主）都合法——引擎对两种都容忍（line_range 容忍
+        // line == line_count），但绝不能 panic
+        let at_len = buf.offset_to_line(len);
+        if at_len + 1 < lines {
+            return Err(format!(
+                "offset_to_line(len) = {at_len} 比末行还小（末行 = {}）",
+                lines - 1
+            ));
+        }
+        if buf.prev_char_offset(len + 42).is_some() {
+            return Err("prev_char_offset(len+42) 必须是 None（越界偏移拒绝）".into());
         }
         if buf.prev_char_offset(0).is_some() {
             return Err("prev_char_offset(0) 必须是 None".into());
@@ -277,11 +317,17 @@ impl VimBuffer for TckStrBuf {
     }
     fn offset_to_line(&self, offset: usize) -> usize {
         // offsets arrive from OUTSIDE (stored marks, host clicks) and can be
-        // past the end or mid-character — the char_at/prev_char_offset guards
-        // cover their own slices, this one needs its own (a mid-char slice
-        // panicked the reference host, and every host copying it verbatim)
+        // past the end or mid-character. Round13 #26 "fixed" this with
+        // `offset.min(ceil_char_boundary(offset))` — which is the identity
+        // for a mid-char offset (ceil ≥ offset) and still sliced mid-char.
+        // Floor to the character START like the engine's own
+        // floor_to_char_boundary does.
         let offset = offset.min(self.0.len());
-        let offset = offset.min(self.0.ceil_char_boundary(offset));
+        let offset = if self.0.is_char_boundary(offset) {
+            offset
+        } else {
+            self.0.floor_char_boundary(offset)
+        };
         self.0[..offset].split('\n').count() - 1
     }
     fn slice(&self, range: Range<usize>) -> String {
