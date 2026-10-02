@@ -802,11 +802,15 @@ pub fn join_lines(vim: &mut VimState, ctx: &mut Ctx, count: usize, literal: bool
             let next_trimmed = next_content.trim_start();
             let next_indent_len = next_content.len() - next_trimmed.len();
 
-            // no extra space when the line already ends with whitespace or
-            // the next line starts with `)`
+            // no extra space when the line already ends with whitespace,
+            // either side of the seam is empty, or the next line starts
+            // with `)` (vim 9.1: `J` on ["", "def"] gives "def" — the old
+            // code produced " def"; ["def", ""] stays "def" too)
             let cur_tail = ctx.buf.slice(ctx.buf.line_start(line)..join_at);
-            let separator = if cur_tail.ends_with(' ')
+            let separator = if cur_tail.is_empty()
+                || cur_tail.ends_with(' ')
                 || cur_tail.ends_with('\t')
+                || next_trimmed.is_empty()
                 || next_trimmed.starts_with(')')
             {
                 ""
