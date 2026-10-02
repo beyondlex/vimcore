@@ -262,6 +262,18 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
         &["`"],
         CmdKind::Normal(NormalCmd::JumpMark { linewise: false }),
     );
+    // visual `'a` / `` `a ``: vim MOVES the cursor to the mark and the
+    // selection follows (the old trie had no visual rows — the key belled
+    // and dropped the pending state). The CharArgCmd::JumpMark arm goes
+    // through goto_motion, which extends the visual selection.
+    b.visual(
+        &["'"],
+        CmdKind::Normal(NormalCmd::JumpMark { linewise: true }),
+    );
+    b.visual(
+        &["`"],
+        CmdKind::Normal(NormalCmd::JumpMark { linewise: false }),
+    );
 
     // ---- operators -------------------------------------------------------
     b.normal(&["d"], CmdKind::Operator(Operator::Delete));
