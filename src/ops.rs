@@ -231,9 +231,21 @@ pub fn object_span_count(
     // "foo bar" on "foo bar baz". The old engine dropped the count
     // entirely, so `d2aw` behaved as `daw`.
     for _ in 1..count.max(1) {
-        let end = range.end.min(buf.len());
-        match objects::range(buf, end, object) {
-            Some(next) if next.end > range.end => range.end = next.end,
+        let mut probe = range.end.min(buf.len());
+        // an INNER block's end sits just past its closer; re-probing there
+        // re-selects the same block (zero progress). Step over the closer so
+        // the rescan sees the ENCLOSING block — vim's `v2i(` climbs one
+        // level (9.1 probe: `v2i(` inside the inner pair yanks "1 + (2)")
+        if let objects::TextObject::Block { inner: true, close, .. } = object {
+            if buf.char_at(probe) == Some(close) {
+                probe += close.len_utf8();
+            }
+        }
+        match objects::range(buf, probe, object) {
+            Some(next) if next.end > range.end || next.start < range.start => {
+                range.start = range.start.min(next.start);
+                range.end = range.end.max(next.end);
+            }
             _ => break,
         }
     }
