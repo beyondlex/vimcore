@@ -647,6 +647,13 @@ impl VimState {
     /// match — the `g` is dropped; `:h :&` calls this out explicitly).
     /// Rebuild `s{sep}pat{sep}rep{sep}` from the stored command line,
     /// leaving a missing-replacement form (`s/pat`) as-is.
+    ///
+    /// The fields are re-split with escape awareness (the same rule the
+    /// parser uses): a naive `split(sep)` would cut at an escaped separator
+    /// and truncate the replacement — `s/a/b\/c/` then `&` must re-run with
+    /// replacement `b/c`, not the mangled prefix `b\`. Only pattern and
+    /// replacement survive; anything after the third field is dropped along
+    /// with the flags.
     fn substitute_without_flags(cmd: &str) -> String {
         let Some(after_s) = cmd.strip_prefix('s') else {
             return cmd.to_owned();
@@ -657,12 +664,61 @@ impl VimState {
         if sep.is_alphanumeric() {
             return cmd.to_owned();
         }
-        let mut parts = after_s[sep.len_utf8()..].split(sep);
-        let pattern = parts.next().unwrap_or("");
-        match parts.next() {
-            Some(rep) => format!("s{sep}{pattern}{sep}{rep}{sep}"),
-            None => format!("s{sep}{pattern}"),
+        let fields = Self::split_escaped_fields(&after_s[sep.len_utf8()..], sep);
+        match fields.as_slice() {
+            [] => cmd.to_owned(),
+            [pattern] => format!("s{sep}{pattern}"),
+            [pattern, rep] => format!("s{sep}{pattern}{sep}{rep}{sep}"),
+            [pattern, rep, ..] => format!("s{sep}{pattern}{sep}{rep}{sep}"),
         }
+    }
+
+    /// Split on unescaped separators (same rule as the substitute parser):
+    /// `\` + any char travels verbatim inside its piece, so `a\/b` never
+    /// splits at the escaped slash.
+    fn split_escaped_fields(rest: &str, sep: char) -> Vec<&str> {
+        let mut pieces = Vec::new();
+        let mut start = 0usize;
+        let mut chars = rest.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if c == '\\' {
+                // the escape AND the next char stay verbatim in the piece
+                chars.next();
+                continue;
+            }
+            if c == sep {
+                pieces.push(&rest[start..i]);
+                start = i + sep.len_utf8();
+            }
+        }
+        pieces.push(&rest[start..]);
+        pieces
+    }
+
+    /// vim's replacement-side escapes: `\{sep}` and `\\` fold to their
+    /// second character (`:s/a/b\/c/` must produce `b/c`, `:s/a/b\\c/`
+    /// produce `b\c` — probes 9.1). Every other `\x` passes through for the
+    /// regex crate's `$ref` expansion, which does not treat backslash
+    /// specially (so `\c` stays the two characters `\c` — an unknown escape
+    /// is kept verbatim, like vim).
+    fn unescape_replacement(rep: &str, sep: char) -> String {
+        let mut out = String::with_capacity(rep.len());
+        let mut chars = rep.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some(e) if e == sep || e == '\\' => out.push(e),
+                Some(e) => {
+                    out.push('\\');
+                    out.push(e);
+                }
+                None => out.push('\\'),
+            }
+        }
+        out
     }
 
     /// One `:registers` listing line: `"x  c|l|b  text` with embedded
@@ -1339,28 +1395,9 @@ impl VimState {
         // `a/b` (probe 9.1) — the naive `split(sep)` chopped the pattern at
         // the escaped slash and the command never worked. The backslash
         // stays in the piece (the regex crate reads `\/` as an escaped
-        // literal slash); `substitute_without_flags` keeps its naive split
-        // because a command whose flags field contains the separator is
-        // already malformed.
-        fn split_escaped(rest: &str, sep: char) -> Vec<&str> {
-            let mut pieces = Vec::new();
-            let mut start = 0usize;
-            let mut chars = rest.char_indices();
-            while let Some((i, c)) = chars.next() {
-                if c == '\\' {
-                    // the escape AND the next char stay verbatim in the piece
-                    chars.next();
-                    continue;
-                }
-                if c == sep {
-                    pieces.push(&rest[start..i]);
-                    start = i + sep.len_utf8();
-                }
-            }
-            pieces.push(&rest[start..]);
-            pieces
-        }
-        let parts = &mut split_escaped(&after_s[sep.len_utf8()..], sep).into_iter();
+        // literal slash); the REPLACEMENT gets its escapes folded by
+        // [`Self::unescape_replacement`] below.
+        let parts = &mut Self::split_escaped_fields(&after_s[sep.len_utf8()..], sep).into_iter();
         let Some(pattern) = parts.next() else {
             ctx.host.bell();
             return true;
@@ -1368,7 +1405,7 @@ impl VimState {
         // a MISSING replacement (`:s/foo`, nothing after the pattern) is an
         // EMPTY one — vim deletes the match (9.1 probe), it does not reuse
         // the last command's replacement
-        let replacement = parts.next().unwrap_or("");
+        let replacement = Self::unescape_replacement(parts.next().unwrap_or(""), sep);
         let flags = parts.next().unwrap_or("");
         if parts.next().is_some() {
             ctx.host.bell();
@@ -1474,7 +1511,7 @@ impl VimState {
             let count_replacements = |caps: &regex::Captures| -> String {
                 hits += 1;
                 let mut out = String::new();
-                caps.expand(replacement, &mut out);
+                caps.expand(&replacement, &mut out);
                 out
             };
             let replaced = if global {
