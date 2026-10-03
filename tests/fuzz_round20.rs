@@ -111,7 +111,7 @@ fn cmdline_burst(f: &mut Fixture, rng: &mut u64, prompt: char, trace: &mut Vec<S
     let n = (fuzz_xorshift(rng) % 24) as usize + 1;
     for _ in 0..n {
         // 每步 1/6 概率塞一个 <...> 编辑键，其余取字母表字符
-        if fuzz_xorshift(rng) % 6 == 0 {
+        if fuzz_xorshift(rng).is_multiple_of(6) {
             keys.push(
                 ["<BS>", "<C-w>", "<C-u>", "<up>", "<down>", "<left>", "<right>", "<Esc>", "<Tab>"]
                     [(fuzz_xorshift(rng) % 9) as usize]
@@ -122,7 +122,7 @@ fn cmdline_burst(f: &mut Fixture, rng: &mut u64, prompt: char, trace: &mut Vec<S
         }
     }
     // 2/3 概率回车执行，否则 Esc 取消（两条尾路径的记账都要炸到）
-    keys.push(if fuzz_xorshift(rng) % 3 != 0 {
+    keys.push(if !fuzz_xorshift(rng).is_multiple_of(3) {
         "<CR>".to_owned()
     } else {
         "<Esc>".to_owned()
@@ -148,7 +148,7 @@ fn fuzz_round20_cmdline_face_holds_invariants() {
             let mut f = Fixture::new(BUFFERS[((seed as usize) + round) % BUFFERS.len()]);
             let mut trace: Vec<String> = Vec::new();
             for _ in 0..STEPS {
-                if fuzz_xorshift(&mut rng) % 20 == 0 {
+                if fuzz_xorshift(&mut rng).is_multiple_of(20) {
                     let r = fuzz_xorshift(&mut rng);
                     if buffer_reset_when_idle(&mut f, r) {
                         trace.push(format!("RESET {}", (r as usize) % BUFFERS.len()));
