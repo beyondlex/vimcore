@@ -5,6 +5,93 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十轮补记（2026-10-03，fuzz round20）
+
+`tests/fuzz_round20.rs`：命令行面（`:` `/` `?`）从「整串命名键」换成
+「进提示符 → 逐字符喂恶意字母表 → Enter/Esc 收尾」的爆发式输入，新增
+渲染契约不变量——**发布给宿主的高亮区间必须整体可寻址**。抓到 E35
+早退路径（`/ab<C-u><CR>`）不清 incsearch 预览的渲染违例并修复。本轮
+（二十一）顺手清掉该文件的三处 clippy warning（manual_is_multiple_of）。
+
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十一轮检视增补（2026-10-04，回归测试并入
+`tests/review_regressions.rs`（+15 例）；无新 fuzz 文件——本轮的异常面
+由既有 round20 的 cmdline 轰炸与定向回归覆盖）
+
+本轮流程：全量通读 `src/`（读码列候选 → PTY 探针定谳 → 修复），
+第二轮对新面（search-motion × 宏/`.`/跨行/多字节/CJK）复核。方法论
+收获一条：**探针先打自己的断言**——第二轮 4 个「失败」里 4 个都是
+探针断言算错而引擎与 vim 一致（visual 选区含光标字符、反向 exclusive
+保留光标字符、`/aa` 跳过光标自身匹配、append 打字落点），先把探针
+钉对再谈翻案。
+
+### 语义修复（PTY 字节级探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **`d` + `/` 操作符悬空跨提示符（数据丢失级）** | 旧引擎 `d` 挂起后 `/` 照常开提示符，Enter 执行纯跳转而操作符**原封不动**——搜索后下一个 motion 键误触 `d<motion>`（探针：`j` → `dj` 删空整个缓冲）。修复即下述新功能：提示符现在就是 motion |
+| 2 | **`:marks` 重复列出 `^`** | `exit_insert` 同时写 offsets 表（`set('^')`）与引擎跟踪的 `last_insert_exit`，列表追加分支只对 `.` 去重、对 `^` 无条件追加 |
+| 3 | **CJK 行尾 `iw` 误判整行** | 文本对象探针 `line_end - 1` 是裸字节步：多字节尾字符落 mid-char → `class_at` 读 None → 空行分支触发。修复：探针 floor 到字符边界，且整个 run 扫描锚定在 clamp 后的位置（旧代码只 clamp 了分类探针、扫描仍从原始 offset 出发，会产生越行 range） |
+| 4 | **`:1j` 末行 no-op 光标落 col 0** | 无接缝路径把光标留在 join 前设置的 `line_start(first)`，而成功路径与 `:5` 空命令都落首非空白——vim 9.1 探针（`:1j` 于 `"    abc"` 后 `x` 删 `a`）确认落首非空白。顺带修正 round19 的记录：当时写的「与 :5 同款」在缩进行上并不成立，本轮才真正对齐 |
+| 5 | **`<S-a>` 型映射永不触发** | `handle_key` 对纯字符键丢弃 shift 标志，而 `parse_angle` 保留 `shift+Char('a')`——交付形态永远对不上。vim 9.1 探针：`:nmap <S-x> ihello` 的映射列表显示 `n  X  ihello`（vim 同样规范化）。修复：shift-only + ASCII 字母 → 大写字母；非字母（`<S-1>` 键盘布局相关）保持原样 |
+| 6 | **`d/foo` 匹配仅在光标处静默 no-op** | wrap 回落自匹配时 span 为空——引擎无操作无反馈；vim 探针给 wrap 消息 + 响铃。修复：`target == origin` 视为 motion 失败，响铃 + 放弃操作符 |
+
+### 新功能：search-as-motion（`d/pat`・`c?pat`・`gu/pat`・`v/pat`）
+
+`/`/`?` 在操作符下或 visual 模式打开提示符时记入 `search_motion`，
+Enter 按 vim 语义收账（全部 PTY 探针对齐）：
+
+- **操作符下**：以 exclusive span `[cursor, match_start)` 补齐操作符
+  （`d/bar<CR>` 于 `"foo bar\nbaz"` → `"bar\nbaz"`）；count 合并
+  （`2d/foo` ≡ `d2/foo`）；miss 报 E486 并**放弃操作符**；Esc 静默
+  取消（vim 的 clearop）；wrap 语义与 `n` 一致。
+- **visual 下**：光标跳匹配起点、选区扩展（锚不动）、**保持 visual**
+  （`v/bar<CR>` 高亮 `"foo "`，选区含光标字符——vim 探针
+  `v/bar<CR>x` → `"ar\nbaz"`）。
+- **免费得到的**：`.` 重放（键序含提示符全程被录，`d/foo<CR>` 后
+  `.`/`2.` 正确重复）、宏录制回放（`qb d/bar<CR> q` 六步，`@b` 同形）、
+  `y/pat` 光标不动（yank 不动光标，vim 同）、跨行 span、`gu`/`gU`/
+  `g~`/`c` 全操作符族。
+
+修复前 visual 的 `/` 是响铃死键——本轮顺带变为可用。
+
+### 检视中证伪、无需改的（免下轮重查）
+
+- **宏回放 search-motion**：首轮探针「`@b` 回放不删」是探针自身的
+  fixture bug（宏存在一个 `VimState` 里，换 fixture 即丢）——同
+  fixture 重置缓冲后回放逐字节正确。宏不跨 `VimState`，此前从未
+  被钉过，本轮顺手写进回归。
+- **反向 exclusive 的光标字符**：`$d?def<CR>` 于 `"abc def ghi"` →
+  `"abc i\n"`——删 `[match_start, cursor)`，光标字符保留。引擎与
+  vim 逐字节一致（首轮注释误读为「含光标字符」，已改）。
+- **`v/pat` 后选区含光标字符**：`d` 删 `"foo b"` 留 `"ar"`——visual
+  语义如此，vim 探针一致。
+- **`/aa` 跳过光标自身匹配**、**`qa` 内 `v`（visual 可录制）**、
+  **`R` 会话的 `.` 重复**、**`i<C-r>/`（搜索寄存器插入）**、
+  **`:+0d`/`:;d`/`:1;3d` 等 7 种怪范围**——全部与 vim/文档一致。
+
+### 注释纠偏（防未来误修）
+
+- `objects.rs word_range` 的旧注释自称「never INTO a trailing multi-byte
+  char」但 `line_end - 1` 恰恰会——注释与代码一起重写。
+- `review_regressions` 中 round20 的 `angle_keys_accept_lowercase…` 钉住
+  `<s-x>` 保留 shift 的死映射行为——按 vim 探针改正（规范化为 `X`）。
+
+### 新增已知分歧（接全局序号）
+
+59. **search-motion 的 wrap 提示消息**：vim 显示 "search hit BOTTOM,
+    continuing at TOP"；引擎没有该消息通道（bell 语义已对齐——失败必
+    响铃；wrap 成功两侧都不响）。
+60. **`i<C-r>{reg}` 的 autoindent 展开**：引擎经 `insert_text_at_cursor`
+    按行展开缩进；vim 是否字面插入未探（多行寄存器 + ai 场景，极窄）。
+61. **`:2,2j` 等值 no-op 的光标**：引擎早期返回不动光标；vim 是否落到
+    地址行未探（`:1j` 的落点已实证对齐，等值双地址形态未跟）。
+
+### 性能备注
+
+- bench_probe 全量复跑：`w` 5.9µs/键、1MB 单行 `w` 120µs、hlsearch
+  重扫 0.25ms、`:%s` 5.5ms、`n` 3.8µs——与 round18/19 基线持平或略优
+  （本轮改动全在提示符路径，非每键热路径）。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第十九轮检视增补（2026-10-03，回归测试并入
 `tests/review_regressions.rs`（+8 例），round13 两条推理钉子按新探针
 改正；fuzz 新增 `tests/fuzz_round19.rs`（11.5 万步 + D/C 形态真值表
@@ -80,8 +167,9 @@ visual 模式（`v` 不生效，round8 已有记录）、多位 count（`99D` �
     （PTY 下 `:reg` 面太窄）。极窄面，挂账。
 56. **`r<CR>` 于缩进内部**：引擎把字符换成裸 `\n`（缩进留在首行）；
     vim 的「删字符后 i<CR><Esc>」在缩进中段的换行缩进截断规则未探针。
-57. **`:j` no-op 的光标**：引擎仍把光标移到范围末地址行；vim 于末行
-    `:3j` 的光标行为未探（大概率一致，未证）。
+57. **`:j` no-op 的光标**：【第二十一轮已结】vim 9.1 探针确认落地址行
+    首非空白（`:1j` 于 `"    abc"` 后 `x` 删 `a`），引擎已对齐；等值
+    双地址形态（`:2,2j`）仍挂账（见 61）。
 58. **visual `J` 带 count 的锚点**：`:h v_J` 说 count 从「最后高亮行」
     起数；引擎从选区首行起数。`-es`/PTY 均无法可靠驱动 visual count
     组合，探针未决，维持现状挂账。
