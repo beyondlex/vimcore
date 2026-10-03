@@ -126,6 +126,11 @@ impl VimState {
                     // consumer today, but every new call site would inherit
                     // the stale count silently)
                     self.cmdline.search_count = 0;
+                    // the incsearch preview must die with the prompt: Enter
+                    // on a cleared line (`/ab<C-u><CR>`, round20 fuzz) ran
+                    // no search, so the host keeps whatever the LAST TYPED
+                    // preview showed unless we re-assert the real state here
+                    self.restore_search_highlights(ctx);
                     ctx.host
                         .status_message("E35: No previous regular expression");
                     ctx.host.bell();
@@ -195,13 +200,19 @@ impl VimState {
         // and republishing `last_matches` here would leave permanent
         // highlights behind an incsearch-only preview (hlsearch=false +
         // incsearch=true: cancel must clear, like vim)
+        self.restore_search_highlights(ctx);
+        ctx.host.changed();
+    }
+
+    /// Re-assert the engine's REAL search state on the host, discarding any
+    /// incsearch preview the prompt left behind.
+    fn restore_search_highlights(&mut self, ctx: &mut Ctx) {
         if self.options.hlsearch {
             let matches = self.search.last_matches.clone();
             ctx.host.set_search_highlights(&matches, None);
         } else {
             ctx.host.set_search_highlights(&[], None);
         }
-        ctx.host.changed();
     }
 
     /// One keystroke at the prompt. Printable chars append to the buffer
