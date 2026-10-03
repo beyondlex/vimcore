@@ -1168,3 +1168,31 @@ fn ex_join_at_eof_is_a_clean_noop() {
     f.feed(["g", "g", "j", "."]);
     assert_eq!(f.text(), "\n\nc\n");
 }
+
+/// `:s` 尾随 count 的 EOF 截断：新范围从原 range 末行起、向下方延伸
+/// count-1 行，越界只截尾部（vim 9.1 探针：10 行缓冲 `:5s/a/X/20` →
+/// 5..10 行；`:1,3s/a/X/2` → 3..4 行）。旧实现把窗口起点按截断后的
+/// 末行反推（`last - (n-1)`），`:5s/a/X/20` 变成全文件替换。
+#[test]
+fn ex_substitute_trailing_count_clamps_at_eof_without_sliding() {
+    fn ex(f: &mut Fixture, line: &str) {
+        let mut keys: Vec<String> = line.chars().map(|c| c.to_string()).collect();
+        keys.insert(0, ":".to_owned());
+        keys.push("<CR>".to_owned());
+        f.feed(keys);
+    }
+    let buf = "l1a\nl2a\nl3a\nl4a\nl5a\nl6a\nl7a\nl8a\nl9a\nl10a\n";
+
+    let mut f = Fixture::at(buf, 0, 0);
+    ex(&mut f, "5s/a/X/20");
+    assert_eq!(f.text(), "l1a\nl2a\nl3a\nl4a\nl5X\nl6X\nl7X\nl8X\nl9X\nl10X\n");
+
+    let mut f = Fixture::at(buf, 0, 0);
+    ex(&mut f, "1,3s/a/X/2");
+    assert_eq!(f.text(), "l1a\nl2a\nl3X\nl4X\nl5a\nl6a\nl7a\nl8a\nl9a\nl10a\n");
+
+    // 末行 + count：无下方空间 → 只动末行（探针 `:3s/a/X/2` 于 3 行）
+    let mut f = Fixture::at("l1a\nl2a\nl3a\n", 0, 0);
+    ex(&mut f, "3s/a/X/2");
+    assert_eq!(f.text(), "l1a\nl2a\nl3X\n");
+}
