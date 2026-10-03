@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::buffer::clamp_cursor;
 use crate::key::{Key, KeyKind};
 use crate::mode::Mode;
 use crate::search;
@@ -105,17 +106,16 @@ impl VimState {
     /// Execute the current pattern and jump to the first match.
     fn execute_search(&mut self, ctx: &mut Ctx, pattern: String, forward: bool) {
         self.mode = Mode::Normal;
+        // the prompt was opened as a MOTION (`d/pat`, `v?pat`): the empty
+        // pattern still reuses the last one (the motion re-runs it), and a
+        // miss aborts the pending operator / keeps the selection.
+        let motion = self.search_motion.take();
         if pattern.is_empty() {
             // empty pattern: re-use the last one, like vim — but in the
             // direction of the CURRENT prompt (`?` + Enter repeats BACKWARD,
             // `/` + Enter forward; verified against vim 9.1)
             match self.search.pattern.clone() {
-                Some(last) => {
-                    search::set_pattern(self, ctx, last, forward);
-                    let count = std::mem::take(&mut self.cmdline.search_count).max(1);
-                    self.jump_to_current_match(ctx, forward, count);
-                    ctx.host.changed();
-                }
+                Some(last) => return self.run_search(ctx, &motion, last, forward),
                 // vim reports E35 instead of a silent no-op (probe:
                 // `/<CR>` with no previous search sets v:errmsg to E35)
                 None => {
@@ -126,6 +126,12 @@ impl VimState {
                     // consumer today, but every new call site would inherit
                     // the stale count silently)
                     self.cmdline.search_count = 0;
+                    // a motion-armed prompt aborts its operator with the
+                    // search (`d/<CR>` with no previous pattern is a quiet
+                    // miss, not a dangling delete)
+                    if motion == Some(crate::state::SearchMotion::Operator) {
+                        self.reset_pending();
+                    }
                     // the incsearch preview must die with the prompt: Enter
                     // on a cleared line (`/ab<C-u><CR>`, round20 fuzz) ran
                     // no search, so the host keeps whatever the LAST TYPED
@@ -140,9 +146,101 @@ impl VimState {
         }
         self.cmdline.history_pos = None;
         self.cmdline.stash = None;
+        self.run_search(ctx, &motion, pattern, forward);
+    }
+
+    /// Shared tail of [`Self::execute_search`]: dispatch a resolved pattern
+    /// to the motion variants or the plain jump.
+    fn run_search(
+        &mut self,
+        ctx: &mut Ctx,
+        motion: &Option<crate::state::SearchMotion>,
+        pattern: String,
+        forward: bool,
+    ) {
+        match motion {
+            Some(crate::state::SearchMotion::Operator) => {
+                return self.search_motion_operator(ctx, pattern, forward);
+            }
+            Some(crate::state::SearchMotion::Visual(kind)) => {
+                return self.search_motion_visual(ctx, pattern, forward, *kind);
+            }
+            None => {}
+        }
         search::set_pattern(self, ctx, pattern, forward);
         let count = std::mem::take(&mut self.cmdline.search_count).max(1);
         self.jump_to_current_match(ctx, forward, count);
+        ctx.host.changed();
+    }
+
+    /// `d/pat<CR>` / `c?pat<CR>` — the search prompt as an operator motion:
+    /// the operator completes over the exclusive span cursor..match-start
+    /// (9.1 probes: `d/bar<CR>` on "foo bar\nbaz" deletes "foo "; a miss
+    /// reports E486 and aborts the operator instead of leaving it armed).
+    fn search_motion_operator(&mut self, ctx: &mut Ctx, pattern: String, forward: bool) {
+        search::set_pattern(self, ctx, pattern, forward);
+        let count = std::mem::take(&mut self.cmdline.search_count).max(1);
+        let origin = self.cursor.offset;
+        match search::jump_to_match(self, ctx.buf, forward, count) {
+            Some(target) if self.op.is_some() => {
+                let span = crate::ops::OpSpan {
+                    start: origin.min(target),
+                    end: origin.max(target),
+                    linewise: false,
+                };
+                self.complete_operator_with_span(ctx, span);
+            }
+            // no operator left (a mapping rebuilt the state mid-prompt):
+            // degrade to the plain jump so the pattern is not lost
+            Some(target) => {
+                self.cursor.offset = clamp_cursor(ctx.buf, target);
+                self.cursor.desired_col = None;
+                ctx.host
+                    .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
+            }
+            None => {
+                // set_pattern already ran, so this quotes the fresh pattern
+                self.report_search_miss(ctx);
+                self.reset_pending();
+            }
+        }
+        ctx.host.changed();
+    }
+
+    /// `v/pat<CR>` — the search prompt inside visual mode: the cursor jumps
+    /// to the match start, the selection extends (anchor stays) and visual
+    /// mode is KEPT (9.1 probe: `v/bar<CR>` highlights "foo " and the
+    /// indicator stays `-- VISUAL --`). A miss keeps the selection intact.
+    fn search_motion_visual(
+        &mut self,
+        ctx: &mut Ctx,
+        pattern: String,
+        forward: bool,
+        kind: crate::mode::VisualKind,
+    ) {
+        search::set_pattern(self, ctx, pattern, forward);
+        let count = std::mem::take(&mut self.cmdline.search_count).max(1);
+        match search::jump_to_match(self, ctx.buf, forward, count) {
+            Some(target) => {
+                self.mode = Mode::Visual { kind };
+                self.cursor.offset = clamp_cursor(ctx.buf, target);
+                self.cursor.desired_col = None;
+                // the live `'<`/`'>` range follows the extended selection
+                if let Some(anchor) = self.visual_anchor {
+                    let (lo, hi) =
+                        (anchor.min(self.cursor.offset), anchor.max(self.cursor.offset));
+                    let end = crate::buffer::next_grapheme_offset(ctx.buf, hi).unwrap_or(hi);
+                    self.marks.active_visual = Some((lo, end));
+                }
+                ctx.host
+                    .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
+            }
+            None => {
+                // keep the selection exactly as the prompt found it
+                self.mode = Mode::Visual { kind };
+                self.report_search_miss(ctx);
+            }
+        }
         ctx.host.changed();
     }
 
@@ -186,6 +284,11 @@ impl VimState {
     /// to the pre-prompt set — incremental highlighting is preview-only and
     /// must not leak as an accepted pattern.
     fn cancel_cmdline(&mut self, ctx: &mut Ctx) {
+        // a motion-armed prompt aborts QUIETLY with the prompt: `d/<Esc>`
+        // drops the operator (vim's clearop), `v/<Esc>` keeps the selection
+        if let Some(crate::state::SearchMotion::Operator) = self.search_motion.take() {
+            self.reset_pending();
+        }
         if let Some((kind, anchor, _prompt_cursor)) = self.cmdline_visual.take() {
             self.mode = Mode::Visual { kind };
             self.visual_anchor = Some(anchor);
@@ -493,9 +596,10 @@ impl VimState {
                     ctx.host
                         .status_message(&Self::mark_line(ctx.buf, *name, *offset));
                 }
-                // items() already carries a user-set `.` mark (m.) — only
-                // append the engine-tracked row when it is not listed yet,
-                // or the listing shows two rows for one mark
+                // items() already carries engine-tracked rows for `.`/`^`
+                // (a user `m.`/exit_insert's set('^') land in the offsets
+                // map) — only append the engine-tracked row when it is not
+                // listed yet, or the listing shows two rows for one mark
                 if let Some(offset) = self.marks.last_change {
                     if !listed.iter().any(|(n, _)| *n == '.') {
                         ctx.host
@@ -503,8 +607,10 @@ impl VimState {
                     }
                 }
                 if let Some(offset) = self.marks.last_insert_exit {
-                    ctx.host
-                        .status_message(&Self::mark_line(ctx.buf, '^', offset));
+                    if !listed.iter().any(|(n, _)| *n == '^') {
+                        ctx.host
+                            .status_message(&Self::mark_line(ctx.buf, '^', offset));
+                    }
                 }
                 if let Some((lo, _, _)) = self.marks.last_visual {
                     ctx.host.status_message(&Self::mark_line(ctx.buf, '<', lo));
@@ -1073,25 +1179,30 @@ impl VimState {
         let lines = last - first + 1;
         // a single-address range still joins one seam (`:5j` = join 5 and 6)
         let joins = if lines < 2 { 1 } else { lines - 1 };
+        // join_lines walks from the CURSOR's line — anchor it at the range's
+        // first line before the call (the landing below overwrites it)
         self.cursor.offset = ctx.buf.line_start(first);
         let gen = self.edit_generation;
-        self.begin_edit();
-        crate::ops::join_lines(self, ctx, joins + 1, bang);
-        self.end_edit();
-        // a range ending at the buffer's last line has no seam to join —
-        // a no-op must not feed the changelist / `.` mark (same no-op
-        // discipline as the normal-mode operators)
-        if self.edit_generation != gen {
-            // vim parks the cursor on the joined line's FIRST NON-BLANK after
-            // `:j` (probes: `:1,2j` on ['    aaaa','bbbb'] → col 5, bare `:j` →
-            // col 1) — the seam landing is normal-mode `J`'s behavior. The cursor
-            // moves BEFORE `bump` so the changelist / `.` mark record the join
-            // site, not wherever the command's cursor happened to be before.
-            self.cursor.offset = ctx.buf.first_non_blank(first);
-            self.cursor.desired_col = None;
-            self.bump(ctx);
-            ctx.host.changed();
-        }
+            self.begin_edit();
+            crate::ops::join_lines(self, ctx, joins + 1, bang);
+            self.end_edit();
+            // a range ending at the buffer's last line has no seam to join —
+            // a no-op must not feed the changelist / `.` mark (same no-op
+            // discipline as the normal-mode operators). The cursor still
+            // lands on the range's address line at its FIRST NON-BLANK, the
+            // same parking as the empty-command `:5` (9.1 probe: `:1j` at
+            // EOF on "    abc" then `x` deletes the 'a') — the raw line
+            // start dropped the indentation landing.
+            if self.edit_generation != gen {
+                self.cursor.offset = ctx.buf.first_non_blank(first);
+                self.cursor.desired_col = None;
+                self.bump(ctx);
+                ctx.host.changed();
+            } else {
+                self.cursor.offset = ctx.buf.first_non_blank(first);
+                self.cursor.desired_col = None;
+                ctx.host.scroll_to_line(first);
+            }
         self.commit_change_record();
     }
 

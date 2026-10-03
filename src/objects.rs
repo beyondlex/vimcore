@@ -87,18 +87,18 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
     // everything else→Word for `aw`/`iW`, and word/punct apart for `iw`.
     let class_of = |o: usize| word::class_at(buf, o, big);
 
-    // clamp the probe to the line, but never INTO a trailing multi-byte
-    // char: `offset == line_end` on a CJK-tailed line would floor to the
-    // char's MIDDLE byte (class_at → None → the empty-line branch — `iw`
-    // silently became whole-line). Unreachable from engine cursors today
-    // (clamp_cursor parks them on the last char), but the trait lets hosts
-    // pass any offset to a pub fn.
-    let probe = if offset >= line_end || offset < line_start {
-        line_end.saturating_sub(1).max(line_start)
+    // A cursor past the line's content end (insert mode parks there) or
+    // before the line start is pulled ONTO the line and FLOORED to the
+    // char boundary of the last char. The old probe `line_end - 1` is a
+    // raw byte step: on a CJK-tailed line it lands mid-character, where
+    // `class_at` reads None — the empty-line branch then fired and `iw`
+    // silently selected the whole line.
+    let offset = if offset >= line_end || offset < line_start {
+        crate::buffer::floor_to_char_boundary(buf, line_end.saturating_sub(1)).max(line_start)
     } else {
         offset
     };
-    let Some(class) = class_of(probe) else {
+    let Some(class) = class_of(offset) else {
         // EMPTY line (cursor sits on the newline): `iw`/`ip` keep the line
         // itself, but `aw` treats it as one blank run reaching into the
         // next line's word (9.1: `daw` on ["foo","","bar"] leaves ["foo"])
