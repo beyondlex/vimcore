@@ -236,8 +236,16 @@ pub fn publish_incsearch(vim: &mut VimState, ctx: &mut Ctx, pattern: &str) {
         return;
     }
     let matches = all_matches(vim, ctx.buf, pattern);
-    ctx.host
-        .set_search_highlights(&matches, matches.first().cloned());
+    // the "current" preview is the match vim's incsearch would JUMP to on
+    // Enter: the first one at/after the cursor, wrapping to the buffer's
+    // first — marking the buffer's first match misrendered the preview
+    // whenever the cursor sat below it
+    let current = matches
+        .iter()
+        .find(|m| m.start >= vim.cursor.offset)
+        .cloned()
+        .or_else(|| matches.first().cloned());
+    ctx.host.set_search_highlights(&matches, current);
 }
 
 /// The match to select for `gn`/`gN`: the match CONTAINING `offset` if there

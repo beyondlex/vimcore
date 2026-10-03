@@ -114,20 +114,27 @@ fn probe_register_semantics() {
     assert_eq!(r2.get('"').unwrap().text, "keep\n");
 }
 
-/// PROBE: `3D` on 4 lines from col 0: D deletes from the CURSOR onward, so
-/// the first line becomes empty and line 4 survives; `99D` past the buffer
-/// end also takes the final newline. With the cursor ON a char (col 1) the
-/// engine's documented probe shape holds (`99D` → ['a']).
+/// PROBE (round-19 correction): the old pin here claimed `3D` at col 0
+/// "empties line 1" — that was REASONING, never a real probe. Byte-level
+/// vim 9.1 PTY probes (round 19): `count >= 2` from the line start deletes
+/// the covered lines WHOLE (`3D` → "dddd\n", `2D` on a/b/c → "c\n",
+/// `99D` on two lines → empty buffer), while count=1 empties the cursor
+/// line (see review_regressions). With the cursor ON a char (col 1) the
+/// round-9 probe shape holds (`99D` → "a").
 #[test]
 fn probe_count_d_shapes() {
     let f = edit("aaaa\nbbbb\ncccc\ndddd\n", 0, 0, &["3", "D"]);
-    assert_eq!(f.text(), "\ndddd\n", "3D empties line 1, keeps line 4, got {:?}", f.text());
+    assert_eq!(f.text(), "dddd\n", "3D from col 0 deletes covered lines whole, got {:?}", f.text());
 
     let f2 = edit("aaaa\nbbbb\n", 0, 0, &["9", "9", "D"]);
     assert_eq!(f2.text(), "", "99D from (0,0) deletes the whole buffer, got {:?}", f2.text());
 
     let f3 = edit("aaaa\nbbbb\n", 0, 1, &["9", "9", "D"]);
-    assert_eq!(f3.text(), "a", "99D from col 1 keeps the text before the cursor (documented probe)");
+    // round-19 correction: the old pin "a" claimed the final newline goes
+    // too — that was reasoning, not a probe. Byte-level vim 9.1 PTY probe
+    // (`ggl2D` on "aaaa\nbbbb\n" then :wq → file "a\n"): the file's final
+    // newline SURVIVES a from-mid-line count-D.
+    assert_eq!(f3.text(), "a\n", "99D from col 1 keeps the text before the cursor AND the file eol");
 }
 
 /// PROBE: a self-expanding mapping pair must trip the depth guard, not hang

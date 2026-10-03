@@ -1047,3 +1047,124 @@ fn operator_arrow_count_merges() {
     f.feed_raw(Key::named("down"));
     assert_eq!(f.text(), "l1\nl2\nl6\nl7\n");
 }
+
+// ---- 第十九轮：D/C 行模型（vim 9.1 字节级探针）/ r<CR> 计数 / r<C-E>/r<C-Y> ----
+
+/// `D` 在末行（截断存活）保留文件的结尾换行——引擎的尾 `\n` 就是宿主的
+/// 文件 eol，vim 9.1 字节探针：`abc\ndef\n` 末行 `D` → 文件 `abc\nde\n`。
+/// 旧实现吞掉换行，宿主保存后文件丢 eol。
+#[test]
+fn d_on_last_line_keeps_file_eol() {
+    let f = edit("abc\ndef\n", 1, 2, &["D"]);
+    assert_eq!(f.text(), "abc\nde\n");
+}
+
+/// `99D` 从行中触达缓冲末：截断的首行 + eol 一起存活（vim 探针 → "a\n"）。
+#[test]
+fn count_d_to_eof_keeps_eol() {
+    let f = edit("aaaa\nbbbb\n", 0, 1, &["9", "9", "D"]);
+    assert_eq!(f.text(), "a\n");
+}
+
+/// `D` 于行首（下方有存活行）= 整行删除，不留幻影空行（vim 探针：
+/// ['a','b','c'] 行首 `2D` → ['c']）。旧实现留下一个空首行。
+#[test]
+fn d_at_line_start_deletes_covered_lines_whole() {
+    let f = edit("a\nb\nc\n", 0, 0, &["2", "D"]);
+    assert_eq!(f.text(), "c\n");
+    let f = edit("aaaa\nbbbb\ncccc\ndddd\n", 0, 0, &["3", "D"]);
+    assert_eq!(f.text(), "dddd\n");
+    let f = edit("aaaa\nbbbb\n", 0, 0, &["9", "9", "D"]);
+    assert_eq!(f.text(), "");
+}
+
+/// `D` count=1 于行首 = d$ 语义：行被清空但保留（vim PTY 探针
+/// ['a','b','c'] 行首 `D` → "\nb\nc\n"，光标行不消失）。
+#[test]
+fn d_count_one_at_line_start_empties_the_line() {
+    let f = edit("a\nb\nc\n", 0, 0, &["D"]);
+    assert_eq!(f.text(), "\nb\nc\n");
+}
+
+/// 唯一行缓冲的行首 `D`：行清空但保留（vim 保持 ≥1 行，探针 → "\n"）。
+#[test]
+fn d_at_sole_line_start_keeps_empty_line() {
+    let f = edit("abc\n", 0, 0, &["D"]);
+    assert_eq!(f.text(), "\n");
+}
+
+/// `C` 与 `D` 在行首分化：C 清空行进入插入（vim 探针 `C` 行首 + z →
+/// "z\nb\nc\n"），行永不消失；中间覆盖行仍然整行消失（round-9 既有 2C
+/// 探针 + round19 `2Cnew` 行首探针 → ['new','cccc','dddd']）。
+#[test]
+fn c_at_line_start_types_on_the_emptied_line() {
+    let mut f = Fixture::at("a\nb\nc\n", 0, 0);
+    f.feed(["C"]);
+    f.type_text("z");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "z\nb\nc\n");
+    let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
+    f.feed(["2", "C"]);
+    f.type_text("new");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "new\ncccc\ndddd\n");
+}
+
+/// `N r <CR>` 塌缩为单个换行——`:h r` 明文 "5r<CR> replaces five
+/// characters with a single line break"（vim 字节探针：`3r<CR>` 于
+/// "abcdef" → 一个空行 + "def"）。旧实现产出 N 个换行。
+#[test]
+fn count_r_cr_is_one_break() {
+    let f = edit("abcdef\n", 0, 0, &["3", "r", "<CR>"]);
+    assert_eq!(f.text(), "\ndef\n");
+    // 单个 r<CR> 光标落新行首（既有语义，顺带钉住塌缩后的落点）
+    let f = edit("abc\n", 0, 1, &["r", "<CR>"]);
+    assert_eq!(f.text(), "a\nc\n");
+    assert_eq!(f.cursor(), 2); // first char of the new next line
+}
+
+/// `r<C-E>` / `r<C-Y>`：替换字符取自下/上行同显示列（`:h r`；
+/// `10r<C-E>` 复制下方 10 个字符）。任一侧不够则整条取消（同
+/// `3rx` 只剩两字符的取消语义）。
+#[test]
+fn r_ctrl_e_y_copies_from_neighbor_line() {
+    // 下方：'a' ← 'X'
+    let f = edit("abc\nXYZ\n", 0, 0, &["r", "<C-e>"]);
+    assert_eq!(f.text(), "Xbc\nXYZ\n");
+    // 上方：'Y' ← 'b'
+    let f = edit("abc\nXYZ\n", 1, 1, &["r", "<C-y>"]);
+    assert_eq!(f.text(), "abc\nXbZ\n");
+    // 计数：3r<C-E> 复制 3 个字符
+    let f = edit("abc\nXYZW\n", 0, 0, &["3", "r", "<C-e>"]);
+    assert_eq!(f.text(), "XYZ\nXYZW\n");
+    // 下方行太短 → 整条取消 + 响铃
+    let mut f = Fixture::at("abc\nXY\n", 0, 0);
+    f.feed(["3", "r", "<C-e>"]);
+    assert_eq!(f.text(), "abc\nXY\n");
+    assert!(f.host.bells > 0);
+}
+
+/// 未设 mark 的 `'z` / `` `z `` 走 vim 的消息通道（E20），不再只有哑铃。
+#[test]
+fn unset_mark_jump_reports_e20() {
+    let mut f = Fixture::at("abc\n", 0, 0);
+    f.feed(["'", "z"]);
+    assert_eq!(f.text(), "abc\n");
+    assert!(f.host.statuses.iter().any(|s| s.contains("E20")));
+    assert!(f.host.statuses.iter().any(|s| s.contains('z')));
+}
+
+/// `:j` 于末行（无接缝可接）是纯 no-op：不进 changelist、不推 `.` mark。
+/// 旧实现照常 bump，changelist 被无操作污染。
+#[test]
+fn ex_join_at_eof_is_a_clean_noop() {
+    let mut f = Fixture::at("a\nb\nc\n", 0, 0);
+    f.feed(["x"]); // a real change: "\nb\nc\n", changelist = the x site
+    f.feed([":", "3", "j", "<CR>"]); // last line: no seam to join
+    assert_eq!(f.text(), "\nb\nc\n");
+    // `.` still replays the x — the no-op join took over neither the
+    // changelist nor the `.` mark (cursor re-anchored so the replay lands
+    // on "b" regardless of where :3j parked it)
+    f.feed(["g", "g", "j", "."]);
+    assert_eq!(f.text(), "\n\nc\n");
+}

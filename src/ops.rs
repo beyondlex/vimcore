@@ -962,31 +962,110 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
     let count = count.max(1);
     let start = vim.cursor.offset;
     let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(start));
-    let mut replacements = String::new();
     let mut o = start;
+    let mut replaced = 0usize;
     for _ in 0..count {
         if o >= line_end {
             // `3rx` with only two chars left on the line: vim cancels the
             // whole replace instead of partially filling it
             return;
         }
-        replacements.push(ch);
         let next = advance_graphemes(ctx.buf, o, 1, line_end);
         if next == o {
             break;
         }
         o = next;
+        replaced += 1;
     }
+    let replacements = if ch == '\n' {
+        // N<CR> collapses to ONE break: ":h r" — "5r<CR> replaces five
+        // characters with a single line break" (9.1 byte probe: `3r<CR>` on
+        // "abcdef" → one empty line + "def", not three). The autoindent the
+        // doc mentions nets out to the plain break too: the indent stays on
+        // the FIRST line and the new line's untouched ai-indent is stripped
+        // at Esc — exactly what a bare `\n` here produces.
+        "\n".to_owned()
+    } else {
+        ch.to_string().repeat(replaced)
+    };
     vim.edit_replace(ctx, start..o, &replacements);
     if ch == '\n' {
         // `r<CR>` splits the line: vim parks the cursor on the FIRST
         // character of the new next line (9.1 probe: 'abc' + r<CR> → cursor
         // (2,1)) — there is no replaced char to sit on
-        vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len());
+        vim.cursor.offset = clamp_cursor(ctx.buf, start + 1);
     } else {
         vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len() - ch.len_utf8());
     }
     vim.cursor.desired_col = None;
+}
+
+/// `r{char}` with `CTRL-E`/`CTRL-Y` as the char (`:h r`): each replaced
+/// character takes the char from the line BELOW (`C-e`) / ABOVE (`C-y`) at
+/// the same display column — `10r<C-E>` copies 10 characters from the line
+/// below. Either side running out (count past the cursor line's end, the
+/// neighbor line shorter than the start column or the count) cancels the
+/// whole replace, like every other failed `r`. Returns false when cancelled.
+pub fn replace_chars_from_neighbor(
+    vim: &mut VimState,
+    ctx: &mut Ctx,
+    below: bool,
+    count: usize,
+) -> bool {
+    let count = count.max(1);
+    let start = vim.cursor.offset;
+    let line = ctx.buf.offset_to_line(start);
+    let cursor_line_end = ctx.buf.line_end(line);
+    let neighbor = if below {
+        if line + 1 >= ctx.buf.line_count() {
+            return false;
+        }
+        line + 1
+    } else {
+        if line == 0 {
+            return false;
+        }
+        line - 1
+    };
+    // same DISPLAY column on the neighbor line (wide chars align like the
+    // terminal shows them, mirroring i_CTRL-E)
+    let col = crate::buffer::display_column(ctx.buf, start);
+    let src = crate::buffer::offset_for_display_column(ctx.buf, neighbor, col);
+    let neighbor_end = ctx.buf.line_end(neighbor);
+    if src >= neighbor_end {
+        return false;
+    }
+    // gather `count` characters from the neighbor
+    let mut replacements = String::new();
+    let mut o = src;
+    for _ in 0..count {
+        if o >= neighbor_end {
+            return false;
+        }
+        let Some(c) = ctx.buf.char_at(o) else { return false };
+        replacements.push(c);
+        let Some(next) = ctx.buf.next_char_offset(o) else { return false };
+        o = next;
+    }
+    // the consumed span on the cursor line: `count` graphemes, cancel when
+    // the line runs out (same rule as `3rx` with two chars left)
+    let mut end = start;
+    for _ in 0..count {
+        if end >= cursor_line_end {
+            return false;
+        }
+        let next = advance_graphemes(ctx.buf, end, 1, cursor_line_end);
+        if next == end {
+            return false;
+        }
+        end = next;
+    }
+    vim.edit_replace(ctx, start..end, &replacements);
+    // cursor on the last replaced char's start (same landing as `r{char}`)
+    let last_len = replacements.chars().last().map_or(1, char::len_utf8);
+    vim.cursor.offset = clamp_cursor(ctx.buf, end.saturating_sub(last_len.max(1)));
+    vim.cursor.desired_col = None;
+    true
 }
 
 /// Visual `r{char}`: replace every selected character with `char` (vim 9.1
