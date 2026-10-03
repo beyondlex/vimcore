@@ -218,10 +218,27 @@ impl Key {
             "tab" => Key::named("tab"),
             "lt" => Key::char('<'),
             "bar" => Key::char('|'),
-            _ if rest.chars().count() == 1 => Key {
-                modifiers,
-                kind: KeyKind::Char(rest.chars().next().unwrap()),
-            },
+            _ if rest.chars().count() == 1 => {
+                let c = rest.chars().next().unwrap();
+                // `<S-a>` spells the printable char 'A' (vim's notation rule).
+                // handle_key drops the shift flag on every plain char key, so
+                // a mapping stored as shift+lowercase could never fire — the
+                // delivered key is 'A' with no modifiers. Canonicalize here
+                // instead of leaking a dead mapping into the tables.
+                if modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && c.is_ascii_alphabetic()
+                {
+                    Key::char(c.to_ascii_uppercase())
+                } else {
+                    Key {
+                        modifiers,
+                        kind: KeyKind::Char(c),
+                    }
+                }
+            }
             _ => Key {
                 modifiers,
                 kind: KeyKind::Named(rest.to_ascii_lowercase()),

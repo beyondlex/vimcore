@@ -201,6 +201,21 @@ pub struct Cursor {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InsertSession;
 
+/// What a search prompt (`/`/`?`) opened over: vim's search-as-motion
+/// (`d/pat<CR>` deletes through the match start, `v?pat<CR>` extends the
+/// selection). Armed when the prompt opens under an operator or inside
+/// visual mode; consumed by the prompt's execute, dropped by its cancel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchMotion {
+    /// Operator-pending: on execute the operator completes over the
+    /// exclusive span cursor..match-start (9.1 probe: `d/bar<CR>` on
+    /// "foo bar\nbaz" leaves "bar\nbaz"; miss reports E486 and aborts).
+    Operator,
+    /// Visual: on execute the cursor jumps to the match start and the
+    /// selection extends (anchor stays); visual mode is kept.
+    Visual(crate::mode::VisualKind),
+}
+
 /// The vim engine. Hosts embed one per buffer/editor.
 pub struct VimState {
     pub mode: Mode,
@@ -211,7 +226,10 @@ pub struct VimState {
     count: Option<usize>,
     register: Option<char>,
     register_pending: bool,
-    op: Option<Operator>,
+    /// The armed operator (`d` of `dw`); `pub(crate)` because the cmdline's
+    /// search-motion path (same crate, other module) checks whether the
+    /// operator survived to the prompt's execute.
+    pub(crate) op: Option<Operator>,
     op_count: Option<usize>,
     cmd_seq: Vec<Key>,
     char_arg_cmd: Option<CharArgCmd>,
@@ -273,6 +291,10 @@ pub struct VimState {
     /// the `'<`/`'>` marks are written from the PROMPT-TIME range — vim
     /// keeps the executed range, not "anchor..post-command cursor".
     pub(crate) cmdline_visual: Option<(crate::mode::VisualKind, usize, usize)>,
+    /// A `/`/`?` prompt opened as a MOTION (`d/pat<CR>`, `v?pat<CR>`) — see
+    /// [`SearchMotion`]. Consumed by the prompt's Enter (operator completes
+    /// over the match / selection extends), dropped by its Esc.
+    pub(crate) search_motion: Option<SearchMotion>,
     /// `:action <unknown-id>` is silently ignored instead of reported.
     /// Hosts sharing one rc file across apps set this while applying the
     /// user layer (mappings aimed at other apps are expected to miss).
@@ -403,6 +425,7 @@ impl VimState {
             change_pos: 0,
             format_trigger: None,
             cmdline_visual: None,
+            search_motion: None,
             block_insert: None,
             insert_repeat: None,
             jumps: Vec::new(),
@@ -761,9 +784,13 @@ impl VimState {
         // Any leftover while the prompt is GONE means a close path bypassed
         // both — keeping it would let `visual_selection` report a stale frozen
         // selection to the host, so drop it here (the sweep runs after every
-        // keystroke; a live prompt leaves its snapshot untouched above).
+        // keystroke; a live prompt leaves its snapshot untouched above). The
+        // search-motion arming gets the same sweep: the prompt's execute or
+        // cancel consumes it, and a leftover would complete a LATER search
+        // as a motion.
         if !matches!(self.mode, Mode::CommandLine { .. }) {
             self.cmdline_visual = None;
+            self.search_motion = None;
         }
         if any_unknown {
             KeyResult::Unknown
@@ -951,7 +978,7 @@ impl VimState {
         }
     }
 
-    fn reset_pending(&mut self) {
+    pub(crate) fn reset_pending(&mut self) {
         self.count = None;
         self.register = None;
         self.register_pending = false;
@@ -2702,18 +2729,22 @@ impl VimState {
         // 6. search prompts & the Ex command line
         if key.modifiers.is_plain() {
             match &key.kind {
-                KeyKind::Char('/') => {
+                KeyKind::Char('/') | KeyKind::Char('?') => {
                     // the count rides INTO the prompt (3/foo = 3rd match)
-                    // instead of leaking into the next command (vim 9.1)
-                    self.cmdline.search_count = self.count.take().unwrap_or(0);
+                    // instead of leaking into the next command (vim 9.1).
+                    // Under an operator the prompt IS the motion (`d/pat`):
+                    // the operator count folds in (`2d/pat` ≡ `d2/pat`, two
+                    // matches out) and the arm tells the prompt's execute to
+                    // complete the operator over the match span.
+                    let backward = matches!(&key.kind, KeyKind::Char('?'));
+                    if self.op.is_some() {
+                        self.cmdline.search_count = self.take_total_count();
+                        self.search_motion = Some(SearchMotion::Operator);
+                    } else {
+                        self.cmdline.search_count = self.count.take().unwrap_or(0);
+                    }
                     self.register = None;
-                    self.begin_cmdline('/');
-                    return ProcessOutcome::Consumed;
-                }
-                KeyKind::Char('?') => {
-                    self.cmdline.search_count = self.count.take().unwrap_or(0);
-                    self.register = None;
-                    self.begin_cmdline('?');
+                    self.begin_cmdline(if backward { '?' } else { '/' });
                     return ProcessOutcome::Consumed;
                 }
                 KeyKind::Char(':') => {
@@ -2897,6 +2928,27 @@ impl VimState {
             self.register = None;
             self.begin_cmdline(':');
             self.cmdline.buffer.push_str("'<,'>");
+            return ProcessOutcome::Consumed;
+        }
+        // `/`/`?` in visual mode: vim's search-as-motion — on execute the
+        // cursor jumps to the match start and the selection extends; the
+        // prompt's cancel restores the selection untouched. The kind rides
+        // along because the prompt's execute path resets the mode to Normal
+        // before it runs.
+        if key.modifiers.is_plain() && matches!(&key.kind, KeyKind::Char('/') | KeyKind::Char('?'))
+        {
+            let kind = match self.mode {
+                Mode::Visual { kind } => kind,
+                _ => crate::mode::VisualKind::Char,
+            };
+            self.search_motion = Some(SearchMotion::Visual(kind));
+            self.cmdline.search_count = self.count.take().unwrap_or(0);
+            self.register = None;
+            self.begin_cmdline(if matches!(&key.kind, KeyKind::Char('?')) {
+                '?'
+            } else {
+                '/'
+            });
             return ProcessOutcome::Consumed;
         }
         // visual-block I/A: insert at the block edge on every row
@@ -3274,7 +3326,7 @@ impl VimState {
 
     /// vim's feedback for a failed `n`/`N`/`*` jump: E35 before any search
     /// was entered, E486 with the pattern otherwise — plus the bell.
-    fn report_search_miss(&mut self, ctx: &mut Ctx) {
+    pub(crate) fn report_search_miss(&mut self, ctx: &mut Ctx) {
         match &self.search.pattern {
             Some(pattern) => {
                 ctx.host

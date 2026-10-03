@@ -460,9 +460,16 @@ fn angle_keys_accept_lowercase_modifier_prefixes() {
     assert!(Key::parse("<c-a>").modifiers.control);
     assert!(Key::parse("<C-S-a>").modifiers.control);
     assert!(Key::parse("<C-S-a>").modifiers.shift);
-    // a plain <s-x> keeps the shift flag on the char
-    assert!(Key::parse("<s-x>").modifiers.shift);
-    assert_eq!(Key::parse("<s-x>").kind, KeyKind::Char('x'));
+    // a SHIFT-ONLY letter spelling canonicalizes to the printable uppercase
+    // char (`<s-x>` == `X`): handle_key drops the shift flag on every plain
+    // char key, so storing shift+lowercase was a mapping that could never
+    // fire. vim 9.1 does the same normalization (`:nmap <S-x> ihello` lists
+    // as `n  X  ihello`; PTY probe round 21)
+    assert_eq!(Key::parse("<s-x>"), Key::char('X'));
+    assert_eq!(Key::parse("<S-A>"), Key::char('A'));
+    // non-letters keep the flag (shift+1 is layout-dependent, vim too)
+    assert!(Key::parse("<s-1>").modifiers.shift);
+    assert_eq!(Key::parse("<s-1>").kind, KeyKind::Char('1'));
 }
 
 // ---- * on a line without words: must not re-jump with the stale pattern ---------
@@ -1215,4 +1222,212 @@ fn e35_disarms_incsearch_preview() {
     let mut f = Fixture::new("abc abc\n");
     f.feed(["/", "a", "b", "c", "<CR>", "<BS>", "<BS>", "<BS>", "<C-u>", "<CR>"]);
     assert_eq!(f.host.highlights, vec![0..3, 4..7]);
+}
+
+// ---- 第二十轮检视增补（2026-10-04）------------------------------------------
+
+/// `:marks` 不再重复列出 `^`：exit_insert 同时写 offsets 表的 `set('^')` 与
+/// 引擎跟踪的 `last_insert_exit`，而列表追加分支只对 `.` 去重、对 `^` 无条件
+/// 追加——同一名义 mark 出现两行。
+#[test]
+fn marks_listing_does_not_duplicate_caret() {
+    let mut f = Fixture::new("hello world\n");
+    f.feed(["i"]);
+    f.type_text("X");
+    f.feed(["<Esc>", ":", "m", "a", "r", "k", "s", "<CR>"]);
+    let caret_rows = f
+        .host
+        .statuses
+        .iter()
+        .filter(|s| s.starts_with("^ "))
+        .count();
+    assert_eq!(caret_rows, 1, "statuses: {:?}", f.host.statuses);
+}
+
+/// 文本对象探针 floor 到字符边界：offset == line_end（insert 模式光标的
+/// 合法位置）+ CJK 行尾时，旧的 `line_end - 1` 裸字节探针落在多字节字符
+/// 中间 → class_at 读 None → 空行分支误触发，`iw` 静默选中整行。
+#[test]
+fn word_object_probe_floors_to_char_boundary_at_line_end() {
+    use vimcore::buffer::VimBuffer;
+    use vimcore::objects::{range, TextObject};
+    let f = Fixture::new("中文 bar");
+    let buf = &f.buf;
+    // 中(0..3) 文(3..6) 空格(6) bar(7..10)：iw 在 line_end 应选中 "bar"
+    let r = range(
+        buf,
+        buf.line_end(0),
+        TextObject::Word {
+            inner: true,
+            big: false,
+        },
+    );
+    assert_eq!(r.map(|x| (x.start, x.end)), Some((7, 10)));
+}
+
+/// `:1j` 于末行（无接缝 no-op）的光标落点 = 范围地址行的首非空白，与
+/// `:1` 空命令同款（vim 9.1 PTY 探针：`:1j` 于 "    abc" 后 `x` 删 'a'）。
+/// 旧实现落裸行首（col 0），与 `:1` 的落点自相矛盾。
+#[test]
+fn ex_join_noop_parks_on_first_non_blank() {
+    let mut f = Fixture::new("    abc\n");
+    f.feed(["G", ":", "1", "j", "<CR>"]);
+    assert_eq!(f.text(), "    abc\n");
+    assert_eq!(f.cursor(), 4, "first non-blank of the indented line");
+    // 修改过的路径落点不变
+    let f = edit("a\nb\nc\n", 0, 0, &[":", "2", "j", "\r"]);
+    assert_eq!(f.text(), "a\nb c\n");
+}
+
+/// `<S-a>` 型映射规范化为可交付形态：handle_key 对纯字符键丢弃 shift，
+/// 旧 parse 保留 shift+小写字母的映射永不触发（按下 shift+a 交付的是 'A'）。
+/// vim 9.1 同款规范化（`:nmap <S-x> ihello` 列表显示 `n  X  ihello`）。
+#[test]
+fn shift_letter_mapping_fires() {
+    let mut f = Fixture::new("abc\n");
+    f.vim
+        .keymaps_mut()
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "<S-a>", "x", true);
+    f.feed(["A"]);
+    assert_eq!(f.text(), "bc\n", "mapped <S-a> fires on the delivered 'A'");
+    // 普通小写 a 不误触发（append 进 insert，打字落在 'a' 之后）
+    let mut f = Fixture::new("abc\n");
+    f.vim
+        .keymaps_mut()
+        .map_str_noremap(vimcore::keymap::ModeClass::Normal, "<S-a>", "x", true);
+    f.feed(["a"]);
+    f.type_text("Z");
+    assert_eq!(f.text(), "aZbc\n");
+}
+
+// ---- search-as-motion（d/pat・c?pat・v/pat）---------------------------------
+//
+// vim 9.1 PTY 探针（round 21）：
+//   * `gg0d/bar\r` 于 "foo bar\nbaz\n" → "bar\nbaz\n"（exclusive 到匹配起点）
+//   * 光标落在匹配上时 wrap（"search hit BOTTOM"），删 wrap 落点之前的部分
+//   * `gg0v/bar\r` → 光标跳到匹配起点、选区扩展、模式保持 VISUAL
+//   * miss → E486，操作符不悬挂
+// 修复前引擎的形状是纯 bug：`d` + `/` 打开提示符但操作符悬空，搜索后下一
+// 个 motion 键误触 `d<motion>`（探针：`j` → dj 删掉整个缓冲）。
+
+fn feed_prompt(f: &mut Fixture, pattern: &str) {
+    for c in pattern.chars() {
+        f.feed_raw(Key::char(c));
+    }
+    f.feed(["<CR>"]);
+}
+
+#[test]
+fn d_slash_pattern_deletes_through_match_start() {
+    let mut f = Fixture::new("foo bar\nbaz\n");
+    f.feed(["d", "/"]);
+    feed_prompt(&mut f, "bar");
+    assert_eq!(f.text(), "bar\nbaz\n");
+    // 操作符不再悬挂：管线空闲，后续 j 只是移动
+    assert!(f.vim.is_idle());
+    f.feed(["j"]);
+    assert_eq!(f.text(), "bar\nbaz\n");
+}
+
+#[test]
+fn c_slash_pattern_changes_through_match_start() {
+    let mut f = Fixture::new("foo bar\n");
+    f.feed(["c", "/"]);
+    feed_prompt(&mut f, "bar");
+    f.type_text("XX");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "XXbar\n");
+}
+
+#[test]
+fn d_slash_miss_reports_e486_and_aborts_operator() {
+    let mut f = Fixture::new("foo bar\n");
+    f.feed(["d", "/"]);
+    feed_prompt(&mut f, "zzz");
+    assert!(f.host.statuses.iter().any(|s| s.contains("E486")));
+    assert!(f.vim.is_idle(), "operator must not survive the miss");
+    assert_eq!(f.text(), "foo bar\n");
+}
+
+#[test]
+fn d_slash_count_targets_nth_match() {
+    // 2d/foo ≡ d2/foo：第二处匹配
+    let mut f = Fixture::new("foo foo tail\n");
+    f.feed(["d", "/"]);
+    feed_prompt(&mut f, "foo");
+    assert_eq!(f.text(), "foo tail\n");
+}
+
+#[test]
+fn d_question_pattern_deletes_backward_to_match_start() {
+    let mut f = Fixture::new("abc def ghi\n");
+    f.feed(["$", "d", "?"]);
+    feed_prompt(&mut f, "def");
+    // 反向 exclusive motion 含光标字符（vim 规则）：[match_start, cursor]
+    // 整段删除——vim 9.1 探针 `$d?def\r` 于 "abc def ghi" → "abc i\n"
+    assert_eq!(f.text(), "abc i\n");
+}
+
+#[test]
+fn d_slash_esc_cancels_quietly() {
+    let mut f = Fixture::new("foo bar\n");
+    f.feed(["d", "/"]);
+    for c in "bar".chars() {
+        f.feed_raw(Key::char(c));
+    }
+    f.feed(["<Esc>"]);
+    assert!(f.vim.is_idle(), "Esc drops the pending operator");
+    assert_eq!(f.text(), "foo bar\n");
+    assert_eq!(f.host.bells, 0);
+}
+
+#[test]
+fn v_slash_pattern_extends_selection_and_keeps_visual() {
+    let mut f = Fixture::new("foo bar\n");
+    f.feed(["v", "/"]);
+    feed_prompt(&mut f, "bar");
+    assert_eq!(f.vim.mode(), vimcore::mode::Mode::Visual { kind: vimcore::mode::VisualKind::Char });
+    assert_eq!(f.cursor(), 4, "cursor at the match start");
+    // 选区含光标字符（visual 语义）：anchor 0..光标 4+1 = "foo b" → d 删之
+    // （vim 9.1 探针 `v/bar\rx` → "ar\nbaz\n"）
+    f.feed(["d"]);
+    assert_eq!(f.text(), "ar\n");
+}
+
+#[test]
+fn v_slash_cancel_keeps_selection_untouched() {
+    let mut f = Fixture::new("foo bar\n");
+    f.feed(["v", "l", "l", "/"]);
+    feed_prompt(&mut f, "zzz");
+    assert!(f.host.statuses.iter().any(|s| s.contains("E486")));
+    assert_eq!(
+        f.vim.mode(),
+        vimcore::mode::Mode::Visual { kind: vimcore::mode::VisualKind::Char }
+    );
+    // 选区仍是 vll 的 [0, 3)
+    f.feed(["d"]);
+    assert_eq!(f.text(), " bar\n");
+}
+
+#[test]
+fn d_slash_dot_replay_repeats_the_search_motion() {
+    let mut f = Fixture::new("foo aa mid aa tail\n");
+    f.feed(["d", "/"]);
+    feed_prompt(&mut f, "aa");
+    assert_eq!(f.text(), "aa mid aa tail\n");
+    // `.` 重放整条 d/pat：光标起再删到下一处 aa
+    f.feed(["."]);
+    assert_eq!(f.text(), "aa tail\n");
+}
+
+#[test]
+fn plain_slash_after_operatorless_prompt_still_jumps() {
+    // 无操作符时 / 照旧纯跳转（count 语义不变）
+    let mut f = Fixture::new("aa bb aa\n");
+    f.feed(["/", "a", "a", "<CR>"]);
+    // 光标自身的匹配被跳过：下一处 aa 在 6
+    assert_eq!(f.cursor(), 6);
+    f.feed(["2", "/", "b", "<CR>"]);
+    // "b" 匹配 3、4 两处；从 6 起 wrap 到 3，count 2 → 4
+    assert_eq!(f.cursor(), 4);
 }
