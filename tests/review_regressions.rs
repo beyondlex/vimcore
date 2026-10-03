@@ -1363,8 +1363,8 @@ fn d_question_pattern_deletes_backward_to_match_start() {
     let mut f = Fixture::new("abc def ghi\n");
     f.feed(["$", "d", "?"]);
     feed_prompt(&mut f, "def");
-    // 反向 exclusive motion 含光标字符（vim 规则）：[match_start, cursor]
-    // 整段删除——vim 9.1 探针 `$d?def\r` 于 "abc def ghi" → "abc i\n"
+    // 反向 exclusive span = [match_start, cursor)，光标字符保留——vim 9.1
+    // 探针 `$d?def\r` 于 "abc def ghi" → "abc i\n"（删 "def gh"，'i' 留下）
     assert_eq!(f.text(), "abc i\n");
 }
 
@@ -1430,4 +1430,59 @@ fn plain_slash_after_operatorless_prompt_still_jumps() {
     f.feed(["2", "/", "b", "<CR>"]);
     // "b" 匹配 3、4 两处；从 6 起 wrap 到 3，count 2 → 4
     assert_eq!(f.cursor(), 4);
+}
+
+/// search-motion 的 vim 一致性形态（round 21 探针补充）：
+#[test]
+fn d_slash_crosses_newline_to_match() {
+    let mut f = Fixture::new("one two\nthree four\n");
+    f.feed(["d", "/"]);
+    feed_prompt(&mut f, "three");
+    assert_eq!(f.text(), "three four\n");
+}
+
+#[test]
+fn y_slash_pattern_keeps_cursor_planted() {
+    // vim 9.1：y/pat 后光标停在原地（yank 不动光标），x 删的还是原字符
+    let mut f = Fixture::new("foo bar\n");
+    f.feed(["y", "/"]);
+    feed_prompt(&mut f, "bar");
+    assert_eq!(f.cursor(), 0);
+    f.feed(["x"]);
+    assert_eq!(f.text(), "oo bar\n");
+}
+
+#[test]
+fn gu_slash_pattern_lowercases_through_match() {
+    let mut f = Fixture::new("AAA BBB\n");
+    f.feed(["g", "u", "/"]);
+    feed_prompt(&mut f, "BBB");
+    assert_eq!(f.text(), "aaa BBB\n");
+}
+
+#[test]
+fn d_slash_wrap_to_cursor_match_bells_and_aborts() {
+    // 匹配仅在光标处（wrap 回自身）：motion 未动 → 响铃 + 放弃操作符
+    // （vim 9.1 PTY 探针：d/foo 于 "foo" → wrap 消息 + \x07，文本不变）
+    let mut f = Fixture::new("foo\n");
+    f.feed(["d", "/"]);
+    feed_prompt(&mut f, "foo");
+    assert_eq!(f.text(), "foo\n");
+    assert_eq!(f.host.bells, 1);
+    assert!(f.vim.is_idle());
+}
+
+#[test]
+fn macro_records_and_replays_search_motion() {
+    // q{reg} 内的 d/pat 完整录制（d / p a t CR 六步），@b 回放同形
+    let mut f = Fixture::new("foo bar baz\n");
+    f.feed(["q", "b", "d", "/"]);
+    feed_prompt(&mut f, "bar");
+    f.feed(["q"]);
+    assert_eq!(f.vim.macro_len('b'), 6);
+    // 宿主契约内换文本（引擎 idle 且 Normal），@b 应删到 bar 起点
+    *f.buf.0.borrow_mut() = "xx bar yy\n".to_owned();
+    f.vim.cursor.offset = 0;
+    f.feed(["@", "b"]);
+    assert_eq!(f.text(), "bar yy\n");
 }

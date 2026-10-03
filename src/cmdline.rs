@@ -182,6 +182,14 @@ impl VimState {
         let count = std::mem::take(&mut self.cmdline.search_count).max(1);
         let origin = self.cursor.offset;
         match search::jump_to_match(self, ctx.buf, forward, count) {
+            // the wrap fallback can land back ON the cursor's own match
+            // (`d/foo` on "foo" from (0,0)): the motion did not move — vim
+            // aborts with a bell, the operator must not fire with an empty
+            // span and it must not linger
+            Some(target) if target == origin => {
+                ctx.host.bell();
+                self.reset_pending();
+            }
             Some(target) if self.op.is_some() => {
                 let span = crate::ops::OpSpan {
                     start: origin.min(target),
