@@ -3421,16 +3421,25 @@ impl VimState {
         }
     }
 
-    /// The span END for `D`/`C` with a count: the covered lines disappear
-    /// whole, but the LAST covered line keeps its trailing newline unless the
-    /// count reached the buffer end (vim 9.1: `3D` from line 1 on a 4-line
-    /// buffer → ['a','dddd']; `99D` on a 2-line buffer → ['a']).
-    fn delete_to_end_span(ctx: &Ctx, line: usize, count: usize, last: usize) -> usize {
-        if line + count > ctx.buf.line_count() - 1 {
-            ctx.buf.line_range(last).end
-        } else {
-            ctx.buf.line_end(last)
+    /// The span END for `D` (DeleteToEnd) with a count. Model from byte-level
+    /// vim 9.1 PTY probes (round 19, 10+ shapes, all stable):
+    /// * default: the span stops at the CONTENT end of the count-th line —
+    ///   every newline (the file eol included) survives (`D` on the last
+    ///   line truncates to `abc\nde\n`; `99D` from mid-line → `a\n`; at col 0
+    ///   the cursor line is EMPTIED, never removed — `D` at col 0 of any
+    ///   line keeps an empty line behind).
+    /// * `count >= 2` from the line start: the covered lines vanish WHOLE —
+    ///   `2D` at col 0 of ['a','b','c'] → ['c'] (the old model left a
+    ///   phantom empty line), `99D` at (0,0) on two lines → empty buffer.
+    ///
+    /// C (ChangeToEnd) deliberately does NOT take the whole-line branch: it
+    /// keeps the cursor line alive for typing (probe: `C` at col 0 types on
+    /// the EMPTIED line, `2C` at col 0 → ['new','cccc','dddd']).
+    fn delete_to_end_span(ctx: &Ctx, line: usize, count: usize, last: usize, span_start: usize) -> usize {
+        if count >= 2 && span_start == ctx.buf.line_start(line) {
+            return ctx.buf.line_range(last).end;
         }
+        ctx.buf.line_end(last)
     }
 
     /// Execute a resolved Normal-mode command (the `CmdKind::Normal` arms of
@@ -3520,9 +3529,14 @@ impl VimState {
                 let count = self.take_total_count();
                 let line = ctx.buf.offset_to_line(self.cursor.offset);
                 let last = (line + count - 1).min(ctx.buf.line_count() - 1);
+                // C keeps the cursor line ALIVE for typing (vim 9.1 probe:
+                // `C` at col 0 of a middle line types on the EMPTIED line,
+                // unlike D which deletes it whole) — covered lines below
+                // vanish, the content end of the count-th line bounds the
+                // span, and the file's final newline always survives.
                 let span = ops::OpSpan {
                     start: self.cursor.offset,
-                    end: Self::delete_to_end_span(ctx, line, count, last),
+                    end: ctx.buf.line_end(last),
                     linewise: false,
                 };
                 if span.end > span.start {
@@ -3541,7 +3555,7 @@ impl VimState {
                 let last = (line + count - 1).min(ctx.buf.line_count() - 1);
                 let span = ops::OpSpan {
                     start: self.cursor.offset,
-                    end: Self::delete_to_end_span(ctx, line, count, last),
+                    end: Self::delete_to_end_span(ctx, line, count, last, self.cursor.offset),
                     linewise: false,
                 };
                 if span.end > span.start {
@@ -4301,8 +4315,11 @@ impl VimState {
     /// The `char_arg_cmd` set by the command table is completed here: the
     /// next key supplies the argument (a register name for `@`/`q`, a mark
     /// for `` ` ``/`'`/`m`, a replacement char for `r`). Esc cancels the
-    /// whole pending command; a non-printable key is swallowed as "still
-    /// waiting" (vim ignores it too, e.g. `r` followed by a stray arrow).
+    /// whole pending command; any other non-printable key cancels it too
+    /// with a bell — vim's PTY probe (round 19): an arrow during `r`'s wait
+    /// aborts the replace and the NEXT key runs as a fresh command, exactly
+    /// this shape (the comment used to claim "still waiting", which the code
+    /// never did).
     /// Shared tail of the `f`/`t`/`F`/`T` and `'`/`` ` `` arms (they were
     /// character-for-character copies): under an operator the motion is the
     /// SPAN target, without one it is a plain jump. Returns false when the
@@ -4336,6 +4353,26 @@ impl VimState {
         // though it is not "printable": `r<CR>` replaces the char with a
         // line break (vim splits the line). For the other char-argument
         // commands an enter argument harmlessly fails lookup.
+        // `r<C-E>` / `r<C-Y>` take the replacement char from the line
+        // below/above at the same column (`:h r`; `10r<C-E>` copies 10
+        // characters from the line below).
+        if cmd == CharArgCmd::Replace && (key == Key::ctrl_char('e') || key == Key::ctrl_char('y'))
+        {
+            let count = self.take_total_count();
+            let gen = self.edit_generation;
+            self.begin_edit();
+            let done =
+                ops::replace_chars_from_neighbor(self, ctx, key == Key::ctrl_char('e'), count);
+            self.end_edit();
+            if done {
+                self.bump_if_edited(ctx, gen);
+            } else {
+                ctx.host.bell();
+            }
+            self.char_arg = None;
+            self.end_command();
+            return ProcessOutcome::Consumed;
+        }
         let c = if key == Key::enter() {
             '\n'
         } else if let Some(c) = key.printable_char() {
@@ -4436,6 +4473,13 @@ impl VimState {
                 // linewise-deletes through the mark's line, `d`a` charwise
                 // cursor..mark — direction-independent, vim 9.1 probes);
                 // without one it is a plain jump.
+                // An unset mark gets vim's message channel, not just a bare
+                // bell (`:h mark-motions`: "E20: Mark 'a not set" — same text
+                // the Ex range parser reports for `:'a`).
+                if self.marks.resolve(c).is_none() {
+                    ctx.host
+                        .status_message(&format!("E20: Mark '{c} not set"));
+                }
                 if !self.char_arg_motion_jump(ctx, Motion::MarkJump { linewise }) {
                     return ProcessOutcome::Consumed;
                 }

@@ -1063,18 +1063,24 @@ impl VimState {
         // a single-address range still joins one seam (`:5j` = join 5 and 6)
         let joins = if lines < 2 { 1 } else { lines - 1 };
         self.cursor.offset = ctx.buf.line_start(first);
+        let gen = self.edit_generation;
         self.begin_edit();
         crate::ops::join_lines(self, ctx, joins + 1, bang);
         self.end_edit();
-        // vim parks the cursor on the joined line's FIRST NON-BLANK after
-        // `:j` (probes: `:1,2j` on ['    aaaa','bbbb'] → col 5, bare `:j` →
-        // col 1) — the seam landing is normal-mode `J`'s behavior. The cursor
-        // moves BEFORE `bump` so the changelist / `.` mark record the join
-        // site, not wherever the command's cursor happened to be before.
-        self.cursor.offset = ctx.buf.first_non_blank(first);
-        self.cursor.desired_col = None;
-        self.bump(ctx);
-        ctx.host.changed();
+        // a range ending at the buffer's last line has no seam to join —
+        // a no-op must not feed the changelist / `.` mark (same no-op
+        // discipline as the normal-mode operators)
+        if self.edit_generation != gen {
+            // vim parks the cursor on the joined line's FIRST NON-BLANK after
+            // `:j` (probes: `:1,2j` on ['    aaaa','bbbb'] → col 5, bare `:j` →
+            // col 1) — the seam landing is normal-mode `J`'s behavior. The cursor
+            // moves BEFORE `bump` so the changelist / `.` mark record the join
+            // site, not wherever the command's cursor happened to be before.
+            self.cursor.offset = ctx.buf.first_non_blank(first);
+            self.cursor.desired_col = None;
+            self.bump(ctx);
+            ctx.host.changed();
+        }
         self.commit_change_record();
     }
 
