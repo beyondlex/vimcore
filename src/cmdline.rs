@@ -1538,9 +1538,13 @@ impl VimState {
         };
         let range = match count {
             Some(n) if n >= 1 => {
+                // vim starts the window AT the range's last line and extends
+                // DOWN (probe 9.1: `:5s/a/X/20` on ten lines replaces 5-10;
+                // `:1,3s/a/X/2` replaces 3-4). Clamping at EOF must not slide
+                // the start upward — the old `(last - (n-1))` form turned
+                // `:5s/a/X/20` into a whole-file replace once `last` hit `$`.
                 let buf_last = ctx.buf.line_count().saturating_sub(1);
-                let last = range.1.saturating_add(n - 1).min(buf_last);
-                (last.saturating_sub(n - 1), last)
+                (range.1, range.1.saturating_add(n - 1).min(buf_last))
             }
             _ => range,
         };
