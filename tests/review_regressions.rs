@@ -1196,3 +1196,23 @@ fn ex_substitute_trailing_count_clamps_at_eof_without_sliding() {
     ex(&mut f, "3s/a/X/2");
     assert_eq!(f.text(), "l1a\nl2a\nl3X\n");
 }
+
+/// E35（`/ab<C-u><CR>`：空 pattern + 无旧 pattern）必须终结 incsearch
+/// 预览——round20 fuzz 抓到 Enter 早退路径不清预览，宿主滞留最后一次
+/// 逐字符发布的匹配集（空 pattern 预览含行尾零宽匹配时越出缓冲范围）。
+#[test]
+fn e35_disarms_incsearch_preview() {
+    let mut f = Fixture::new("abc\ndefg");
+    f.feed(["/", "a", "b", "<C-u>", "<CR>"]);
+    assert!(f.host.highlights.is_empty());
+    assert_eq!(f.host.current_highlight, None);
+    assert!(f
+        .host
+        .statuses
+        .iter()
+        .any(|s| s.contains("E35")));
+    // 有旧 pattern 时同款路径走 set_pattern 重发布，不留预览
+    let mut f = Fixture::new("abc abc\n");
+    f.feed(["/", "a", "b", "c", "<CR>", "<BS>", "<BS>", "<BS>", "<C-u>", "<CR>"]);
+    assert_eq!(f.host.highlights, vec![0..3, 4..7]);
+}
