@@ -9,6 +9,7 @@
 //!   2. **行寻址契约**：替换后每一行的 `line_start/line_end/offset_to_line`
 //!      必须自洽（拆行实现把替换文本 join 进原范围，写错一行就崩）；
 //!   3. NUL 字节（`\n` 的 vim 语义）不破坏任何寻址数学。
+//!
 //! 另附 CJK 面的 search-motion 定向（round21 新功能的多字节形态）。
 
 mod common;
@@ -16,7 +17,6 @@ mod common;
 use common::Fixture;
 use vimcore::buffer::VimBuffer;
 use vimcore::key::Key;
-use vimcore::state::Ctx;
 
 fn feed_ex(f: &mut Fixture, line: &str) {
     let mut keys: Vec<String> = vec![":".to_owned()];

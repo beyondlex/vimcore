@@ -1499,7 +1499,7 @@ fn c_space_mapping_keeps_its_modifier() {
         Key::parse("<Space>"),
         "<C-Space> must not alias plain Space"
     );
-    assert_eq!(Key::parse("<C-Space>").modifiers.control, true);
+    assert!(Key::parse("<C-Space>").modifiers.control);
     // 行为面：映射 <C-Space> → ix，普通空格走 l motion
     let mut f = Fixture::new("foo bar");
     f.vim
@@ -1554,7 +1554,7 @@ fn huge_prompt_count_does_not_overflow_search_jump() {
     f.feed(["/", "a"]);
     f.feed_raw(Key::enter()); // 光标落 match#1（start_index=1）
                               // count 在 / 之前键入（9×25 → saturate 到 usize::MAX）
-    let mut keys: Vec<&str> = std::iter::repeat("9").take(25).collect::<Vec<_>>();
+    let mut keys: Vec<&str> = std::iter::repeat_n("9", 25).collect::<Vec<_>>();
     keys.push("/");
     keys.push("a");
     f.feed(keys);
