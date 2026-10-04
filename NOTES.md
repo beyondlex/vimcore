@@ -5,6 +5,66 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十三轮检视增补（2026-10-04，回归测试并入
+`tests/review_regressions.rs`（+7 例）+ 新增 `tests/fuzz_round23.rs`
+（`:set`/`:sort` 参数恶意面 + 宿主事件（IME 提交/undo/宏回放）随机交错
++ `is_idle`×模式契约））
+
+本轮流程：全量通读 `src/`（键形→提示符→cmdline→编辑路径→宿主事件面）
+→ 两个探针批次的恶意输入定谳（`-es` 脚本 + Python PTY 字节级）→ 修复。
+新工具形态：`pty.fork` + 裸按键喂入替代 `:normal!`/execute 探针（后两者
+在 `-es` 下会被 Ex 解析污染，`m<CR>` 曾伪报 mode=c）。
+
+### 语义修复（探针 + vim 9.1 实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **IME 提交拆散 insert 会话 undo 组（数据丢失级）** | `replace_range`（IME 组合提交路径）无条件 `end_edit()`——会话中途每次提交各拆一组，`i<Esc>u` 只撤销最后一次提交（vim 全会话一个 undo 块）。修复：仅在本调用自开 undo 组时关闭；REPL 式会话外替换仍自开自关不悬挂 |
+| 2 | **`floor_to_char_boundary` 把缓冲末尾当 mid-char** | `char_at(len)` 返回 None 被当作「非边界」floor 到末字符起点——宿主 `replace_range(5..7)` 于 7 字节缓冲只编辑 5..6，吞掉末字符。修复：`offset == len` 恒为边界提前返回；parity_round5 的 floor 契约按新语义更新 |
+| 3 | **Enter 被无条件映射为 `\n` 传给所有 char-arg 命令** | `f<CR>` 失败却覆写 `last_find`（下一个 `;` 变成找换行——vim 失败不更新）；`'<CR>` 产出带裸换行的 E20 文本。PTY 实证：vim 仅 `r<CR>`（拆行）与 `vllr<CR>`（逐字符拆行）消费 Enter。修复：仅 Replace/VisualReplace 映射，其余走失败路径（响铃 + `last_find` 保持） |
+| 4 | **`:set ts=` 报 E518（Unknown option）** | vim 9.1 `-es` 实证：`E521: Number required after =: ts=`。已知名 + 非法值走 E521，E518 保留给未知选项名 |
+| 5 | **`:sort z` 静默排序** | PTY 实证：vim 报 `E475: Invalid argument: z` 且缓冲不动。修复：旗标白名单 `!iun`，其余（含 vim 有效但未实现的 `x/o/b/f/l`）E475 拒绝——响亮的分歧好过静默错排 |
+| 6 | **`:sort n`（数值排序）缺失** | 新实现：行内首个十进制数为键（前导 `-` 计符号）、无数值视为 0、stable（等值保原序）、`u` 按 sort 键去重（vim 的 uniq 共享排序比较器） |
+| 7 | **`is_idle` 在开着的提示符期间返回 true** | 宿主以它为按键拦截闸门（VimEdit 本地 undo），提示符里的字面文本（`:ru` 的 `u`）会被劫持。修复：cmdline 模式恒 false；insert 仍算 idle（文本输入是宿主职责） |
+| 8 | **通用 `'x` mark 分支缺 `'>` exclusive-end 修正** | exact `'>` 分支解析 `line(off-1)`，mangled token（`'<,'>'<,'>` 双预填）走通用分支落到下一行。顺带：E20 文本引用解析出的 mark 名而非原始 token 的垃圾尾巴 |
+
+### 体验改进
+
+- `:set`/`:sort` 的错误语义从「错类」回到 vim 的两个错误码（E521/E475），
+  宿主状态栏的报错不再误导（值非法 ≠ 选项不存在）。
+- `m<CR>` 等非法 mark/查找参数从静默忽略改为响铃（与 `r` 等失败参数同款）。
+- 提示符 C-w 的尾部空白归一化改为 `trim_end()`（先前 stash 里的半成品，
+  Tab 实际进不了提示符缓冲——注释按真实可达面重写）。
+
+### 检视中证伪、无需改的（免下轮重查）
+
+- **`3/pat` 的计数语义**：引擎 `N/pat ≡ Nn`（含 wrap：3 匹配缓冲上 `3/foo`
+  回落第 1 个匹配）——vim 9.1 PTY 七形态全对齐，round14 的实现本来就对。
+- **空缓冲/空行 `dd` 的寄存器**：引擎存空 linewise——vim 同（首轮探针的
+  SENTINEL 未变是 0 行缓冲假象；`['']` 上 dd 后 getreg 为 `"\n"`，
+  strtrans 渲染 `^@`）。寄存器轮转同样发生。
+- **`v r<CR>`**：vim 把每个选中字符各换成一个换行（PTY：`vllr<CR>` 于
+  "abcdef" → 三空行 + "def"）——引擎逐字符 repeat 一致。
+- **空缓冲 `S`/`cc` 进 insert、`:d` 于空缓冲响铃**——均与 vim 一致。
+- **`9999@x` 巨 count 宏**：管线守卫 1.3ms 内收敛，无挂起。
+
+### 新增已知分歧（接全局序号）
+
+64. **IME 提交（`replace_range`）不进 `.` 重放记录**：宿主驱动的 raw 替换
+    没有按键/文本形态可录——重放只含打字的 Text 步骤（探针：会话落地
+    "hello阿"，`.` 重放得 "helloab"）。vim 重放最终落地文本形态。
+65. **`:sort x/o/b/f/l`（hex/octal/binary/float/locale）E475 拒绝**：vim
+    实现这些旗标；引擎响亮拒绝而非静默按字典序错排。
+
+### 性能备注
+
+- bench_probe 复跑 + **基线提交（e96d0bb）同机对照**：`w` 6.4µs/键 vs
+  基线 6.2µs、1MB 单行 `w` 167µs vs 163µs、hlsearch 重扫 0.30-0.35ms、
+  `:%s` 6.1ms、`n` 3.6µs——与 round22 记录（2.3µs/103µs）的偏差在基线
+  上同样出现，属机器状态漂移而非本轮回归（本轮唯一热路径邻近改动是
+  `floor_to_char_boundary` 的提前返回，只减不增）。
+
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十二轮检视增补（2026-10-04，回归测试并入
 `tests/review_regressions.rs`（+8 例）+ 新增 `tests/fuzz_round21.rs`
 （`:s` 替换串转义面 × 6 缓冲 × 9 模式的行寻址契约 + CJK search-motion
