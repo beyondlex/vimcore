@@ -628,10 +628,11 @@ impl Motion {
                 match found {
                     Some(range) => {
                         vim.search.last_found_match = Some(range.clone());
-                        // last char START (not `end - 1` bytes: a multi-byte
-                        // final char would put the cursor mid-character)
-                        let last = buf
-                            .prev_char_offset(range.end)
+                        // last GRAPHEME start (not `end - 1` bytes: a multi-byte
+                        // final char would put the cursor mid-character; and
+                        // prev_char_offset would sit on a trailing combining
+                        // mark of the match's final cluster)
+                        let last = crate::buffer::prev_grapheme_offset(buf, range.end)
                             .unwrap_or(range.start)
                             .max(range.start);
                         MotionResult::new(last, MotionKind::Inclusive)
