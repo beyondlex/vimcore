@@ -204,9 +204,13 @@ fn tck_reference_impl_reads_non_boundaries_as_none() {
     assert_eq!(floor_to_char_boundary(&buf, 1), 0, "floors onto a boundary");
     assert_eq!(floor_to_char_boundary(&buf, 2), 0, "inside 中 → floor to 0");
     assert_eq!(floor_to_char_boundary(&buf, 3), 3);
-    // past the end floors onto the LAST CHARACTER's start (the loop stops
-    // at the first surviving boundary below the offset)
-    assert_eq!(floor_to_char_boundary(&buf, 99), 13);
+    // past the end (and the end itself) floors onto buf.len(): the buffer
+    // end IS a boundary — flooring it lower shrank host-supplied ranges
+    // that end at EOF (round 23: replace_range at the buffer end left the
+    // last char behind). Consumers that need a cursor position clamp
+    // separately (clamp_cursor steps back onto the last char).
+    assert_eq!(floor_to_char_boundary(&buf, 99), 14);
+    assert_eq!(floor_to_char_boundary(&buf, 14), 14);
 }
 
 // ---- new Ex commands: :sort / :join -----------------------------------------------

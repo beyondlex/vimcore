@@ -2119,6 +2119,12 @@ impl VimState {
     pub fn replace_range(&mut self, ctx: &mut Ctx, range: Range<usize>, text: &str) {
         let range = crate::buffer::floor_to_char_boundary(ctx.buf, range.start)
             ..crate::buffer::floor_to_char_boundary(ctx.buf, range.end);
+        // Only close the group when this call OPENED it. Mid-insert-session
+        // IME commits arrive here with the session's group already open:
+        // closing it split the session into one undo unit per composition
+        // commit, so `i<Esc>u` after two commits restored only the last one
+        // (vim keeps the whole insert session as one undo block).
+        let owns_group = self.open_undo.is_none();
         self.begin_edit();
         self.edit_replace(ctx, range.clone(), text);
         // place the cursor at the end of the replacement when it touches it
@@ -2139,11 +2145,14 @@ impl VimState {
         // the match cache in step with the buffer, like every other path
         self.republish_search(ctx);
         ctx.host.changed();
-        // close the group this call opened. Hosts MAY call this outside an
-        // insert session (a REPL-style substitution); leaving `open_undo`
-        // dangling glued the host's NEXT edit into the same undo step — one
-        // `u` reverted two unrelated changes.
-        self.end_edit();
+        // close the group ONLY when this call opened it. Hosts MAY call this
+        // outside an insert session (a REPL-style substitution) — there the
+        // group must not dangle, or the host's NEXT edit would glue into the
+        // same undo step and one `u` would revert two unrelated changes.
+        // Inside a session the group stays open for the session's exit.
+        if owns_group {
+            self.end_edit();
+        }
     }
 
     /// Host-initiated cursor move (e.g. a mouse click). `offset` may be any
@@ -4416,10 +4425,6 @@ impl VimState {
             self.reset_pending();
             return ProcessOutcome::Consumed;
         }
-        // <CR> carries a printable meaning for the commands below even
-        // though it is not "printable": `r<CR>` replaces the char with a
-        // line break (vim splits the line). For the other char-argument
-        // commands an enter argument harmlessly fails lookup.
         // `r<C-E>` / `r<C-Y>` take the replacement char from the line
         // below/above at the same column (`:h r`; `10r<C-E>` copies 10
         // characters from the line below).
@@ -4440,7 +4445,19 @@ impl VimState {
             self.end_command();
             return ProcessOutcome::Consumed;
         }
-        let c = if key == Key::enter() {
+        // <CR> carries a printable meaning ONLY for the replace commands:
+        // `r<CR>` splits the line with the replacement break (vim probe) and
+        // visual `r<CR>` replaces every selected char with a break (PTY
+        // probe: `vllr<CR>` on "abcdef" → three empty lines + "def"). Every
+        // other char-argument command treats Enter as a failed argument —
+        // vim's `f<CR>`/`m<CR>`/`'<CR>` do not act, and a FAILED `f<CR>`
+        // must not overwrite `last_find`, or the next `;` would re-search
+        // for the newline instead of the last find's char.
+        // (`r<C-E>` / `r<C-Y>` above take the replacement char from the
+        // neighboring line at the same column — `:h r`.)
+        let c = if key == Key::enter()
+            && matches!(cmd, CharArgCmd::Replace | CharArgCmd::VisualReplace)
+        {
             '\n'
         } else if let Some(c) = key.printable_char() {
             c

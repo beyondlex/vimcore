@@ -1657,3 +1657,150 @@ fn invalid_substitute_pattern_reports_compile_error() {
     f.feed(["&"]);
     assert_eq!(f.text(), "a\n");
 }
+
+// ---- 第二十三轮检视（2026-10-04） ---------------------------------------------
+
+#[test]
+fn ime_commit_mid_session_is_one_undo_group() {
+    // insert 会话中的 IME 提交走 replace_range：旧实现无条件 end_edit()，
+    // 每次提交拆出一个独立 undo 组，`i<Esc>u` 只撤销最后一次提交。vim 的
+    // 整个 insert 会话（IME 提交含在内）是一个 undo 块。会话外的独立
+    // replace_range（REPL 式替换）仍须关闭自己打开的组（不得悬挂）。
+    let mut f = Fixture::new("hello");
+    f.feed(["A"]); // 行尾 append，光标 (0,5)
+    f.type_text("ab"); // "helloab"
+    f.ime_replace(5..7, "阿"); // 第一次提交 → "hello阿"
+    f.type_text("cd"); // "hello阿cd"
+    f.ime_replace(8..10, "波"); // 第二次提交 → "hello阿波"
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "hello阿波");
+    f.feed(["u"]);
+    assert_eq!(f.text(), "hello", "一次 u 应还原整个会话");
+    // 会话外的独立替换：组自开自关，不悬挂到下一个编辑
+    let mut g = Fixture::new("hello world");
+    g.ime_replace(0..5, "hi");
+    g.feed(["u"]);
+    assert_eq!(g.text(), "hello world");
+    g.feed(["x"]); // 独立编辑开新组
+    g.feed(["u"]);
+    assert_eq!(g.text(), "hello world", "悬挂组不得吞并后续编辑");
+}
+
+#[test]
+fn enter_as_char_arg_only_serves_replace() {
+    // vim PTY 探针：f<CR>/t<CR>/m<CR>/'<CR> 都不动作。旧引擎把 Enter 无条件
+    // 映射成 '\n'：f<CR> 失败却覆写 last_find（下一个 ; 变成找换行）、
+    // '<CR> 产出带换行的 E20 消息。r<CR>/visual r<CR> 仍消费 Enter。
+    let mut f = Fixture::new("a b a c a");
+    f.feed(["f", "a"]); // 光标落第 2 个 a（offset 4）
+    assert_eq!(f.cursor(), 4);
+    let bells_before = f.host.bells;
+    f.feed(["f", "<CR>"]); // 失败：响铃，不动光标
+    assert!(f.host.bells > bells_before);
+    assert_eq!(f.cursor(), 4);
+    f.feed([";"]); // last_find 仍是 'a' → 落第 3 个 a（offset 8）
+    assert_eq!(f.cursor(), 8, "; 应重复上一次成功的 f，而不是找换行");
+    // m<CR>：非法 mark 名 → 响铃，无消息
+    let mut g = Fixture::new("abc");
+    let b0 = g.host.bells;
+    g.feed(["m", "<CR>"]);
+    assert!(g.host.bells > b0);
+    assert!(g.host.statuses.is_empty(), "statuses = {:?}", g.host.statuses);
+    // '<CR>：无 mark → 响铃；消息不得含裸换行（旧 E20 文本会跨行）
+    let mut h = Fixture::new("abc");
+    h.feed(["'", "<CR>"]);
+    assert!(
+        h.host.statuses.iter().all(|s| !s.contains('\n')),
+        "statuses = {:?}",
+        h.host.statuses
+    );
+    // visual r<CR>：每个选中字符换成一个换行（vim PTY 探针：vllr<CR> 于
+    // "abcdef" → 三空行 + "def"）
+    let mut v = Fixture::new("abcdef");
+    v.feed(["v", "l", "l", "r", "<CR>"]);
+    assert_eq!(v.text(), "\n\n\ndef");
+    // r<CR>：拆行语义不受影响
+    let mut r = Fixture::new("abc");
+    r.feed(["r", "<CR>"]);
+    assert_eq!(r.text(), "\nbc");
+}
+
+#[test]
+fn set_bad_numeric_value_reports_e521() {
+    // vim 9.1 -es 实证：`:set ts=` → "E521: Number required after =: ts="。
+    // 旧实现落进 E518（Unknown option），把「值非法」误报成「选项不存在」。
+    for bad in ["ts=", "ts=x"] {
+        let mut f = Fixture::new("a\n");
+        f.feed([":"]);
+        for c in format!("set {bad}").chars() {
+            f.feed_raw(vimcore::key::Key::char(c));
+        }
+        f.feed_raw(Key::enter());
+        assert!(
+            f.host
+                .statuses
+                .iter()
+                .any(|s| s.contains("E521: Number required after =:")),
+            "set {bad}: statuses = {:?}",
+            f.host.statuses
+        );
+        assert_eq!(f.vim.options.tabstop, 4, "set {bad}: 值不得被改写");
+    }
+    // 未知选项名仍是 E518（两个错误类别不串）
+    let mut f = Fixture::new("a\n");
+    f.feed([":"]);
+    for c in "set foo=1".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert!(
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s.contains("E518: Unknown option: foo=1")),
+        "statuses = {:?}",
+        f.host.statuses
+    );
+}
+
+#[test]
+fn sort_unknown_flag_reports_e475_and_skips() {
+    // vim 9.1 PTY 探针：`:sort z` → "E475: Invalid argument: z" 且缓冲不动；
+    // 旧引擎静默排序（未知旗标被当不存在）。
+    let mut f = Fixture::new("b\na");
+    f.feed([":"]);
+    for c in "sort z".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert_eq!(f.text(), "b\na", "E475 后不得执行排序");
+    assert!(
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s.contains("E475: Invalid argument: z")),
+        "statuses = {:?}",
+        f.host.statuses
+    );
+}
+
+#[test]
+fn sort_numeric_flag_orders_by_first_number() {
+    // `n` 旗标：按行内第一个十进制数排序（vim :h :sort）；无数值的行视为
+    // 0；等值行保持原序（stable），`u` 按 sort 键去重。
+    let mut f = Fixture::new("10 apples\n2 bananas\nno number\n-3 x");
+    f.feed([":"]);
+    for c in "%sort n".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert_eq!(f.text(), "-3 x\nno number\n2 bananas\n10 apples");
+    // nu：数值去重
+    let mut g = Fixture::new("2 a\n10 b\n2 c\nzzz");
+    g.feed([":"]);
+    for c in "%sort nu".chars() {
+        g.feed_raw(vimcore::key::Key::char(c));
+    }
+    g.feed_raw(Key::enter());
+    assert_eq!(g.text(), "zzz\n2 a\n10 b");
+}

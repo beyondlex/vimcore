@@ -499,11 +499,9 @@ impl VimState {
         let lo = crate::buffer::floor_to_char_boundary(buf, lo);
         let hi = crate::buffer::floor_to_char_boundary(buf, hi);
         let (lo, hi) = (lo.min(hi), hi.max(lo));
-        self.marks.set('<', lo);
-        self.marks.set('>', hi);
-        // exclusive end one CHAR past the last covered char — `hi + 1` bytes
-        // would sit inside a multi-byte cursor char (same rule as
-        // `exit_visual`; consumers floor it, but stored bounds stay clean)
+        // `'<`/`'>` resolve through `last_visual` (the single source of
+        // truth — `Marks::set` only stores letter marks anyway); the kind
+        // rides along so `gv` restores the same selection shape.
         let end = buf.next_char_offset(hi).unwrap_or(hi);
         // one source of truth (kind included) — `gv` and `'<`/`'>` read it
         self.marks.last_visual = Some((lo, end, kind));
@@ -926,7 +924,38 @@ impl VimState {
         out
     }
 
-    /// One `:registers` listing line: `"x  c|l|b  text` with embedded
+    /// vim's `:sort n` key: the first decimal number in the line (a leading
+/// `-` counts as the sign); a line without a number compares as 0. Saturating
+/// arithmetic keeps a pathological 40-digit line from wrapping.
+fn numeric_sort_key(text: &str) -> i64 {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let (neg, digits_start) = match bytes[i] {
+            b'-' => (true, i + 1),
+            b'0'..=b'9' => (false, i),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let mut j = digits_start;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > digits_start {
+            let mut v: i64 = 0;
+            for &d in &bytes[digits_start..j] {
+                v = v.saturating_mul(10).saturating_add((d - b'0') as i64);
+            }
+            return if neg { -v } else { v };
+        }
+        i += 1;
+    }
+    0
+}
+
+/// One `:registers` listing line: `"x  c|l|b  text` with embedded
     /// newlines shown as `^J` (vim's rendering) and the tail elided.
     fn register_line(name: char, reg: &crate::registers::Register) -> String {
         const MAX_TEXT: usize = 50;
@@ -1249,12 +1278,16 @@ impl VimState {
         self.commit_change_record();
     }
 
-    /// `:{range}sor[t][!] [flags]` — sort the range's lines. Flags (subset
-    /// of vim's): `!` reverse, `i` ignore case, `u` dedupe AFTER sorting.
-    /// Other vim flags (`n` numeric, `x`/`o`/`b`…) are ignored. `:sort`
-    /// takes NO count — vim refuses the whole command with E488 when a
-    /// digit appears in the arguments (9.1 probe: `:1,3sort 3` leaves the
-    /// buffer untouched), while the engine used to silently sort anyway.
+    /// `:{range}sor[t][!] [flags]` — sort the range's lines. Flags: `!`
+    /// reverse, `i` ignore case, `u` dedupe AFTER sorting, `n` numeric
+    /// (first decimal number in the line is the key). Anything else is
+    /// vim's E475 and the command does NOT run — silently mis-sorting a
+    /// flag the engine does not know would be worse than refusing (9.1
+    /// probe: `:sort z` → "E475: Invalid argument: z", buffer untouched).
+    /// The remaining VALID vim spellings this engine does not implement
+    /// (`x`/`o`/`b`/`f`/`l`) ride the same rejection — a documented, loud
+    /// divergence. `:sort` takes NO count — a digit in the arguments is
+    /// vim's E488 (9.1 probe: `:1,3sort 3` leaves the buffer untouched).
     fn ex_sort(
         &mut self,
         ctx: &mut Ctx,
@@ -1266,11 +1299,22 @@ impl VimState {
             Self::report_trailing(ctx, flags, line_text);
             return;
         }
+        if let Some(bad) = flags
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .find(|c| !matches!(c, '!' | 'i' | 'u' | 'n'))
+        {
+            ctx.host
+                .status_message(&format!("E475: Invalid argument: {bad}"));
+            ctx.host.bell();
+            return;
+        }
         let last = last.min(ctx.buf.line_count().saturating_sub(1));
         let first = first.min(last);
         let reverse = flags.contains('!');
         let ignore_case = flags.contains('i');
         let unique = flags.contains('u');
+        let numeric = flags.contains('n');
         if first == last {
             // a one-line range has nothing to reorder OR dedupe (`:sort u`
             // on a single line can't drop a consecutive duplicate either) —
@@ -1292,13 +1336,28 @@ impl VimState {
                 (key, text)
             })
             .collect();
-        lines.sort_by(|a, b| a.0.cmp(&b.0));
+        if numeric {
+            // vim's `n`: the first decimal number in the line is the sort
+            // key; a line without one compares as 0; equal numbers keep the
+            // original order (stable sort) and dedup together under `u`.
+            // The text comparison below is skipped entirely — vim compares
+            // numbers only in this mode.
+            lines.sort_by_key(|(key, _)| Self::numeric_sort_key(key));
+        } else {
+            lines.sort_by(|a, b| a.0.cmp(&b.0));
+        }
         if unique {
             // case-insensitive dedup folds the variants vim keeps: the
             // stable sort puts the original-first spelling ahead (`%sort iu`
             // on [foo,FOO,bar] → [bar,foo], probe). Case-sensitive dedup
-            // compares the same key (it IS the line).
-            lines.dedup_by(|a, b| a.0 == b.0);
+            // compares the same key (it IS the line). Numeric dedup folds
+            // lines whose SORT KEYS are equal (vim's uniq shares the sort
+            // comparator).
+            if numeric {
+                lines.dedup_by_key(|(key, _)| Self::numeric_sort_key(key));
+            } else {
+                lines.dedup_by(|a, b| a.0 == b.0);
+            }
         }
         if reverse {
             lines.reverse();
@@ -1551,6 +1610,16 @@ impl VimState {
             } else if let Some(name) = arg.strip_prefix("no") {
                 self.options.set_boolean(name, false)
             } else if let Some((name, value)) = arg.split_once('=') {
+                // a KNOWN numeric option with an unparseable value is vim's
+                // E521, not E518 — the option exists, the value is bad
+                // (probe 9.1: `:set ts=` → "E521: Number required after =:
+                // ts="). E518 below stays reserved for unknown names.
+                if self.options.is_value_option(name) && value.parse::<usize>().is_err() {
+                    ctx.host
+                        .status_message(&format!("E521: Number required after =: {arg}"));
+                    ctx.host.bell();
+                    return;
+                }
                 self.options.set_value(name, value)
             } else if let Some(name) = arg
                 .strip_suffix("&vim")
