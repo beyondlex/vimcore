@@ -1816,12 +1816,15 @@ impl VimState {
             self.cursor.desired_col = None;
         }
         // back one char unless at the line start (Replace mode too: vim
-        // leaves the cursor on the last replaced character)
+        // leaves the cursor on the last replaced character). The step-back
+        // is GRAPHEME-aware: prev_char_offset would park the cursor on a
+        // trailing combining mark / VS16 / ZWJ-joined member, where the next
+        // `x` splits the cluster (deleting only the mark).
         let line_start = ctx
             .buf
             .line_start(ctx.buf.offset_to_line(self.cursor.offset));
         if self.cursor.offset > line_start {
-            if let Some(prev) = ctx.buf.prev_char_offset(self.cursor.offset) {
+            if let Some(prev) = crate::buffer::prev_grapheme_offset(ctx.buf, self.cursor.offset) {
                 self.cursor.offset = prev.max(line_start);
             }
         }

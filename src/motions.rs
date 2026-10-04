@@ -267,11 +267,12 @@ impl Motion {
                     // an empty exclusive span instead.
                     MotionResult::new(buf.line_start(line), MotionKind::Exclusive)
                 } else {
-                    // start of the LAST character: byte arithmetic `end - 1`
-                    // lands mid-char when the line ends with a multibyte
-                    // char (`中文` + `$` must sit on 文, not inside it)
-                    let last_start = buf
-                        .prev_char_offset(end)
+                    // start of the LAST GRAPHEME (byte arithmetic `end - 1`
+                    // lands mid-char on multibyte tails; prev_char_offset
+                    // lands mid-cluster on trailing combining marks / ZWJ
+                    // families — `中文` + `$` sits on 文, `"e\u{0301}"` + `$`
+                    // sits on e)
+                    let last_start = crate::buffer::prev_grapheme_offset(buf, end)
                         .unwrap_or(end - 1)
                         .max(buf.line_start(line));
                     MotionResult::new(last_start, MotionKind::Inclusive)
@@ -297,7 +298,10 @@ impl Motion {
                         break;
                     }
                     match buf.char_at(prev) {
-                        Some(c) if c != ' ' && c != '\t' => {
+                        // width-0 chars (combining marks) are not landing
+                        // spots: they attach to the base before them, and a
+                        // cursor parked there would let `x` split the cluster
+                        Some(c) if c != ' ' && c != '\t' && crate::buffer::char_display_width(c) > 0 => {
                             o = prev;
                             break;
                         }
