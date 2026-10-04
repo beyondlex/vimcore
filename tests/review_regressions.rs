@@ -2069,3 +2069,14 @@ fn zwj_clusters_never_span_newlines() {
         "行首 ZWJ 自成簇"
     );
 }
+
+#[test]
+fn sentence_object_on_multibyte_cursor_char() {
+    // sentence_range 的 (offset+1) 落进多字节光标字符中间:prev_char_offset
+    // 返回 None,句子起点静默塌到 0——dis 于 "Hi. 你好 ok" 光标在 你 上
+    // 删掉的是 "Hi." 而非光标所在句。
+    let mut f = Fixture::new("Hi. 你好 ok");
+    f.vim.cursor.offset = 4; // '你' 起点
+    f.feed(["d", "i", "s"]);
+    assert_eq!(f.text(), "Hi. ", "dis 应删除光标所在句");
+}

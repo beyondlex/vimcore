@@ -191,7 +191,15 @@ fn blank_run_plus_next_word(buf: &dyn VimBuffer, big: bool, run_start: usize) ->
 }
 
 fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {
-    let start = word::prev_sentence(buf, (offset + 1).min(buf.len()));
+    // one PAST the cursor, at the next char boundary — a raw `offset + 1`
+    // lands mid-character on a multi-byte cursor char, where
+    // `prev_char_offset` is None and `prev_sentence` silently collapsed the
+    // sentence start to 0 (`dis` on "Hi. 你好 ok" deleted "Hi." instead of
+    // the sentence under the cursor)
+    let start = word::prev_sentence(
+        buf,
+        crate::buffer::next_grapheme_offset(buf, offset).unwrap_or(offset),
+    );
     let next = word::next_sentence(buf, offset);
     // `is` stops AT the sentence terminator — vim 9.1: `dis` on "Aaa. Bbb."
     // deletes "Aaa." and keeps the trailing space in the next sentence's
