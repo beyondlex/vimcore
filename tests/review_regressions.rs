@@ -1843,3 +1843,73 @@ fn double_prefill_range_takes_last_two_addresses() {
         .expect("E20 expected");
     assert_eq!(quoted, "E20: Mark '< not set", "{quoted}");
 }
+
+// ---- 第二十四轮:行尾字素簇的光标落点 ------------------------------------------
+//
+// 行尾是字素簇(decomposed 组合字符、VS16、ZWJ 家族)时,行尾回退必须落在
+// 簇起点而不是最后一个"字符"上——组合字符宽度为 0,光标停在那里的话 `x`
+// 会把簇拆开(只删 mark,留下裸基字符)。
+
+#[test]
+fn esc_after_trailing_cluster_lands_on_cluster_start() {
+    // insert "á"(a + U+0301)后 Esc:光标必须落在 'a'(0),不是 mark(1)
+    let mut f = Fixture::new("\n");
+    f.feed(["i"]);
+    f.type_text("a\u{0301}");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "a\u{0301}\n");
+    assert_eq!(f.cursor(), 0, "Esc 后光标应落在字素簇起点");
+    // 随后的 x 删除整个簇
+    f.feed(["x"]);
+    assert_eq!(f.text(), "\n", "x 必须删除整个字素簇");
+}
+
+#[test]
+fn esc_after_variation_selector_lands_on_base() {
+    // "#"+U+FE0F(emoji 呈现选择符)
+    let mut f = Fixture::new("\n");
+    f.feed(["i"]);
+    f.type_text("#\u{FE0F}");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.cursor(), 0, "VS16 簇:光标应落在 '#'");
+    f.feed(["x"]);
+    assert_eq!(f.text(), "\n", "x 必须删除 # 与 VS16");
+}
+
+#[test]
+fn esc_after_zwj_family_lands_on_first_member() {
+    let fam = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let mut f = Fixture::new("\n");
+    f.feed(["i"]);
+    f.type_text(fam);
+    f.feed(["<Esc>"]);
+    assert_eq!(f.cursor(), 0, "emoji 家族:光标应落在首个成员");
+    f.feed(["x"]);
+    assert_eq!(f.text(), "\n", "x 必须删除整个家族");
+}
+
+#[test]
+fn dollar_parks_on_trailing_cluster_start() {
+    // `$` 的行尾落点同样是簇起点(旧实现落在 mark 上)。
+    // 行 "ab\u{0301}":a@0, b@1, mark@2..4;mark 的簇起点是 b(1)
+    let f = edit("ab\u{0301}\n", 0, 0, &["$"]);
+    assert_eq!(f.cursor(), 1, "$ 应落在 b(mark 所属簇的起点)");
+}
+
+#[test]
+fn j_onto_trailing_cluster_lands_on_cluster_start() {
+    // j 到行尾簇行:display-column 钳制也必须落簇起点
+    let f = edit("hello\nab\u{0301}\n", 0, 0, &["j"]);
+    assert_eq!(f.line(), 1);
+    assert_eq!(f.cursor(), 6, "j 后应落在 'a'(第二行起点)");
+    // 从列 1 j 下去 → 落在 b(簇起点)
+    let f = edit("hello\nab\u{0301}\n", 0, 1, &["j"]);
+    assert_eq!(f.cursor(), 7, "j 应落在 b(簇起点),不是 mark");
+}
+
+#[test]
+fn g_skips_trailing_combining_mark() {
+    // g_ 找最后非空白字符:行尾 mark 不是落点,应落到基字符
+    let f = edit("ab\u{0301}\n", 0, 0, &["g", "_"]);
+    assert_eq!(f.cursor(), 1, "g_ 应落在 b(簇起点),不是 mark");
+}

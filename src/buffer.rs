@@ -160,7 +160,11 @@ pub fn clamp_cursor(buf: &dyn VimBuffer, offset: usize) -> usize {
     let line = buf.offset_to_line(offset);
     let end = buf.line_end(line);
     if offset >= end && end > buf.line_start(line) {
-        return buf.prev_char_offset(end).unwrap_or(end);
+        // step back onto the last GRAPHEME start, not the last char: on a
+        // line ending in a cluster (`"e\u{0301}"`, ZWJ families) the last
+        // CHAR is a continuation — a cursor parked there lets `x` split the
+        // cluster (deleting only the mark, leaving a bare base)
+        return prev_grapheme_offset(buf, end).unwrap_or(end);
     }
     offset
 }
@@ -216,8 +220,10 @@ pub fn offset_for_display_column(buf: &dyn VimBuffer, line: usize, col: usize) -
         }
     }
     if o >= end && end > start {
-        // past the last char: vim clamps `j`/`|` onto the last character
-        return buf.prev_char_offset(end).unwrap_or(start);
+        // past the last char: vim clamps `j`/`|` onto the last character —
+        // the last GRAPHEME start (see clamp_cursor: a continuation char is
+        // not a valid resting spot)
+        return prev_grapheme_offset(buf, end).unwrap_or(start);
     }
     o
 }
@@ -248,18 +254,36 @@ pub fn next_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
 }
 
 /// Previous grapheme boundary (the mirror of [`next_grapheme_offset`]).
+///
+/// The scan must decide whether the candidate `s` (a char start) is a cluster
+/// START or a cluster CONTINUATION. The char AT `s` answers that: a width-0
+/// char (combining mark / variation selector) or a ZWJ attaches backward, so
+/// the cluster starts further left. A starter whose immediately preceding
+/// char is a ZWJ is glued to the cluster behind it (emoji families:
+/// base-ZWJ-base-ZWJ-base resolves back to the first base).
+///
+/// Checking the char BEFORE `s` instead (the original implementation) missed
+/// trailing zero-width chars entirely: on `"e\u{0301}"` it returned the
+/// mark's own offset — parking the cursor mid-cluster after `<Esc>` at line
+/// end, where `x` then split the cluster (deleting only the mark).
 pub fn prev_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize> {
-    let mut o = buf.prev_char_offset(offset)?;
-    while let Some(prev) = buf.prev_char_offset(o) {
-        let Some(c) = buf.char_at(prev) else { break };
-        if c == '\u{200D}' {
-            // the char before the ZWJ joins the cluster
-            o = buf.prev_char_offset(prev)?;
-        } else if char_display_width(c) == 0 {
-            o = prev;
-        } else {
-            break;
+    let mut s = buf.prev_char_offset(offset)?;
+    loop {
+        let Some(c) = buf.char_at(s) else { break };
+        if c == '\u{200D}' || char_display_width(c) == 0 {
+            // s sits on a continuation char: the cluster starts further left
+            match buf.prev_char_offset(s) {
+                Some(p) => s = p,
+                None => break,
+            }
+            continue;
+        }
+        // s is a starter; a ZWJ immediately before it glues it to the
+        // cluster behind (mirror of the forward ZWJ handling)
+        match buf.prev_char_offset(s) {
+            Some(p) if buf.char_at(p) == Some('\u{200D}') => s = p,
+            _ => break,
         }
     }
-    Some(o)
+    Some(s)
 }
