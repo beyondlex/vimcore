@@ -224,7 +224,10 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
     }
     let line = buf.offset_to_line(cur);
     // 插入模式的光标合法地停在 line_end（行尾插入位）甚至缓冲幻影末位
-    // （append 打字 / `<Del>` 并线之后）——只有普通/可视模式要求「不越行尾」
+    // （append 打字 / `<Del>` 并线之后）——只有普通/可视模式要求「不越行尾」。
+    // 普通模式的唯一例外是 `cur == len`：本宿主行模型折叠末尾 \n，vim 模型
+    // 里 `o<Esc>`（末行开行）留下的「新空行行首」在这里表现为幻影末位
+    // （round25 起 exit_insert 宁可停 len 也不停在 \n 上——那里 `x` 会并线）
     if matches!(
         f.vim.mode(),
         vimcore::mode::Mode::Insert | vimcore::mode::Mode::Replace
@@ -232,7 +235,7 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
         if cur < buf.line_start(line) {
             return Err(format!("cursor {cur} before line {line} start"));
         }
-    } else if cur > buf.line_end(line) {
+    } else if cur != len && cur > buf.line_end(line) {
         return Err(format!("cursor {cur} past line {line} end"));
     }
     // 存储偏移可寻址（marks / changelist / jumplist / last_visual）

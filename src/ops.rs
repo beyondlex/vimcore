@@ -916,7 +916,20 @@ pub fn join_lines(vim: &mut VimState, ctx: &mut Ctx, count: usize, literal: bool
             // sync with the shifted text, same as the `gJ` arm above.
             vim.edit_replace(ctx, join_at..next_start + next_indent_len, separator);
         }
-        vim.cursor.offset = join_at;
+        // park ON a cluster start: the seam byte can be a CONTINUATION char
+        // — `gJ` merging a line whose first char is a combining mark glues
+        // that mark onto the char before the seam, and a raw `join_at`
+        // parked the cursor mid-cluster (fuzz round 25), where the next
+        // `x` would split it
+        let land = if matches!(
+            ctx.buf.char_at(join_at),
+            Some(c) if c == '\u{200D}' || crate::buffer::char_display_width(c) == 0
+        ) {
+            crate::buffer::prev_grapheme_offset(ctx.buf, join_at).unwrap_or(join_at)
+        } else {
+            join_at
+        };
+        vim.cursor.offset = clamp_cursor(ctx.buf, land);
     }
     vim.cursor.desired_col = None;
     performed

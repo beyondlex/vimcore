@@ -361,11 +361,17 @@ impl VimState {
             return;
         }
         if at > 0 {
-            // join with the previous line: delete the newline (the same edit
-            // the line-start BS does)
+            // join with the previous line: delete the NEWLINE at the line
+            // boundary — never the byte before the cursor. `at` can sit
+            // mid-line here (the word's run start was found on the previous
+            // line, e.g. the cursor word is glued across the join point by
+            // a line-start combining mark): `at-1..at` then deleted an
+            // arbitrary byte — mid-character on a multi-byte tail (host
+            // panic: fuzz round 25) or a real char with no join at all.
+            let join_at = line_start - 1;
             self.begin_edit();
-            self.edit_delete(ctx, at - 1..at);
-            self.cursor.offset = at - 1;
+            self.edit_delete(ctx, join_at..line_start);
+            self.cursor.offset = join_at;
             self.republish_search(ctx);
             ctx.host.changed();
         }

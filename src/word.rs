@@ -42,17 +42,21 @@ pub fn class_at(buf: &dyn VimBuffer, offset: usize, big: bool) -> Option<Class> 
         return None; // run boundary
     }
     if c == '\u{200D}' || crate::buffer::char_display_width(c) == 0 {
-        // walk back over continuation chars to the cluster's base
+        // walk back over continuation chars to the cluster's base — the walk
+        // STOPS at a newline (GB4 hard boundary): a width-0 char at a line
+        // start has no base on its own line and is its own degenerate run.
+        // Falling through to classify('\n') = Blank glued the mark onto the
+        // previous line's blank class instead.
         let mut back = offset;
         while let Some(prev) = buf.prev_char_offset(back) {
             match buf.char_at(prev) {
                 Some(pc) if pc != '\n' && is_cont(pc) => {
                     back = prev;
                 }
+                Some('\n') | None => break,
                 Some(base) => {
                     return Some(classify(base, big));
                 }
-                _ => break,
             }
         }
         return Some(classify(c, big)); // standalone mark: degenerate run
