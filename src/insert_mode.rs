@@ -267,7 +267,10 @@ impl VimState {
         }
 
         if at > line_start {
-            if let Some(prev) = ctx.buf.prev_char_offset(at) {
+            // delete the whole GRAPHEME cluster behind the cursor (vim's
+            // default delcombine=off: BS removes the composed char, not just
+            // its combining tail)
+            if let Some(prev) = crate::buffer::prev_grapheme_offset(ctx.buf, at) {
                 self.begin_edit();
                 self.edit_delete(ctx, prev..at);
                 self.cursor.offset = prev;

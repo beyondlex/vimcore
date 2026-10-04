@@ -253,6 +253,34 @@ pub fn next_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
     Some(o)
 }
 
+/// Start of the last grapheme cluster in `s` (`None` when empty) — the
+/// `&str` mirror of [`prev_grapheme_offset`], for byte records kept outside
+/// a buffer (the block-insert session's typed text) that must shrink by the
+/// same span a cluster-aware backspace removed from the buffer.
+pub fn last_grapheme_start(s: &str) -> Option<usize> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut start = 0usize;
+    let mut o = 0usize;
+    let mut prev_zwj = false;
+    for c in s.chars() {
+        let at = o;
+        o += c.len_utf8();
+        if c == '\u{200D}' || char_display_width(c) == 0 {
+            // continuation char: the cluster keeps its current start
+            prev_zwj = c == '\u{200D}';
+            continue;
+        }
+        // a starter glued by a preceding ZWJ belongs to the cluster behind
+        if !prev_zwj {
+            start = at;
+        }
+        prev_zwj = false;
+    }
+    Some(start)
+}
+
 /// Previous grapheme boundary (the mirror of [`next_grapheme_offset`]).
 ///
 /// The scan must decide whether the candidate `s` (a char start) is a cluster

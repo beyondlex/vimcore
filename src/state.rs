@@ -596,9 +596,12 @@ impl VimState {
             return;
         };
         if block.typed_end == Some(at) {
-            if let Some(c) = block.text.chars().last() {
-                block.text.truncate(block.text.len() - c.len_utf8());
-                block.typed_end = Some(at - c.len_utf8());
+            // shave the same span the buffer edit removed: a whole grapheme
+            // cluster (a cluster typed via the IME path is ONE backspace)
+            if let Some(start) = crate::buffer::last_grapheme_start(&block.text) {
+                let removed = block.text.len() - start;
+                block.text.truncate(start);
+                block.typed_end = Some(at - removed);
             }
         }
     }
