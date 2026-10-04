@@ -3543,6 +3543,29 @@ impl VimState {
         ctx.buf.line_end(last)
     }
 
+    /// One host history step (`u` / `<C-r>`, shared body of both arms).
+    /// The host swaps the buffer text underneath the engine: cached match
+    /// offsets go stale until a re-scan (generation bump) and the restored
+    /// cursor may sit inside a multi-byte char of the NEW text — floor it
+    /// before the clamp. The stale vertical goal from before the step must
+    /// not steer a following `j` (JumpBackward/OlderChange clear it — same
+    /// drift, same cure). Returns false at the host's history edge.
+    fn history_step(&mut self, ctx: &mut Ctx, undo: bool) -> bool {
+        let Some(offset) = (if undo {
+            ctx.host.undo()
+        } else {
+            ctx.host.redo()
+        }) else {
+            return false;
+        };
+        self.edit_generation += 1;
+        self.sanitize_stored_offsets(ctx.buf);
+        self.cursor.offset =
+            clamp_cursor(ctx.buf, crate::buffer::floor_to_char_boundary(ctx.buf, offset));
+        self.cursor.desired_col = None;
+        true
+    }
+
     /// Execute a resolved Normal-mode command (the `CmdKind::Normal` arms of
     /// the command table). Conventions across the arms:
     /// * `take_total_count` collapses `[3]d[d]`-style prefix counts into the
@@ -3741,49 +3764,15 @@ impl VimState {
                     ctx.host.bell();
                 }
             }
-            // u: step the HOST undo stack back count times. The host swaps
-            // the buffer text underneath the engine, so the cached search
-            // match offsets go stale and must be re-scanned (generation
-            // bump) before the next `n`/highlight refresh.
-            NormalCmd::Undo => {
+            // u / <C-r>: step the HOST history stack back/forward count
+            // times. The host swaps the buffer text underneath the engine, so
+            // every step must re-sync the engine's cached offsets to the new
+            // text (see `history_step`).
+            NormalCmd::Undo | NormalCmd::Redo => {
                 let count = self.take_total_count();
+                let undo = cmd == NormalCmd::Undo;
                 for _ in 0..count {
-                    if let Some(offset) = ctx.host.undo() {
-                        // the host swapped the text underneath the engine:
-                        // cached match offsets are stale until a re-scan,
-                        // and the restored cursor may now sit inside a
-                        // multi-byte char — floor before cursor math
-                        self.edit_generation += 1;
-                        self.sanitize_stored_offsets(ctx.buf);
-                        self.cursor.offset = clamp_cursor(
-                            ctx.buf,
-                            crate::buffer::floor_to_char_boundary(ctx.buf, offset),
-                        );
-                        // the stale vertical goal from before the undo must
-                        // not steer a following `j` (JumpBackward/OlderChange
-                        // clear it — same drift, same cure)
-                        self.cursor.desired_col = None;
-                    } else {
-                        ctx.host.bell();
-                        break;
-                    }
-                }
-                self.republish_search(ctx);
-                ctx.host.changed();
-            }
-            // <C-r>: undo's mirror image
-            NormalCmd::Redo => {
-                let count = self.take_total_count();
-                for _ in 0..count {
-                    if let Some(offset) = ctx.host.redo() {
-                        self.edit_generation += 1;
-                        self.sanitize_stored_offsets(ctx.buf);
-                        self.cursor.offset = clamp_cursor(
-                            ctx.buf,
-                            crate::buffer::floor_to_char_boundary(ctx.buf, offset),
-                        );
-                        self.cursor.desired_col = None;
-                    } else {
+                    if !self.history_step(ctx, undo) {
                         ctx.host.bell();
                         break;
                     }
