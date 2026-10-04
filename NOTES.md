@@ -5,6 +5,59 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十六轮检视增补（2026-10-05，回归测试并入
+`tests/review_regressions.rs`（+2 例、1 例断言更新））
+
+本轮主题：**全模块读码检视**（无新 fuzz 轮——二十五个修复轮后，本轮换
+读码视角逐文件过一遍：buffer/key/keymap/marks/registers/search/options/
+mode/host/word/motions/objects/ops/insert_mode/state/cmdline/tables/tck），
+并对照既有分歧清单销账。
+
+### 语义修复（读码发现 + 属性测试实证；簇×行边界延续 round24/25 语义）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **行首/缓冲首 ZWJ 胶合后续 starter（prev/last 镜像漂移）** | `prev_grapheme_offset` 的「starter 的前置 ZWJ 胶合」规则没有检查 ZWJ 自身是否被胶合：`\n` 或缓冲首后的 ZWJ 在正向扫描里自成一簇，backward 却把 starter 胶给它——两个方向对同一位置给出**不同的簇边界**（正向：`[ZWJ) [b)`；反向：`[ZWJ b)`）。可见后果：`"ab\n\u{200D}b"` 行上 `$` 把光标停在隐形 ZWJ（offset 3）上，`x` 只删掉连接符、剩下裸基字符（修后 `$` 落 b，`x` 删 b）。`last_grapheme_start`（`&str` 镜像，块插入 BS 的字节账本）同规则同修 |
+
+新增**镜像一致性属性测试**：正向扫描切出的每个簇 `[s,e)`，backward 从
+`e` 回溯必须回到 `s`；`last_grapheme_start(整串)` 与缓冲侧 backward 同
+判——九条刁钻语料（独立 mark/ZWJ 紧贴行边界、双 ZWJ、emoji 家族跨行排
+布、 lone ZWJ 缓冲）。旧的 `zwj_clusters_never_span_newlines` 有一条断
+言固化了修复前的行为（行首 ZWJ「自成簇」却又把 starter 胶进去，与正向
+矛盾），按修正后不变量更新。
+
+### 检视中证伪、无需改的（免下轮重查）
+
+- **`:set ts/sw=4` 非 vim 出厂值**（ts=8/sw=8）：刻意的编辑器友好默认
+  （options.rs `Default` + `VALUE_DEFAULTS` 两处对齐，`ts&` 重置一致），
+  `>>` 于 `\t` 缩进得 8 空格与自身默认自洽。文档化分歧面（分歧 #2 同族）。
+- **`prev_paragraph` 不检查 line 0**：`line_start(0)` 兜底与「line 0 是
+  空行则停在它」逐值相等，非 bug。
+- **`:sort u` 先去重后反转**：`!` 旗标是「反转比较方向」，去重对在两个
+  方向下相同，先 `dedup` 后 `reverse` 与 vim「降序排序再去重」逐值等价。
+- **`last_grapheme_start` 的双 ZWJ 链**：`"\nZWJZWJy"` 第二个 ZWJ 被胶合
+  进第一个 ZWJ 的簇（正向同判 [1,8) 一簇）——修后镜像一致，非独立问题。
+- **`match_bracket` 的 `while o <= line_end` 越界读**：`next_char_offset`
+  越过行尾后 `o > line_end` 退出，`\n` 处 `char_at` 返回 `Some('\n')` 非
+  括号，不会误配。
+- **`increment_number_at_cursor` 的 `0b2`**：`b` 前缀字母判定要求首数字
+  合法（bin 要 0/1），`0b2` 光标在 `b` 上不触发前缀臂、回退十进制找数字
+  ——与注释声明的 vim 探针一致。
+- **宏/`.`/@ 交错、`@:`、redo-register**：读码过一遍 `bump_redo_register`
+  的形状匹配（前导 count、`"`、1-8、尾 p/P），与 round15 探针语义一致。
+
+### 重构（零行为变化）
+
+- `cmdline::jump_to_current_match` 的 E35/E486 未命中分支与
+  `state::report_search_miss` 逐字重复 → 复用。
+- `execute_normal_cmd` 的 Undo/Redo 两臂共享体（代次 bump + 存储偏移
+  重 floor + 光标钳制 + desired_col 清除）→ 提取 `history_step`。
+
+### 文档销账
+
+- 分歧 #10（`\\"` 转义引号误判）标记已修复——代码在第十四轮改为反斜杠
+  游程 mod 2（round14 修复表 #5），总表漏更新。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十五轮检视增补（2026-10-05，回归测试并入
 `tests/review_regressions.rs`（+8 例）+ 新增 `tests/fuzz_round25.rs`
 （GB4 行边界×字素簇语料全按键轰炸，携带一条新引擎不变量））
@@ -1656,8 +1709,8 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
    （`Motion::SentenceNext` 注释已声明）。
 9. **tag 对象（`it`/`at`）**：属性值里的 `<`/`>` 会干扰解析；光标恰好
    停在开标签 `<` 上不选中（代码注释已声明）。
-10. **`\\"` 转义引号**：`quote_positions` 只看前一字符是否 `\`，`\\` 后的
-    真引号会被误判为转义（罕见；需要一个小状态机，暂缓）。
+10. ~~`\\"` 转义引号~~（**第十四轮已修复**：`quote_positions` 按反斜杠
+    游程长度 mod 2 判定，`\\"` 后的引号正确配对为字面反斜杠 + 真引号）。
 11. ~~insert 模式 `<C-w>`/`<C-u>` 在行首不删除换行~~（**第九轮已修复**：
     行首 `<C-w>`/`<C-u>` 与上一行并线，块插入会话内响铃拒绝）。
 12. **`:g`、`:sort`、`:normal`、函数/autocmd** 不支持，走 E492 或 rc
