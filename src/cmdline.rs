@@ -1066,10 +1066,25 @@ fn numeric_sort_key(text: &str) -> i64 {
                     vim.marks
                         .resolve(name)
                         .map(|off| {
+                            // `'>` stores the EXCLUSIVE end (one char past
+                            // the selection): the exact `'>` arm above
+                            // resolves line(off-1), and a mangled token
+                            // reaching this generic arm (`'><` from a
+                            // double `'<,'>` prefill) must land on the
+                            // same line, not the one after
+                            let off = if name == '>' {
+                                off.saturating_sub(1)
+                            } else {
+                                off
+                            };
                             let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
                             Base::Line(ctx.buf.offset_to_line(off))
                         })
-                        .ok_or_else(|| unset_mark(other))
+                        // quote the PARSED mark name, not the raw address
+                        // token: a mangled multi-address line (`'<,'>'<,'>`
+                        // from a double prefill) must not echo its junk
+                        // tail into the E20 text
+                        .ok_or_else(|| unset_mark(&format!("'{name}")))
                 }
                 other => other
                     .parse::<usize>()

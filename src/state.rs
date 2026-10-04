@@ -528,11 +528,17 @@ impl VimState {
 
     /// True when no command input is partially assembled: no pending count,
     /// register prefix, operator, char argument, multi-key sequence or
-    /// queued keys. Hosts that route some keys AROUND the engine (e.g.
-    /// `VimEdit`'s local undo stack) must only intercept when this is true —
-    /// an `u` arriving while `g` is pending belongs to `gu`, and hijacking
-    /// it breaks `gu`/`guw`/`guu`.
+    /// queued keys — and no OPEN PROMPT (a `:`/`/` cmdline owns everything
+    /// typed into it; a host hijacking a key mid-prompt on this gate would
+    /// eat literal prompt text like the `u` of `:ru`). Hosts that route some
+    /// keys AROUND the engine (e.g. `VimEdit`'s local undo stack) must only
+    /// intercept when this is true — an `u` arriving while `g` is pending
+    /// belongs to `gu`, and hijacking it breaks `gu`/`guw`/`guu`. Insert
+    /// mode deliberately stays "idle": text input is the host's job there.
     pub fn is_idle(&self) -> bool {
+        if matches!(self.mode, Mode::CommandLine { .. }) {
+            return false;
+        }
         self.count.is_none()
             && self.register.is_none()
             && !self.register_pending

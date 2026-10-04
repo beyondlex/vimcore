@@ -1804,3 +1804,42 @@ fn sort_numeric_flag_orders_by_first_number() {
     g.feed_raw(Key::enter());
     assert_eq!(g.text(), "zzz\n2 a\n10 b");
 }
+
+#[test]
+fn is_idle_is_false_while_a_prompt_is_open() {
+    // `:`/`/` 提示符期间 is_idle 必须为 false：宿主以它为按键拦截闸门，
+    // 提示符里的字面文本（如 `:ru` 的 u）被劫持会吃字。
+    let mut f = Fixture::new("abc");
+    assert!(f.vim.is_idle());
+    f.feed([":"]);
+    assert!(!f.vim.is_idle(), "开着的提示符是未完成的输入");
+    f.feed(["r"]);
+    assert!(!f.vim.is_idle());
+    f.feed(["<Esc>"]);
+    assert!(f.vim.is_idle());
+    // insert 模式仍算 idle（文本输入是宿主的职责）
+    let mut g = Fixture::new("abc");
+    g.feed(["i"]);
+    assert!(g.vim.is_idle());
+}
+
+#[test]
+fn double_prefill_range_takes_last_two_addresses() {
+    // 视觉 `:` 预填 `'<,'>` 后又手打一遍（宏/重放事故形态）：
+    // 无视觉选区时首个 `'<` 报干净的 E20（mark 名，不带 token 垃圾尾巴），
+    // 缓冲不动、不 panic
+    let mut g = Fixture::new("a\nb\nc");
+    g.feed([":"]);
+    for c in "'<,'>'<,'>d".chars() {
+        g.feed_raw(vimcore::key::Key::char(c));
+    }
+    g.feed_raw(Key::enter());
+    assert_eq!(g.text(), "a\nb\nc");
+    let quoted = g
+        .host
+        .statuses
+        .iter()
+        .find(|s| s.contains("E20"))
+        .expect("E20 expected");
+    assert_eq!(quoted, "E20: Mark '< not set", "{quoted}");
+}
