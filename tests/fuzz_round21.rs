@@ -49,7 +49,12 @@ fn assert_addressable(f: &Fixture, context: &str) {
         );
     }
     // 渲染契约：高亮区间可寻址（round20 契约延续到拆行替换面）
-    for hl in f.host.highlights.iter().chain(f.host.current_highlight.iter()) {
+    for hl in f
+        .host
+        .highlights
+        .iter()
+        .chain(f.host.current_highlight.iter())
+    {
         assert!(
             hl.end <= len && text.is_char_boundary(hl.start) && text.is_char_boundary(hl.end),
             "{context}: highlight {hl:?} unaddressable in {text:?}"
@@ -164,7 +169,10 @@ fn search_motion_multibyte_spans_stay_on_char_boundaries() {
     g.feed_raw(Key::enter());
     let text2 = g.text();
     let cur = g.vim.cursor.offset;
-    assert!(text2.is_char_boundary(cur), "v?中 cursor {cur} mid-char in {text2:?}");
+    assert!(
+        text2.is_char_boundary(cur),
+        "v?中 cursor {cur} mid-char in {text2:?}"
+    );
     assert!(matches!(g.vim.mode(), vimcore::mode::Mode::Visual { .. }));
 }
 

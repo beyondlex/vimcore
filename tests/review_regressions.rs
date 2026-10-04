@@ -1553,7 +1553,7 @@ fn huge_prompt_count_does_not_overflow_search_jump() {
     let mut f = Fixture::new("aa\naa\naa\naa");
     f.feed(["/", "a"]);
     f.feed_raw(Key::enter()); // 光标落 match#1（start_index=1）
-    // count 在 / 之前键入（9×25 → saturate 到 usize::MAX）
+                              // count 在 / 之前键入（9×25 → saturate 到 usize::MAX）
     let mut keys: Vec<&str> = std::iter::repeat("9").take(25).collect::<Vec<_>>();
     keys.push("/");
     keys.push("a");
