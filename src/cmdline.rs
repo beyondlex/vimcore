@@ -278,16 +278,7 @@ impl VimState {
         } else {
             // vim reports the miss, not just a bell: E35 before any search
             // was entered, E486 with the pattern otherwise
-            match &self.search.pattern {
-                Some(pattern) => {
-                    ctx.host
-                        .status_message(&format!("E486: Pattern not found: {pattern}"));
-                }
-                None => ctx
-                    .host
-                    .status_message("E35: No previous regular expression"),
-            }
-            ctx.host.bell();
+            self.report_search_miss(ctx);
         }
     }
 
