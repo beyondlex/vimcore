@@ -345,7 +345,11 @@ impl VimState {
         // out of scope, but the two delete chords every rc file trains into
         // muscle memory are not): C-w kills the last word, C-u clears.
         if key == Key::ctrl_char('w') {
-            let no_tail_ws = self.cmdline.buffer.trim_end_matches(' ');
+            // trim_end()（而非 trim_end_matches(' ')）：尾部任何空白都先归零
+            // 再做词回溯。提示符缓冲实际上只可能装进空格（Tab 键在
+            // cmdline_key 里被吞，Char('\t') 也会归一成 Named("tab")），但
+            // 历史回放/未来输入路径不再依赖这个前提。
+            let no_tail_ws = self.cmdline.buffer.trim_end();
             let cut = no_tail_ws
                 .char_indices()
                 .rev()
