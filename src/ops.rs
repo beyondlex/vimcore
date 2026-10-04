@@ -1007,6 +1007,13 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
         o = next;
         replaced += 1;
     }
+    if replaced == 0 {
+        // no cluster was consumed (the cursor cluster ran into the line end):
+        // nothing to replace, and the cursor-landing arithmetic below would
+        // underflow on a multi-byte replacement char (probe: `r中` on the
+        // base of a ZWJ-at-line-end cluster used to panic the debug build)
+        return;
+    }
     let replacements = if ch == '\n' {
         // N<CR> collapses to ONE break: ":h r" — "5r<CR> replaces five
         // characters with a single line break" (9.1 byte probe: `3r<CR>` on
