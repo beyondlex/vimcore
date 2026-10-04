@@ -1913,3 +1913,31 @@ fn g_skips_trailing_combining_mark() {
     let f = edit("ab\u{0301}\n", 0, 0, &["g", "_"]);
     assert_eq!(f.cursor(), 1, "g_ 应落在 b(簇起点),不是 mark");
 }
+
+// ---- 第二十四轮:全角空白(U+3000)的 w/W 语义 ------------------------------------
+
+#[test]
+fn w_skips_ideographic_space() {
+    // U+3000 是 is_whitespace:vim 的 w 从不停在空白字符上
+    // a=1 字节, U+3000=3 字节 → 'b' 在 4
+    let f = edit("a\u{3000}b\n", 0, 0, &["w"]);
+    assert_eq!(f.cursor(), 4, "w 应跳过全角空格落在 b");
+    let f = edit("a\u{3000}b\n", 0, 0, &["W"]);
+    assert_eq!(f.cursor(), 4, "W 同");
+}
+
+#[test]
+fn w_crosses_ideographic_space_only_line() {
+    // 全角空格独占行不是空行:vim 的 w 自由越过(与 ASCII 空白行同款)。
+    // 行0 "x\u{3000}\n" 占 0..5;行1 "\u{3000}y":U+3000@5..8, y@8
+    let f = edit("x\u{3000}\n\u{3000}y\n", 0, 0, &["w"]);
+    assert_eq!(f.line(), 1, "应落在 y(第二行),不是空白处");
+    assert_eq!(f.cursor(), 8);
+}
+
+#[test]
+fn g_ignores_ideographic_space_tail() {
+    // g_ 跳过尾部空白(含全角)落在最后非空白字符
+    let f = edit("ab\u{3000}\n", 0, 0, &["g", "_"]);
+    assert_eq!(f.cursor(), 1, "g_ 应落在 b");
+}

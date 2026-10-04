@@ -79,11 +79,14 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
             }
         }
     }
-    // now step over blanks: spaces first, then whole lines
+    // now step over blanks: spaces first, then whole lines. The skip is
+    // `is_whitespace` (NOT just ' '/'\t'): a U+3000 ideographic space is
+    // Blank to `class_at` and to vim's `w`, and stopping on it would park
+    // the cursor ON whitespace — the one place `w` never rests in vim.
     loop {
-        // skip spaces/tabs on this line
+        // skip spaces/tabs (any whitespace) on this line
         while let Some(c) = buf.char_at(o) {
-            if c == ' ' || c == '\t' {
+            if c.is_whitespace() && c != '\n' {
                 o += c.len_utf8();
             } else {
                 break;
