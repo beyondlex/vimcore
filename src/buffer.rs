@@ -359,6 +359,9 @@ pub fn last_grapheme_start(s: &str) -> Option<usize> {
     let mut start = 0usize;
     let mut o = 0usize;
     let mut prev_zwj = false;
+    // the ZWJ we just passed was itself glued to the cluster behind it —
+    // false right after a newline/buffer start, where it stands alone (GB4)
+    let mut prev_zwj_glued = false;
     let mut prev_char: Option<char> = None;
     for c in s.chars() {
         let at = o;
@@ -374,15 +377,18 @@ pub fn last_grapheme_start(s: &str) -> Option<usize> {
                 start = at;
             }
             prev_zwj = c == '\u{200D}';
+            prev_zwj_glued = prev_zwj && prev.is_some_and(|p| p != '\n');
             continue;
         }
         // a starter glued by a preceding ZWJ belongs to the cluster behind —
         // a newline is never glued (GB4/GB5, mirror of
-        // [`prev_grapheme_offset`])
-        if !prev_zwj || c == '\n' {
+        // [`prev_grapheme_offset`]), and a ZWJ that itself stands alone
+        // (line start / buffer start) does not glue the starter either
+        if !prev_zwj || c == '\n' || !prev_zwj_glued {
             start = at;
         }
         prev_zwj = false;
+        prev_zwj_glued = false;
     }
     Some(start)
 }
@@ -426,7 +432,19 @@ pub fn prev_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
         // newline is never glued (GB4/GB5: the hard boundary outranks the
         // ZWJ join)
         match buf.prev_char_offset(s) {
-            Some(p) if c != '\n' && buf.char_at(p) == Some('\u{200D}') => s = p,
+            Some(p) if c != '\n' && buf.char_at(p) == Some('\u{200D}') => {
+                // the ZWJ itself only drags the starter into the cluster
+                // behind it when the ZWJ is glued there too. A ZWJ at a line
+                // start (or buffer start) STANDS ALONE in the forward scan —
+                // gluing the starter onto it anyway made the backward scan
+                // claim a cluster ("ZWJ base") the forward scan splits in
+                // two, so `$` parked the cursor on the invisible ZWJ where
+                // `x` deleted just the joiner and left a bare base
+                match buf.prev_char_offset(p) {
+                    Some(pp) if buf.char_at(pp) != Some('\n') => s = p,
+                    _ => break,
+                }
+            }
             _ => break,
         }
     }
