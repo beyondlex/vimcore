@@ -3195,9 +3195,14 @@ impl VimState {
                         self.visual_anchor = Some(span.start);
                         let end = span.end.min(ctx.buf.len());
                         // an EMPTY object range (vi( on `()`) collapses to a
-                        // zero-width selection at its start
+                        // zero-width selection at its start. The step-back is
+                        // grapheme-aware: prev_char_offset parks on a
+                        // trailing combining mark when the object ends with
+                        // a cluster (`viw` on "ab\u{0301}")
                         self.cursor.offset = if end > span.start {
-                            ctx.buf.prev_char_offset(end).unwrap_or(span.start)
+                            crate::buffer::prev_grapheme_offset(ctx.buf, end)
+                                .unwrap_or(span.start)
+                                .max(span.start)
                         } else {
                             span.start
                         };
@@ -3926,13 +3931,11 @@ impl VimState {
                     return;
                 };
                 self.visual_anchor = Some(range.start);
-                // cursor ON the last char of the match: `end - 1` bytes
+                // cursor ON the last GRAPHEME of the match: `end - 1` bytes
                 // would sit INSIDE a multi-byte final char (fuzz: a `中`
-                // match parked the cursor mid-char and the next host read
-                // panicked)
-                self.cursor.offset = ctx
-                    .buf
-                    .prev_char_offset(range.end)
+                // match parked the cursor mid-char), and prev_char_offset
+                // would sit on a trailing combining mark
+                self.cursor.offset = crate::buffer::prev_grapheme_offset(ctx.buf, range.end)
                     .unwrap_or(range.start)
                     .max(range.start);
                 self.cursor.desired_col = None;
@@ -4232,10 +4235,12 @@ impl VimState {
                         // 插到行尾字符之前，行尾字符反落在粘贴文本之后
                         let at = span.start.min(ctx.buf.len());
                         self.edit_insert(ctx, at, &repeated);
-                        // cursor on the last pasted char's START — byte - 1
-                        // would sit inside a multi-byte character
+                        // cursor on the last pasted GRAPHEME start — byte - 1
+                        // sits inside a multi-byte character, prev_char_offset
+                        // sits on a trailing combining mark
                         let end = at + repeated.len();
-                        self.cursor.offset = ctx.buf.prev_char_offset(end).unwrap_or(at);
+                        self.cursor.offset = crate::buffer::prev_grapheme_offset(ctx.buf, end)
+                            .unwrap_or(at);
                     }
                 }
                 self.end_edit();

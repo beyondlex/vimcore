@@ -266,11 +266,24 @@ pub fn span_from_visual(vim: &VimState, buf: &dyn VimBuffer) -> Option<OpSpan> {
             end: buf.line_range(buf.offset_to_line(hi)).end,
             linewise: true,
         },
-        crate::mode::VisualKind::Block | crate::mode::VisualKind::Char => OpSpan {
-            start: lo,
-            end: hi + buf.char_at(hi).map(|c| c.len_utf8()).unwrap_or(0),
-            linewise: false,
-        },
+        crate::mode::VisualKind::Block | crate::mode::VisualKind::Char => {
+            // the exclusive end covers the cursor's WHOLE cluster: the old
+            // `hi + char_len` left the base's combining marks outside the
+            // selection (a visual `p`/`r` on `#`+VS16 ate the base and left
+            // the orphan mark behind)
+            let end = match buf.char_at(hi) {
+                Some(c) if c != '\n' && crate::buffer::char_display_width(c) > 0 => {
+                    crate::buffer::next_grapheme_offset(buf, hi)
+                        .unwrap_or(hi + c.len_utf8())
+                }
+                _ => hi + buf.char_at(hi).map(|c| c.len_utf8()).unwrap_or(0),
+            };
+            OpSpan {
+                start: lo,
+                end,
+                linewise: false,
+            }
+        }
     })
 }
 
@@ -357,7 +370,19 @@ pub fn block_row_range(
         o += c.len_utf8();
     }
     match lo {
-        Some(lo) => lo..hi,
+        Some(lo) => {
+            // the cell covers the WHOLE last cluster: extend past the last
+            // included char's trailing marks (deleting only the base would
+            // orphan the mark, which then composes onto the char before it)
+            let mut hi = hi;
+            while hi < end {
+                match buf.char_at(hi) {
+                    Some(c) if c == '\u{200D}' || char_display_width(c) == 0 => hi += c.len_utf8(),
+                    _ => break,
+                }
+            }
+            lo..hi
+        }
         None => start..start,
     }
 }
@@ -770,7 +795,10 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
     } else {
         let mut at = vim.cursor.offset;
         if after && !ctx.buf.at_line_end(at) {
-            at = ctx.buf.next_char_offset(at).unwrap_or(at);
+            // step over the WHOLE cluster under the cursor: next_char_offset
+            // would insert between a base char and its combining mark,
+            // splitting the cluster (# + VS16 became # n VS16)
+            at = crate::buffer::next_grapheme_offset(ctx.buf, at).unwrap_or(at);
         }
         vim.edit_insert(ctx, at, &repeated);
         // block cursor sits on the last pasted GRAPHEME start — `end - 1`
@@ -1087,12 +1115,13 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
             let Some(block) = span_from_visual_block(vim, ctx.buf) else {
                 return;
             };
-            // bottom-up so earlier row offsets stay valid
+            // bottom-up so earlier row offsets stay valid; fill counts
+            // CLUSTERS (a composed char takes one replacement char)
             for range in block.rows.iter().rev() {
                 if range.is_empty() {
                     continue;
                 }
-                let n = ctx.buf.slice(range.clone()).chars().count();
+                let n = crate::buffer::grapheme_count(ctx.buf, range.clone());
                 vim.edit_replace(ctx, range.clone(), &replacement.repeat(n));
             }
             vim.cursor.offset =
@@ -1107,7 +1136,7 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
             for line in (first..=last).rev() {
                 let ls = ctx.buf.line_start(line);
                 let le = ctx.buf.line_end(line);
-                let n = ctx.buf.slice(ls..le).chars().count();
+                let n = crate::buffer::grapheme_count(ctx.buf, ls..le);
                 vim.edit_replace(ctx, ls..le, &replacement.repeat(n));
             }
             vim.cursor.offset = ctx.buf.first_non_blank(first.min(ctx.buf.line_count() - 1));
@@ -1116,7 +1145,7 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
             let Some(span) = span_from_visual(vim, ctx.buf) else {
                 return;
             };
-            let n = ctx.buf.slice(span.start..span.end).chars().count();
+            let n = crate::buffer::grapheme_count(ctx.buf, span.start..span.end);
             vim.edit_replace(ctx, span.start..span.end, &replacement.repeat(n));
             vim.cursor.offset = clamp_cursor(ctx.buf, span.start);
         }

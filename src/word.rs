@@ -29,16 +29,49 @@ pub fn is_word_char(c: char) -> bool {
 
 /// Class used by the w/b/e family. With `big` (W/B/E), only blanks separate
 /// runs. A newline always ends a run.
+///
+/// Width-0 chars (combining marks, VS16) and ZWJ are cluster CONTINUATIONS:
+/// they inherit the class of the base char they attach to, so a run scan
+/// treats `base + marks` as one unit. Classifying a mark on its own (Punct —
+/// it is neither alphanumeric nor whitespace) made `w` stop mid-cluster on
+/// `"b\u{0301}"` and parked the cursor on the mark. A mark with no base
+/// behind it (line start — its base was deleted) is its own degenerate run.
 pub fn class_at(buf: &dyn VimBuffer, offset: usize, big: bool) -> Option<Class> {
     let c = buf.char_at(offset)?;
     if c == '\n' {
         return None; // run boundary
     }
-    Some(match char_class(c) {
+    if c == '\u{200D}' || crate::buffer::char_display_width(c) == 0 {
+        // walk back over continuation chars to the cluster's base
+        let mut back = offset;
+        while let Some(prev) = buf.prev_char_offset(back) {
+            match buf.char_at(prev) {
+                Some(pc) if pc != '\n' && is_cont(pc) => {
+                    back = prev;
+                }
+                Some(base) => {
+                    return Some(classify(base, big));
+                }
+                _ => break,
+            }
+        }
+        return Some(classify(c, big)); // standalone mark: degenerate run
+    }
+    Some(classify(c, big))
+}
+
+fn classify(c: char, big: bool) -> Class {
+    match char_class(c) {
         Class::Blank => Class::Blank,
         _ if big => Class::Word,
         other => other,
-    })
+    }
+}
+
+/// Is `c` a cluster-continuation char (combining mark, VS16, ZWJ)? Such
+/// chars never start or end a run: they ride on the base before them.
+fn is_cont(c: char) -> bool {
+    c == '\u{200D}' || crate::buffer::char_display_width(c) == 0
 }
 
 /// A truly EMPTY line (no characters before the newline). vim's `w`/`b`
@@ -108,7 +141,9 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
 }
 
 /// `e` / `E`: end of the current word, or of the next one when already at a
-/// run end. Returns the offset *of the last character* (inclusive motion).
+/// run end. Returns the offset *of the last character* (inclusive motion) —
+/// the last GRAPHEME start: a run ending on a continuation char (a mark
+/// glued to the base before it) reports the base, never the mark itself.
 pub fn next_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
     let mut o = offset;
     // finish the current run first
@@ -121,7 +156,7 @@ pub fn next_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
                 }
             }
             if o != offset {
-                return o;
+                return pull_off_continuation(buf, o, offset);
             }
         }
     }
@@ -136,12 +171,46 @@ pub fn next_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
     let Some(start) = next_non_blank(buf, buf.next_char_offset(offset).unwrap_or(offset)) else {
         return offset;
     };
+    // a mark right after the whitespace belongs to the blank cluster (its
+    // base IS the blank) — the next real run starts at the next cluster
+    let start = skip_continuation(buf, start);
     let class = class_at(buf, start, big).unwrap_or(Class::Word);
     let mut o = start;
     while let Some(next) = buf.next_char_offset(o) {
         match class_at(buf, next, big) {
             Some(c) if c == class => o = next,
             _ => break,
+        }
+    }
+    pull_off_continuation(buf, o, offset)
+}
+
+/// Walk `o` back off any trailing continuation chars onto the cluster's
+/// base — `e`'s landing spot must be a cluster START (width ≥ 1), or the
+/// inclusive span / cursor would sit mid-cluster. Stops at `floor` (the
+/// original offset): a degenerate run that IS a lone mark keeps its spot.
+fn pull_off_continuation(buf: &dyn VimBuffer, mut o: usize, floor: usize) -> usize {
+    while o > floor {
+        match buf.char_at(o) {
+            Some(c) if is_cont(c) => {
+                match buf.prev_char_offset(o) {
+                    Some(p) => o = p,
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+    }
+    o
+}
+
+/// Step `o` forward over continuation chars onto the next cluster start.
+fn skip_continuation(buf: &dyn VimBuffer, mut o: usize) -> usize {
+    while let Some(c) = buf.char_at(o) {
+        if c != '\n' && is_cont(c) {
+            o += c.len_utf8();
+        } else {
+            break;
         }
     }
     o
@@ -165,7 +234,9 @@ pub fn prev_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
         }
     }
     // on a run start / blank: walk back over blanks, then to the previous
-    // run's start
+    // run's start. A continuation char reached here rides on a BLANK base
+    // (a word base would have been consumed by the run walk above) — skip
+    // it with the blank cluster, like the blank itself.
     loop {
         let Some(prev) = buf.prev_char_offset(o) else {
             return o;
@@ -180,7 +251,7 @@ pub fn prev_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
                     return buf.line_start(line);
                 }
             }
-            Some(c) if c.is_whitespace() => o = prev,
+            Some(c) if c.is_whitespace() || is_cont(c) => o = prev,
             _ => {
                 o = prev;
                 // walk to the start of this run
@@ -208,7 +279,10 @@ pub fn prev_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
     while let Some(prev) = buf.prev_char_offset(o) {
         o = prev;
         let Some(c) = buf.char_at(o) else { return o };
-        if c.is_whitespace() {
+        if c.is_whitespace() || is_cont(c) {
+            // blanks AND continuation chars are never run ends: a mark
+            // glued to the base before it would otherwise report itself
+            // as `ge`'s landing spot (mid-cluster parking)
             continue;
         }
         let at_run_end = match buf.next_char_offset(o) {
