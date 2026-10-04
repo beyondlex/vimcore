@@ -5,6 +5,70 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十五轮检视增补（2026-10-05，回归测试并入
+`tests/review_regressions.rs`（+8 例）+ 新增 `tests/fuzz_round25.rs`
+（GB4 行边界×字素簇语料全按键轰炸，携带一条新引擎不变量））
+
+本轮主题：**字素簇 × 行边界（UAX #29 GB4 硬边界）**。round24 建立了
+「光标不停宽度 0 字符」不变量，本轮 fuzz_round25 追加第二条——
+
+  **normal 光标不停 `\n` 上**（空行行首除外——空行无字符可停，行首即
+  `\n` 位置）。
+
+语料专攻 round24 没有的形态：独立 mark/ZWJ 紧贴 `\n` 的各种排布（行首/
+行尾/独占行/空格后跟 mark）。两条不变量合力抓出九处路径（其中两处是
+读码候选，七处纯 fuzz 轰炸产物），delta-debugging 最小化器（临时脚本）
+把 67 步序列收缩到 1-4 键。压测版（1200 轮×150 步×14 语料 ≈ 250 万键）
+通过后收敛为常驻 60 轮。
+
+### 语义修复（fuzz 最小化实证；无 vim 探针——簇×行边界在 vim 字节级
+模型下无对应物，引擎取 GB4 语义这个更强的自洽约束，同 round24 先例）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **`w` 的空白跳过不吸收延续字符** | `a \u{0301}bc` 上 `w` 停在 mark（宽度 0）——round24 修了 `b`（`prev_word_start` 的 `is_cont` 臂）漏了正向 `w`。mark 附着于空格，跳空白时随行（读码 + 探针） |
+| 2 | **字素回溯越过 `\n` 胶合（GB4）** | `prev/next_grapheme_offset`、`last_grapheme_start` 把行首独立 mark/ZWJ 胶合进 `\n` 的簇——`\n` 是硬边界（GB4/GB5 优先于 ZWJ/Extend 连接）。后果：`w` 到缓冲尾后 clamp_cursor 把光标钳到**上一行**换行符（`x` 并线）。探针：`prev_grapheme_offset(5) = 2` 于 `"ab\n\u{0301}"` |
+| 3 | **insert `<Del>` 只删基字符** | `e\u{0301}` 上 Del 留下裸 mark（转而复合到前一字符）——BS 的 round24 簇语义没有镜像到 Del。改 `next_grapheme_offset` 整簇删除 |
+| 4 | **`r` 多字节替换零消费下溢** | ZWJ 胶合 `\n` 时 advance_graphemes 消费 0 簇，`start + 0 - ch.len_utf8()` usize 下溢——debug panic（`r中` 于 `"ab\u{200D}\ncd"` 的 b 上，探针复现 panic）。修：零簇消费提前返回 + #2 断根 |
+| 5 | **句子对象于多字节光标字符起点塌 0** | `sentence_range` 的 `(offset + 1)` 落进 CJK 光标字符中间，`prev_char_offset` None → `prev_sentence` 归 0——`dis` 于 `"Hi. 你好 ok"` 光标在 你 删掉 "Hi." 而非所在句（探针实证）。改 `next_grapheme_offset` 取字符边界 |
+| 6 | **exit_insert 步退停靠 `\n`** | 折叠行模型（harness/tck 的幻影行折叠）下 `ddo<Esc>` 于 `"ab\n\u{0301}"` 把光标停在换行符（offset_to_line 把缓冲末位归到前一行，步退守卫误判）。修：步退候选点是 `\n` 时放弃步退，宁停缓冲末位（= vim 模型的末空行行首） |
+| 7 | **insert `<C-w>` 并线删任意字节** | 光标词的 run 起点在前一行时（行首 mark 胶合形），并线分支删 `at-1..at` = 光标前**任意字节**——多字节尾宿主 panic（fuzz 实证 `"b\n\u{301}d\n"` 上 `<C-w>`），ASCII 则误删字符且并不线。修：删 `line_start-1` 的换行 |
+| 8 | **`class_at` 回溯无 GB4 停点** | 行首独立 mark 胶合到 `\n` 被归类 Blank（classify('\n')）——与自身文档「自成退化 run」矛盾，`e` 于 mark 上退化等行为漂移。修：回溯遇 `\n` 即停 |
+| 9 | **J/gJ 接缝停靠 `\n`/簇中间 + 停靠点簇吸附收口** | 下一行为空时 `J` 停 join_at = 残留 `\n`；gJ 接缝暴露 mark 时停簇中间；`2/\|<CR>` 零宽模式跳转与 `gv` 过期端点同病。收口：`clamp_cursor` 增加簇内吸附（新助手 `grapheme_cluster_start`——「包含 offset 的簇起点」，区别于 `prev_grapheme_offset` 的「之前一簇」），四处停靠点自动覆盖 |
+
+### 检视中证伪、无需改的（免下轮重查）
+
+- **NBSP（U+00A0）的空白分类**（round17 挂账，vim 9.1 `-es` 探针定谳）：
+  `w`/`daw` 引擎与 vim 一致（NBSP 算空白跳过）。vim 自身**不一致**——
+  `iW` 对象与 `g_` 把 NBSP 当内容（`yiW` 取到 NBSP 本身、`g_` 停在尾部
+  NBSP 上），`w` 却跳过它（mbyte.c utf_class 与对象/`g_` 两套判定）。
+  引擎的统一 `is_whitespace` 自洽且匹配最常用的 `w` 面，不追——见分歧 68。
+- **`replicate_count_insert` 的 clamp 失配**（round17 挂账）：读码确认
+  已修（clamp FIRST，两腿共享 clamp 后 copies），销账。
+- **`complete_char_arg` 的 Find/JumpMark 双臂**（round17 挂账）：现读两臂
+  实质不同（Find 记 last_find、JumpMark 报 E20），仅尾式相似，不并。
+- **offset_to_line 折叠行模型 vs exit_insert**：见 #6——引擎对两种宿主
+  行模型都稳健是既有契约（tck 幻影行容忍），本轮把 exit_insert 补齐。
+- **`line_count` 对 `ab\n` 的折叠**（探针中 `G`/`j`「不动」的假象）：
+  harness 宿主策略（尾 `\n` 折叠幻影行），非引擎 bug；引擎只依赖 trait。
+
+### 新增已知分歧（接全局序号）
+
+68. **NBSP 的对象/g_ 语义**：vim 内部两套空白判定（motion utf_class vs
+    `iW` 对象/`g_`），NBSP 在 `w` 里是空白、在 `iW`/`g_` 里是内容。引擎
+    统一按空白（is_whitespace），`yiW` 于 NBSP 上取下一词而非 NBSP 本身。
+    罕见面（NBSP + 光标恰在 NBSP + W 对象）。
+69. **折叠行模型下 `o<Esc>` 的光标**：vim 行模型停新空行行首；折叠模型
+    宿主会看到缓冲末位（`cur == len`）。引擎取「不停 `\n`」优先（#6），
+    `x` 于该位安全（no-op）。
+
+### 性能备注
+
+- bench_probe 全项与 round23/24 基线持平：`w` 6.3µs/键、1MB 单行 `w`
+  103µs、hlsearch 重扫 0.25ms、`:%s` 5.3ms、`n` 3.8µs。本轮新增的热路径
+  分支是 `clamp_cursor` 的簇检查（一次宽度表查询，延续字符才走回溯）——
+  无 mark/ZWJ 的文本零额外开销，量测持平。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十四轮检视增补（2026-10-04，回归测试并入
 `tests/review_regressions.rs`（+17 例）+ 新增 `tests/fuzz_round24.rs`
 （字素簇语料全按键轰炸 + 可视/宏交错，携带一条新引擎不变量））
