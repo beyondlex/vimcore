@@ -169,6 +169,27 @@ pub fn floor_to_char_boundary(buf: &dyn VimBuffer, offset: usize) -> usize {
     offset
 }
 
+/// The start of the grapheme cluster CONTAINING byte `offset` (`offset`
+/// itself when it sits on a visible starter). A width-0 char at `offset`
+/// walks back to its base — except across a `\n` (GB4): a mark at a line
+/// start is its own cluster and stays put. This is the right landing rule
+/// for a cursor parked on a byte that an edit just turned into a
+/// continuation char (a pasted leading mark glues onto the char before it).
+pub fn grapheme_cluster_start(buf: &dyn VimBuffer, offset: usize) -> usize {
+    let mut s = offset;
+    while let Some(c) = buf.char_at(s) {
+        if c == '\u{200D}' || char_display_width(c) == 0 {
+            match buf.prev_char_offset(s) {
+                Some(p) if buf.char_at(p) != Some('\n') => s = p,
+                _ => break,
+            }
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 /// Clamp for CURSOR placement (normal/visual): like [`clamp_to_line_end`],
 /// but when the result sits past the line's last character it steps back ONTO
 /// that character. Vim's normal-mode cursor never rests past the last char —
@@ -177,18 +198,35 @@ pub fn floor_to_char_boundary(buf: &dyn VimBuffer, offset: usize) -> usize {
 /// buffer end must leave the cursor ON the last character, vim probe: `wx`
 /// after a single-word line deletes it). Empty lines keep their start — there
 /// is no character to sit on, the start IS the newline position.
+///
+/// The result is additionally snapped onto a GRAPHEME START: an edit can land
+/// a width-0 continuation char exactly on the clamped offset (a visual-block
+/// `p` pasting a leading combining mark glues it onto the char before it, a
+/// `gJ` seam can expose a mark mid-line) — resting there would let `x` split
+/// the cluster, so the cursor rests on the cluster's base instead (fuzz
+/// round 25).
 pub fn clamp_cursor(buf: &dyn VimBuffer, offset: usize) -> usize {
     let offset = clamp_to_line_end(buf, offset);
     let line = buf.offset_to_line(offset);
     let end = buf.line_end(line);
-    if offset >= end && end > buf.line_start(line) {
+    let offset = if offset >= end && end > buf.line_start(line) {
         // step back onto the last GRAPHEME start, not the last char: on a
         // line ending in a cluster (`"e\u{0301}"`, ZWJ families) the last
         // CHAR is a continuation — a cursor parked there lets `x` split the
         // cluster (deleting only the mark, leaving a bare base)
-        return prev_grapheme_offset(buf, end).unwrap_or(end);
+        prev_grapheme_offset(buf, end).unwrap_or(end)
+    } else {
+        offset
+    };
+    // mid-line snap: the char AT the offset may itself be a continuation
+    if matches!(
+        buf.char_at(offset),
+        Some(c) if c == '\u{200D}' || char_display_width(c) == 0
+    ) {
+        grapheme_cluster_start(buf, offset)
+    } else {
+        offset
     }
-    offset
 }
 
 // ---- display columns & graphemes (wide-char aware) ---------------------------

@@ -118,11 +118,11 @@ fn assert_cursor_on_visible_char(f: &Fixture, context: &str) {
 fn fuzz_boundary_corpus_never_parks_on_newline_or_mark() {
     let mut rng = Rng(0x25_25_25_25);
     for (ci, corpus) in BOUNDARY_CORPUS.iter().enumerate() {
-        for round in 0..40 {
+        for round in 0..60 {
             let mut f = Fixture::new(corpus);
             let context = format!("corpus#{ci} {corpus:?} round#{round}");
             let mut log: Vec<String> = Vec::new();
-            for step in 0..100 {
+            for step in 0..150 {
                 let key = KEY_POOL[rng.below(KEY_POOL.len())];
                 f.feed([key]);
                 log.push(key.to_owned());
@@ -149,7 +149,7 @@ fn fuzz_boundary_corpus_never_parks_on_newline_or_mark() {
 fn fuzz_boundary_corpus_operators_and_macros() {
     let mut rng = Rng(0x25_B04D_C0DE);
     for corpus in BOUNDARY_CORPUS.iter() {
-        for round in 0..25 {
+        for round in 0..30 {
             let mut f = Fixture::new(corpus);
             let context = format!("op/macro {corpus:?} round#{round}");
             let mut log: Vec<String> = Vec::new();
