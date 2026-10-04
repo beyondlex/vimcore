@@ -2012,6 +2012,74 @@ fn standalone_mark_line_is_its_own_cluster() {
 }
 
 #[test]
+fn zwj_at_line_start_does_not_glue_following_starter() {
+    // round 26:prev_grapheme_offset 的「starter 的前置 ZWJ 胶合」规则
+    // 没有检查 ZWJ 自身是否被胶合。行首(或缓冲首)的 ZWJ 在正向扫描里
+    // 自成一簇,backward 却把后面的 starter 胶给它——两个方向对同一
+    // 位置给出不同的簇边界:`$` 停在隐形 ZWJ 上,`x` 只删掉连接符、
+    // 剩下裸基字符(本应删掉的就是那个可见字符)。
+    // "ab\n\u{200D}b":ZWJ 占 3..6,b 在 6
+    let mut f = edit("ab\n\u{200D}b", 1, 0, &["$"]);
+    assert_eq!(f.cursor(), 6, "$ 落在可见字符 b 上,不停在隐形 ZWJ 上");
+    f.feed(["x"]);
+    assert_eq!(f.text(), "ab\n\u{200D}", "x 删除 b,行首独立 ZWJ 保留");
+    // 缓冲首形态:ZWJ 后的 starter 同样不被胶合
+    let f = Fixture::new("\u{200D}b");
+    assert_eq!(
+        vimcore::buffer::prev_grapheme_offset(&f.buf, 4),
+        Some(3),
+        "缓冲首 ZWJ 也不胶合 starter"
+    );
+}
+
+#[test]
+fn grapheme_scan_directions_agree() {
+    // 镜像一致性不变量:正向扫描切出的每个簇 [s,e),backward 从 e 回溯
+    // 必须回到 s。正反两套语义一旦漂移,w/b、x/$ 的落点就会各说各话。
+    let cases: &[&str] = &[
+        "a\n\u{200D}b",
+        "\u{200D}b",
+        "ab\n\u{200D}c",
+        "x\n\u{200D}\u{200D}y",
+        "a\u{200D}b\nc\u{200D}d",
+        "e\u{0301}\n\u{0301}\n",
+        "a\u{200D}\nb",
+        "\u{200D}",
+        "中文\u{200D}👨‍👩‍👧\n\u{0301}x",
+    ];
+    for text in cases {
+        let f = Fixture::new(text);
+        let mut o = 0usize;
+        let mut boundaries = vec![0usize];
+        while o < f.buf.len() {
+            match vimcore::buffer::next_grapheme_offset(&f.buf, o) {
+                Some(next) => {
+                    boundaries.push(next);
+                    o = next;
+                }
+                None => break,
+            }
+        }
+        for w in boundaries.windows(2) {
+            let (s, e) = (w[0], w[1]);
+            assert_eq!(
+                vimcore::buffer::prev_grapheme_offset(&f.buf, e),
+                Some(s),
+                "簇 [{s},{e}) 的反向回溯须回到起点({text:?})"
+            );
+        }
+        // &str 镜像:整串最后一个簇的起点须与缓冲侧 backward 一致
+        if let Some(&last_start) = boundaries.iter().rev().nth(1) {
+            assert_eq!(
+                vimcore::buffer::last_grapheme_start(text),
+                Some(last_start),
+                "last_grapheme_start 须与 prev_grapheme_offset 同判({text:?})"
+            );
+        }
+    }
+}
+
+#[test]
 fn last_grapheme_start_treats_newline_as_boundary() {
     // prev_grapheme_offset 的 &str 镜像同规则:块插入会话的字节账本
     // 依赖它与缓冲侧簇删除对齐。
@@ -2061,12 +2129,20 @@ fn zwj_clusters_never_span_newlines() {
         Some(4),
         "x+ZWJ 簇止于 \n"
     );
-    // 行首独立 ZWJ 不与 \n 胶合(修复前 prev 会回溯进上一行的 \n)
+    // 行首独立 ZWJ 不与 \n 胶合(修复前 prev 会回溯进上一行的 \n);
+    // 且它也不把后面的 starter 胶进自己的簇——正向扫描里行首 ZWJ 自成
+    // 一簇、c 另成一簇,prev 必须给出同一条边界(round 26 前后者曾把
+    // "ZWJ c" 读成一簇,`$` 停在隐形 ZWJ 上、`x` 只删掉连接符剩裸基字)
     let g = Fixture::new("ab\n\u{200D}c");
     assert_eq!(
-        vimcore::buffer::prev_grapheme_offset(&g.buf, 7),
+        vimcore::buffer::prev_grapheme_offset(&g.buf, 6),
         Some(3),
         "行首 ZWJ 自成簇"
+    );
+    assert_eq!(
+        vimcore::buffer::prev_grapheme_offset(&g.buf, 7),
+        Some(6),
+        "行首 ZWJ 不胶合后续 starter(与正向扫描同一边界)"
     );
 }
 
