@@ -5,6 +5,70 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十二轮检视增补（2026-10-04，回归测试并入
+`tests/review_regressions.rs`（+8 例）+ 新增 `tests/fuzz_round21.rs`
+（`:s` 替换串转义面 × 6 缓冲 × 9 模式的行寻址契约 + CJK search-motion
+定向 + NUL 寻址 + `&` 重放单次性）
+
+本轮流程：全量通读 `src/`（键形→提示符→cmdline→编辑路径）→ 恶意输入
+探针定谳 → vim 9.1 `-es` 字节级实证 → 修复。新工具形态：`vim -es`
+脚本模式替代 PTY 交互（`printf 脚本 | vim -N -es -u rc` + `writefile`
+捕获 v:errmsg/光标/缓冲字节），对 Ex 语义面的实证比 PTY 稳定。
+
+### 语义修复（探针 + vim 9.1 实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **`<C-Space>` 映射劫持普通空格（数据破坏级）** | `parse_angle` 的 `space`/`lt`/`bar` 分支无条件 `Key::char(..)` 丢修饰键——`:nmap <C-Space> ix` 被存成普通空格，按空格即触发。vim `:nmap` 列表实证 `<C-Space>` 与 `<Space>` 是两个键。修复：修饰键随形 |
+| 2 | **单字符 Named ctrl 键死键** | `Key::ctrl("w")`（gpui 形态）与 `Key::ctrl_char('w')`（parse 形态）不等价——insert 的 `<C-w>` 弦与全部 ctrl 命令表只认 Char 形，Named 形静默 Unknown。修复：`handle_key` 把单字符 Named 键折叠为 Char（修饰键保留）；顺带让 ctrl+Named("space") 能命中 `<C-Space>` 映射 |
+| 3 | **`3/pat` 提示符大 count 溢出 panic** | 提示符 `search_count` 是唯一绕过 `take_total_count` 十亿封顶的 count 入口；20 个 9 后 `/pat<CR>` 在 `jump_to_match` 的 u64 加法上溢出——debug panic（release 静默错跳）。修复：步数先按匹配数取模，和式永不出界 |
+| 4 | **`:s` 替换串 `\r`/`\n` 字面穿透** | vim 9.1 字节级探针：`\r` 是换行（`%s/,/,\r/g` 惯用法）、`\n` 是 NUL（`fX\x00Yo bar`）；引擎把两者当字面量写进缓冲。修复：`unescape_replacement` 补两条映射，`\\r` 保持字面 |
+| 5 | **拆行替换的光标落点** | `\r` 落地后光标仍按**拆行前**行号停放。vim 三形态实证：`%s/a/\r/` 于 "aaa\nbbb" 落 "aa" 行、g 形态落第 4 行、`2s/a/\r/g` 落拆行区末行。修复：按替换槽内新行数下移 |
+| 6 | **`&`/裸 `:s` 重放存储的范围** | state.rs 旧注释断言「ranges behave as typed」——vim 9.1 探针翻案：`:1s/a/B/` + `+` + `&` 作用于**第 2 行**而非存储的第 1 行。旧引擎 `&` 重打绝对行号，且裸 `:s` 在带范围存储后直接 E492（`strip_prefix('s')` 打不穿 "1,2"）。修复：重放前剥范围前缀（键入的范围仍然生效） |
+| 7 | **`:sort` 尾随数字被静默接受** | vim 9.1：`:1,3sort 3` E488 且缓冲不动；引擎静默排序。修复：args 含数字即 E488 拒绝执行 |
+
+### 体验改进
+
+- `:set` 未知选项从哑铃改为 **E518: Unknown option: {name}**（vim 实证
+  文案，其后项不再执行）。
+- `:s` 非法 pattern 从哑铃改为发布编译错误文本（不冒充 vim 的 E486——
+  传统引擎宽容不闭合的 `[`，RE2 方言只能如实报编译失败，分歧 #1 细化）。
+- `.` 重放热路径上的 `DOT_TEXT_MARKER` 比较从 `KeyKind::Named(String 构造)`
+  改 `matches!`——每键一次 String 分配移出管线。
+
+### 注释/格式纠偏（防未来误修）
+
+- `motions.rs` `GoToFilePercent` 旧注释称「percentage formula needs the
+  original count」——该变体按构造只承载 typed-1，公式从不看 count。
+- `cmdline.rs` `ex_join` 的错位缩进（历史遗留）；round21/回归新码对齐
+  rustfmt。刻意**不做**全仓 fmt：20+ 轮手排风格，全仓 churn 淹没 blame。
+
+### 检视中证伪、无需改的（免下轮重查）
+
+- **f/t 参数过映射表**：`f` 等待参数时 `:nmap x l` 的映射照常展开——
+  vim 同（`;` 被映射会破坏 `f;` 是 vim 社区常识），无需 no_remap。
+- **`&` 既有回归测试**（`ampersand_repeat_drops_substitute_flags` 等）
+  全部用无范围存储命令，范围剥离不触碰。
+- **显式 `"1dd` 不轮转数字环**（`store('1')` 直写）——vim 同。
+- **`increment_number_at_cursor` 的行内字节索引**：全部基于行切片相对
+  偏移，多字节行安全（`0b2`+C-a 这类 radix 歧义与 vim 内部判定同深，
+  已有注释钉住，未跟）。
+
+### 新增已知分歧（接全局序号）
+
+62. **`<S-Space>` 形映射仍死**：交付侧 shift+space 被规范化为普通空格
+    （`<S-1>` 键盘布局相关家族同款）。`<C-Space>`/`<M-Space>` 本轮已修。
+63. **非法正则的报错文案**：vim 传统引擎宽容更多语法（不闭合的 `[` 报
+    E486 且存储 pattern）；引擎（RE2）报 `Invalid pattern: …` 且不存储
+    （`&` 不重放坏命令）。
+
+### 性能备注
+
+- bench_probe 全量复跑：`w` 2.3µs/键（round21 记 5.9µs，含机器抖动）、
+  1MB 单行 `w` 103µs、hlsearch 重扫 0.25ms、`:%s` 5.4ms、`n` 3.7µs——
+  与 round18-21 基线持平或略优。本轮改动全在提示符/Ex 面，非每键热路径
+  （唯一热路径改动是 DOT_TEXT_MARKER 的去分配）。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十轮补记（2026-10-03，fuzz round20）
 
 `tests/fuzz_round20.rs`：命令行面（`:` `/` `?`）从「整串命名键」换成
