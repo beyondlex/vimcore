@@ -8,6 +8,7 @@
 mod common;
 
 use common::{edit, Fixture};
+use vimcore::buffer::VimBuffer;
 use vimcore::key::Key;
 
 // ---- gq format operator ------------------------------------------------------
@@ -1977,4 +1978,63 @@ fn insert_backspace_deletes_whole_cluster() {
     f.type_text("e\u{0301}");
     f.feed_raw(vimcore::key::Key::named("backspace"));
     assert_eq!(f.text(), "\n", "BS 应删除 e+mark 整簇");
+}
+
+// ---- round 25:字素簇 × 行边界(w 空白跳过 / GB4 硬边界 / Del) ------------------
+
+#[test]
+fn w_skips_continuation_chars_attached_to_blanks() {
+    // `w` 的空白跳过必须把延续字符并入所属空白簇(基字符是空格):
+    // round 24 修了 b(prev_word_start 的 is_cont 臂)但漏了正向的 w——
+    // 光标停在宽度 0 的 mark 上,违反「光标不停宽度 0 字符」不变量。
+    let f = edit("a \u{0301}bc", 0, 0, &["w"]);
+    assert_eq!(f.cursor(), 4, "w 应越过空格+mark 落在 b");
+    let f = edit("  \u{0301}abc", 0, 0, &["w"]);
+    assert_eq!(f.cursor(), 4, "缩进后的 mark 同样归属空白簇");
+    // "abc\ne \u{0301}fgh\nijk":mark 占 2 字节(6..8),f 簇起点在 8
+    let f = edit("abc\ne \u{0301}fgh\nijk", 0, 4, &["w"]);
+    assert_eq!(f.cursor(), 8, "跨行场景:w 落在 f 簇起点,不停在 mark");
+}
+
+#[test]
+fn standalone_mark_line_is_its_own_cluster() {
+    // \n 是硬字素边界(UAX #29 GB4):行首独立 mark 不与上一行的 \n 胶合。
+    // 旧 prev_grapheme_offset 把 mark 回溯进 \n,w 到缓冲尾后 clamp_cursor
+    // 把光标钳到上一行的换行符上,x 会删掉换行并线。
+    let f = edit("x\n\u{0301}", 0, 0, &["w"]);
+    assert_eq!(f.line(), 1, "w 应到达 mark 行");
+    assert_eq!(f.cursor(), 2, "落点是 mark 自身(独立簇,行首形态)");
+    assert_ne!(f.cursor(), f.buf.line_end(0), "不得停在上一行的换行符位置");
+
+    // $ 于独立 mark 行:落点收在行内(mark),不越过行边界
+    let f = edit("ab\n\u{0301}", 0, 3, &["$"]);
+    assert_eq!(f.line(), 1, "$ 不得跳到上一行");
+}
+
+#[test]
+fn last_grapheme_start_treats_newline_as_boundary() {
+    // prev_grapheme_offset 的 &str 镜像同规则:块插入会话的字节账本
+    // 依赖它与缓冲侧簇删除对齐。
+    assert_eq!(
+        vimcore::buffer::last_grapheme_start("x\n\u{0301}"),
+        Some(2),
+        "独立 mark 自成簇,起点在自身"
+    );
+    assert_eq!(
+        vimcore::buffer::last_grapheme_start("e\u{0301}"),
+        Some(0),
+        "常规组合字符簇起点不变"
+    );
+}
+
+#[test]
+fn insert_delete_removes_whole_cluster() {
+    // Del 与 BS 同款簇语义(delcombine=off):只删基字符会留下裸 mark,
+    // mark 转而复合到前一字符上。
+    let mut f = Fixture::new("");
+    f.feed(["i"]);
+    f.type_text("e\u{0301}x");
+    f.feed(["<Esc>", "0", "i"]);
+    f.feed_raw(vimcore::key::Key::named("delete"));
+    assert_eq!(f.text(), "x", "Del 应删除 e+mark 整簇");
 }

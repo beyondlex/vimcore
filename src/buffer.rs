@@ -252,7 +252,10 @@ pub fn offset_for_display_column(buf: &dyn VimBuffer, line: usize, col: usize) -
 
 /// Next grapheme boundary: trailing width-0 chars (combining marks,
 /// variation selectors) attach to the base char, and a ZWJ glues the next
-/// char into the same cluster (emoji families).
+/// char into the same cluster (emoji families). A width-0 char whose LEFT
+/// neighbor is `\n` is NOT glued — the newline is a hard boundary (UAX #29
+/// GB4) and the mark forms its own cluster (mirror of
+/// [`prev_grapheme_offset`]).
 pub fn next_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize> {
     let mut o = buf.next_char_offset(offset)?;
     while let Some(c) = buf.char_at(o) {
@@ -267,7 +270,11 @@ pub fn next_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
             };
             o = joined_end;
         } else if char_display_width(c) == 0 {
-            o += c.len_utf8();
+            // a mark right after a newline stands alone (GB4)
+            match buf.prev_char_offset(o) {
+                Some(p) if buf.char_at(p) == Some('\n') => break,
+                _ => o += c.len_utf8(),
+            }
         } else {
             break;
         }
@@ -304,11 +311,20 @@ pub fn last_grapheme_start(s: &str) -> Option<usize> {
     let mut start = 0usize;
     let mut o = 0usize;
     let mut prev_zwj = false;
+    let mut prev_char: Option<char> = None;
     for c in s.chars() {
         let at = o;
         o += c.len_utf8();
+        let prev = prev_char;
+        prev_char = Some(c);
         if c == '\u{200D}' || char_display_width(c) == 0 {
-            // continuation char: the cluster keeps its current start
+            // continuation char: the cluster keeps its current start — but a
+            // newline behind it is a hard boundary (GB4): the mark stands
+            // alone and starts its own cluster (mirror of
+            // [`prev_grapheme_offset`])
+            if prev == Some('\n') {
+                start = at;
+            }
             prev_zwj = c == '\u{200D}';
             continue;
         }
@@ -330,6 +346,14 @@ pub fn last_grapheme_start(s: &str) -> Option<usize> {
 /// char is a ZWJ is glued to the cluster behind it (emoji families:
 /// base-ZWJ-base-ZWJ-base resolves back to the first base).
 ///
+/// The backward walk STOPS at a `\n`: a newline is a hard grapheme boundary
+/// (UAX #29 GB4/GB5), so a width-0 char at a line start is its OWN cluster —
+/// gluing it onto the previous line's `\n` made [`clamp_cursor`] and
+/// `Motion::LineEnd` walk the cursor onto the PREVIOUS line's newline
+/// (`"x\n\u{0301}"` + `w` to the buffer end parked at the `\n`, where `x`
+/// joined the lines). Callers may still clamp to their own line with
+/// `.max(line_start)`, but the function itself now never crosses one.
+///
 /// Checking the char BEFORE `s` instead (the original implementation) missed
 /// trailing zero-width chars entirely: on `"e\u{0301}"` it returned the
 /// mark's own offset — parking the cursor mid-cluster after `<Esc>` at line
@@ -339,9 +363,11 @@ pub fn prev_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
     while let Some(c) = buf.char_at(s) {
         if c == '\u{200D}' || char_display_width(c) == 0 {
             // s sits on a continuation char: the cluster starts further left
+            // — unless that left neighbor is the newline (hard boundary):
+            // the mark stands alone and s IS the cluster start
             match buf.prev_char_offset(s) {
-                Some(p) => s = p,
-                None => break,
+                Some(p) if buf.char_at(p) != Some('\n') => s = p,
+                _ => break,
             }
             continue;
         }

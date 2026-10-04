@@ -116,10 +116,17 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
     // `is_whitespace` (NOT just ' '/'\t'): a U+3000 ideographic space is
     // Blank to `class_at` and to vim's `w`, and stopping on it would park
     // the cursor ON whitespace — the one place `w` never rests in vim.
+    //
+    // Continuation chars ride along with the blank they attach to: a mark
+    // reached here has a BLANK base (a word base would have ended the skip
+    // above — its class would differ), and resting on the mark parks the
+    // cursor on an invisible char where `x` splits the cluster. This is the
+    // forward mirror of `prev_word_start`'s `is_cont` arm (round 24 fixed
+    // `b` but missed `w`: `a \u{0301}bc` parked mid-cluster).
     loop {
         // skip spaces/tabs (any whitespace) on this line
         while let Some(c) = buf.char_at(o) {
-            if c.is_whitespace() && c != '\n' {
+            if (c.is_whitespace() && c != '\n') || is_cont(c) {
                 o += c.len_utf8();
             } else {
                 break;
