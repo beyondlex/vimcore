@@ -213,11 +213,26 @@ impl Key {
             // space IS a printable char: canonicalize to Char(' ') so a
             // `<Space>` mapping matches the character delivered by every
             // platform path (the engine normalizes Named("space") keystrokes
-            // the same way in handle_key)
-            "space" => Key::char(' '),
+            // the same way in handle_key). The MODIFIERS ride along: `<C-
+            // Space>` must stay a different key from `<Space>` (vim 9.1
+            // lists them as separate mappings) — dropping ctrl here made a
+            // `<C-Space>` mapping fire on every PLAIN space press.
+            "space" => Key {
+                modifiers,
+                kind: KeyKind::Char(' '),
+            },
             "tab" => Key::named("tab"),
-            "lt" => Key::char('<'),
-            "bar" => Key::char('|'),
+            // same modifier rule for the two spellings that map to printable
+            // chars (`<C-lt>`/`<M-bar>` are exotic, but losing the modifier
+            // would alias them onto the plain `<`/`|` keys)
+            "lt" => Key {
+                modifiers,
+                kind: KeyKind::Char('<'),
+            },
+            "bar" => Key {
+                modifiers,
+                kind: KeyKind::Char('|'),
+            },
             _ if rest.chars().count() == 1 => {
                 let c = rest.chars().next().unwrap();
                 // `<S-a>` spells the printable char 'A' (vim's notation rule).
