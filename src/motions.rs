@@ -300,8 +300,10 @@ impl Motion {
                     match buf.char_at(prev) {
                         // width-0 chars (combining marks) are not landing
                         // spots: they attach to the base before them, and a
-                        // cursor parked there would let `x` split the cluster
-                        Some(c) if c != ' ' && c != '\t' && crate::buffer::char_display_width(c) > 0 => {
+                        // cursor parked there would let `x` split the cluster.
+                        // Blank check is is_whitespace (U+3000 trailing pad
+                        // is blank to vim's g_ too)
+                        Some(c) if !c.is_whitespace() && crate::buffer::char_display_width(c) > 0 => {
                             o = prev;
                             break;
                         }
