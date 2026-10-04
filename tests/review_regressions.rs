@@ -1941,3 +1941,40 @@ fn g_ignores_ideographic_space_tail() {
     let f = edit("ab\u{3000}\n", 0, 0, &["g", "_"]);
     assert_eq!(f.cursor(), 1, "g_ 应落在 b");
 }
+
+// ---- 第二十四轮:f/t/F/T 的 till 停点簇感知 --------------------------------------
+
+#[test]
+fn till_stops_never_park_on_combining_mark() {
+    // 行 "áx"(a + U+0301 + x):`tx` 的停点是 mark 所属簇的起点 'a'(0),
+    // 旧实现落在 mark 上(offset 1,簇中间)
+    let f = edit("a\u{0301}x\n", 0, 0, &["t", "x"]);
+    assert_eq!(f.cursor(), 0, "tx 应停在簇起点 a");
+    // 反向:`Fa` 从 x? 此行无左侧 a——用 "xá" 测 Ta 的对称分支
+    let f = edit("xa\u{0301}b\n", 0, 4, &["F", "a"]);
+    assert_eq!(f.cursor(), 1, "Fa 落在 a(簇起点)");
+    // `ta` 的停点是 hit 前一个簇(á)的起点=光标原地(视觉上同一复合字符;
+    // 字节级 vim 也会落进组合字符内——引擎钳到簇起点)
+    let f = edit("xa\u{0301}b\n", 0, 1, &["t", "b"]);
+    assert_eq!(f.cursor(), 1, "ta 停点 = hit 前一簇的起点(原地)");
+}
+
+#[test]
+fn paste_lands_on_last_cluster_start() {
+    // yank 一个含组合字符的词后 p:光标落在最后一个簇的起点
+    let mut f = Fixture::new("a\u{0301}b\n");
+    f.feed(["y", "l"]); // yank "á"
+    f.feed(["$", "p"]);
+    assert_eq!(f.text(), "a\u{0301}ba\u{0301}\n");
+    assert_eq!(f.cursor(), 4, "p 后光标应落在粘贴文本最后簇的起点(第二个 á)");
+}
+
+#[test]
+fn insert_backspace_deletes_whole_cluster() {
+    // IME 落地 "e"+U+0301 后 BS:删除整簇(vim delcombine=off 默认)
+    let mut f = Fixture::new("\n");
+    f.feed(["i"]);
+    f.type_text("e\u{0301}");
+    f.feed_raw(vimcore::key::Key::named("backspace"));
+    assert_eq!(f.text(), "\n", "BS 应删除 e+mark 整簇");
+}
