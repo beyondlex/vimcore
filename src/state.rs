@@ -1828,7 +1828,16 @@ impl VimState {
             .line_start(ctx.buf.offset_to_line(self.cursor.offset));
         if self.cursor.offset > line_start {
             if let Some(prev) = crate::buffer::prev_grapheme_offset(ctx.buf, self.cursor.offset) {
-                self.cursor.offset = prev.max(line_start);
+                let candidate = prev.max(line_start);
+                // never park ON the line terminator: a host whose line model
+                // collapses the buffer's trailing newline reports the
+                // post-`o` cursor (at the phantom line's start == buffer end)
+                // as "past line N" — the step-back then landed on that
+                // line's `\n`, where the next `x` joined the lines
+                // (fuzz round 25: `ddo<Esc>` on "ab\n\u{0301}")
+                if ctx.buf.char_at(candidate) != Some('\n') {
+                    self.cursor.offset = candidate;
+                }
             }
         }
         self.marks.last_insert_exit = Some(self.cursor.offset);
