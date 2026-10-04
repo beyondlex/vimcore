@@ -2080,3 +2080,14 @@ fn sentence_object_on_multibyte_cursor_char() {
     f.feed(["d", "i", "s"]);
     assert_eq!(f.text(), "Hi. ", "dis 应删除光标所在句");
 }
+
+#[test]
+fn marks_listing_shows_both_visual_ends() {
+    // vim 的 :marks 同时列出 '< 与 '>（引擎曾只列 '<）
+    let mut f = Fixture::new("alpha\nbeta\n");
+    f.feed(["V", "j", "d"]);
+    f.feed([":", "m", "a", "r", "k", "s", "<CR>"]);
+    let joined = f.host.statuses.join("\n");
+    assert!(joined.contains("\n<  line") || joined.starts_with("<  line"), "应列出 '<\n{joined}");
+    assert!(joined.contains("\n>  line") || joined.contains(">  line"), "应列出 '>\n{joined}");
+}

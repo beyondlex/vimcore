@@ -627,8 +627,10 @@ impl VimState {
                             .status_message(&Self::mark_line(ctx.buf, '^', offset));
                     }
                 }
-                if let Some((lo, _, _)) = self.marks.last_visual {
+                if let Some((lo, hi, _)) = self.marks.last_visual {
+                    // vim lists both ends of the last visual selection
                     ctx.host.status_message(&Self::mark_line(ctx.buf, '<', lo));
+                    ctx.host.status_message(&Self::mark_line(ctx.buf, '>', hi.saturating_sub(1)));
                 }
                 if let Some(offset) = self.marks.last_jump {
                     ctx.host
