@@ -1620,3 +1620,40 @@ fn sort_rejects_trailing_count_like_vim() {
     g.feed_raw(Key::enter());
     assert_eq!(g.text(), "a\nb\nc");
 }
+
+#[test]
+fn unknown_set_option_reports_e518() {
+    // vim 9.1: `:set foo` → "E518: Unknown option: foo"，其后项不再执行
+    let mut f = Fixture::new("a\n");
+    f.feed([":"]);
+    for c in "set foo ts=8".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert!(
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s.contains("E518: Unknown option: foo")),
+        "statuses = {:?}",
+        f.host.statuses
+    );
+    assert_eq!(f.vim.options.tabstop, 4, "E518 之后的项不再执行");
+}
+
+#[test]
+fn invalid_substitute_pattern_reports_compile_error() {
+    // RE2 方言拒绝的 pattern 不再哑铃——发布编译错误文本（vim 的传统
+    // 引擎宽容 `[` 不闭合并报 E486，属文档化方言分歧）
+    let mut f = Fixture::new("a\n");
+    f.feed([":"]);
+    for c in "s/[/x/".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert!(f.host.statuses.iter().any(|s| s.contains("Invalid pattern")),
+        "statuses = {:?}", f.host.statuses);
+    // 未编译成功不得写入 last_substitute（& 不得重放坏命令）
+    f.feed(["&"]);
+    assert_eq!(f.text(), "a\n");
+}

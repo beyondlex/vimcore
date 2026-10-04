@@ -1576,6 +1576,10 @@ impl VimState {
                 self.options.set_boolean(arg, true)
             };
             if !ok {
+                // vim's message channel, not a bare bell (9.1: `:set foo` →
+                // "E518: Unknown option: foo" and nothing after it runs)
+                ctx.host
+                    .status_message(&format!("E518: Unknown option: {arg}"));
                 ctx.host.bell();
                 return;
             }
@@ -1794,6 +1798,11 @@ impl VimState {
             builder.case_insensitive(false);
         }
         let Ok(re) = builder.build() else {
+            // the pattern never compiled — "not found" would lie (vim's
+            // legacy regex accepts `[` unclosed and reports E486 instead;
+            // the RE2 dialect here reports the compile error itself)
+            ctx.host
+                .status_message(&format!("Invalid pattern: {pattern}"));
             ctx.host.bell();
             return true;
         };
