@@ -773,11 +773,13 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
             at = ctx.buf.next_char_offset(at).unwrap_or(at);
         }
         vim.edit_insert(ctx, at, &repeated);
-        // block cursor sits on the last pasted character: step back to the
-        // START of the last char — `end - 1` is byte arithmetic and would
-        // park the cursor inside a multi-byte character
+        // block cursor sits on the last pasted GRAPHEME start — `end - 1`
+        // byte arithmetic parks mid-char on multibyte tails, and
+        // prev_char_offset parks mid-cluster when the paste ends with a
+        // combining mark / ZWJ member (the next `x` would split it)
         let end = at + repeated.len();
-        vim.cursor.offset = clamp_cursor(ctx.buf, ctx.buf.prev_char_offset(end).unwrap_or(at));
+        vim.cursor.offset =
+            clamp_cursor(ctx.buf, crate::buffer::prev_grapheme_offset(ctx.buf, end).unwrap_or(at));
     }
     vim.cursor.desired_col = None;
 }
