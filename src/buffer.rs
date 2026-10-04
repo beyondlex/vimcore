@@ -128,8 +128,19 @@ pub fn clamp_to_line_end(buf: &dyn VimBuffer, offset: usize) -> usize {
 /// Floor `offset` to the nearest char boundary at or below it. Equal-length
 /// replacements can move inner byte boundaries, leaving stored offsets
 /// (marks, changelist, jumplist) pointing mid-character.
+///
+/// `offset == buf.len()` is always a boundary (the buffer end) and returns
+/// unchanged — `char_at(len)` is `None` only because no char STARTS there,
+/// not because the offset is mid-char. Flooring it to the last char's start
+/// silently SHRANK host-supplied replace ranges that end at the buffer end
+/// (`replace_range(5..7, …)` on a 7-byte buffer edited only 5..6, leaving
+/// the last char behind — the IME commit-at-EOF corruption this guard
+/// fixed).
 pub fn floor_to_char_boundary(buf: &dyn VimBuffer, offset: usize) -> usize {
     let mut offset = offset.min(buf.len());
+    if offset == buf.len() {
+        return offset;
+    }
     while offset > 0 && buf.char_at(offset).is_none() {
         offset -= 1;
     }
