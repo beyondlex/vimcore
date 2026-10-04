@@ -261,10 +261,20 @@ pub fn next_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
     while let Some(c) = buf.char_at(o) {
         if c == '\u{200D}' {
             // skip the ZWJ *and* the character it joins, then keep scanning:
-            // a family emoji is base-ZWJ-base-ZWJ-base
+            // a family emoji is base-ZWJ-base-ZWJ-base. A newline is a hard
+            // boundary on BOTH sides (UAX #29 GB4/GB5 outrank the ZWJ rules):
+            // a ZWJ at a line start stands alone, and "…base ZWJ \n" ends
+            // the cluster at the ZWJ (the joined char must not be the `\n`)
+            if buf.prev_char_offset(o).and_then(|p| buf.char_at(p)) == Some('\n') {
+                break;
+            }
             let Some(after) = buf.next_char_offset(o) else {
                 break;
             };
+            if buf.char_at(after) == Some('\n') {
+                o = after;
+                break;
+            }
             let Some(joined_end) = buf.next_char_offset(after) else {
                 break;
             };
@@ -328,8 +338,10 @@ pub fn last_grapheme_start(s: &str) -> Option<usize> {
             prev_zwj = c == '\u{200D}';
             continue;
         }
-        // a starter glued by a preceding ZWJ belongs to the cluster behind
-        if !prev_zwj {
+        // a starter glued by a preceding ZWJ belongs to the cluster behind —
+        // a newline is never glued (GB4/GB5, mirror of
+        // [`prev_grapheme_offset`])
+        if !prev_zwj || c == '\n' {
             start = at;
         }
         prev_zwj = false;
@@ -372,9 +384,11 @@ pub fn prev_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
             continue;
         }
         // s is a starter; a ZWJ immediately before it glues it to the
-        // cluster behind (mirror of the forward ZWJ handling)
+        // cluster behind (mirror of the forward ZWJ handling) — but a
+        // newline is never glued (GB4/GB5: the hard boundary outranks the
+        // ZWJ join)
         match buf.prev_char_offset(s) {
-            Some(p) if buf.char_at(p) == Some('\u{200D}') => s = p,
+            Some(p) if c != '\n' && buf.char_at(p) == Some('\u{200D}') => s = p,
             _ => break,
         }
     }

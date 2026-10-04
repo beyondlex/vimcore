@@ -2038,3 +2038,34 @@ fn insert_delete_removes_whole_cluster() {
     f.feed_raw(vimcore::key::Key::named("delete"));
     assert_eq!(f.text(), "x", "Del 应删除 e+mark 整簇");
 }
+#[test]
+fn r_multibyte_on_zwj_line_end_does_not_panic() {
+    // ZWJ 曾把行尾的 \n 胶合进簇:base(b) 的簇跨过换行,advance_graphemes
+    // 消费 0 簇,replaced==0 时 `start + 0 - ch.len_utf8()` usize 下溢
+    // (debug panic)。GB4/GB5 修复后 ZWJ 不跨行;空替换守卫兜底。
+    let mut f = Fixture::new("ab\u{200D}\ncd");
+    f.vim.cursor.offset = 1; // 'b'
+    f.feed(["r", "中"]);
+    // b+ZWJ 本就是一个簇(ZWJ 附着于前一字符),整体替换成 中;\n 不入簇
+    assert_eq!(f.text(), "a中\ncd", "r中 替换 b+ZWJ 簇,不吞换行");
+    assert_eq!(f.cursor(), 1, "光标落在替换后的簇起点");
+}
+
+#[test]
+fn zwj_clusters_never_span_newlines() {
+    // next_grapheme_offset:x+ZWJ 簇在 \n 前收束(ZWJ 不吞 \n;
+    // ZWJ 占 3 字节,簇终点 = \n 的偏移 4)
+    let f = Fixture::new("x\u{200D}\ncd");
+    assert_eq!(
+        vimcore::buffer::next_grapheme_offset(&f.buf, 0),
+        Some(4),
+        "x+ZWJ 簇止于 \n"
+    );
+    // 行首独立 ZWJ 不与 \n 胶合(修复前 prev 会回溯进上一行的 \n)
+    let g = Fixture::new("ab\n\u{200D}c");
+    assert_eq!(
+        vimcore::buffer::prev_grapheme_offset(&g.buf, 7),
+        Some(3),
+        "行首 ZWJ 自成簇"
+    );
+}
