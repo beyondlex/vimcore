@@ -1226,26 +1226,26 @@ impl VimState {
         // first line before the call (the landing below overwrites it)
         self.cursor.offset = ctx.buf.line_start(first);
         let gen = self.edit_generation;
-            self.begin_edit();
-            crate::ops::join_lines(self, ctx, joins + 1, bang);
-            self.end_edit();
-            // a range ending at the buffer's last line has no seam to join —
-            // a no-op must not feed the changelist / `.` mark (same no-op
-            // discipline as the normal-mode operators). The cursor still
-            // lands on the range's address line at its FIRST NON-BLANK, the
-            // same parking as the empty-command `:5` (9.1 probe: `:1j` at
-            // EOF on "    abc" then `x` deletes the 'a') — the raw line
-            // start dropped the indentation landing.
-            if self.edit_generation != gen {
-                self.cursor.offset = ctx.buf.first_non_blank(first);
-                self.cursor.desired_col = None;
-                self.bump(ctx);
-                ctx.host.changed();
-            } else {
-                self.cursor.offset = ctx.buf.first_non_blank(first);
-                self.cursor.desired_col = None;
-                ctx.host.scroll_to_line(first);
-            }
+        self.begin_edit();
+        crate::ops::join_lines(self, ctx, joins + 1, bang);
+        self.end_edit();
+        // a range ending at the buffer's last line has no seam to join —
+        // a no-op must not feed the changelist / `.` mark (same no-op
+        // discipline as the normal-mode operators). The cursor still
+        // lands on the range's address line at its FIRST NON-BLANK, the
+        // same parking as the empty-command `:5` (9.1 probe: `:1j` at
+        // EOF on "    abc" then `x` deletes the 'a') — the raw line
+        // start dropped the indentation landing.
+        if self.edit_generation != gen {
+            self.cursor.offset = ctx.buf.first_non_blank(first);
+            self.cursor.desired_col = None;
+            self.bump(ctx);
+            ctx.host.changed();
+        } else {
+            self.cursor.offset = ctx.buf.first_non_blank(first);
+            self.cursor.desired_col = None;
+            ctx.host.scroll_to_line(first);
+        }
         self.commit_change_record();
     }
 
@@ -1255,7 +1255,13 @@ impl VimState {
     /// takes NO count — vim refuses the whole command with E488 when a
     /// digit appears in the arguments (9.1 probe: `:1,3sort 3` leaves the
     /// buffer untouched), while the engine used to silently sort anyway.
-    fn ex_sort(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), flags: &str, line_text: &str) {
+    fn ex_sort(
+        &mut self,
+        ctx: &mut Ctx,
+        (first, last): (usize, usize),
+        flags: &str,
+        line_text: &str,
+    ) {
         if flags.chars().any(|c| c.is_ascii_digit()) {
             Self::report_trailing(ctx, flags, line_text);
             return;
