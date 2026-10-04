@@ -815,6 +815,13 @@ impl VimState {
     /// `&` and bare `:s` repeat the last substitute WITHOUT its flags (vim
     /// 9.1 probe: after `s/a/B/g`, both on "xaxax" replace only the first
     /// match — the `g` is dropped; `:h :&` calls this out explicitly).
+    /// The STORED RANGE is dropped too: vim's `&` defaults to the CURRENT
+    /// line — `:1s/a/B/` + `+` + `&` substituted on line 2, not on the
+    /// stored line 1 (9.1 probe); a range typed on the REPEAT itself
+    /// (`:3,4s<CR>`) still applies through the range parameter. The stored
+    /// range used to ride along, so `&` re-ran absolute line numbers (and
+    /// a bare `:s` after a ranged store fell through to E492 — the `s`
+    /// prefix strip never saw past "1,2").
     /// Rebuild `s{sep}pat{sep}rep{sep}` from the stored command line,
     /// leaving a missing-replacement form (`s/pat`) as-is.
     ///
@@ -825,18 +832,40 @@ impl VimState {
     /// replacement survive; anything after the third field is dropped along
     /// with the flags.
     fn substitute_without_flags(cmd: &str) -> String {
-        let Some(after_s) = cmd.strip_prefix('s') else {
-            return cmd.to_owned();
+        // drop a leading [range] the same way parse_range's scanner reads
+        // one: digits, . $ % , ; + - space and `'x` mark specs
+        let stripped = {
+            let mut end = 0usize;
+            let mut i = 0usize;
+            while i < cmd.len() {
+                let c = cmd[i..].chars().next().unwrap();
+                if c == '\'' {
+                    i += 1 + cmd[i + 1..].chars().next().map_or(0, char::len_utf8);
+                    end = i.min(cmd.len());
+                    continue;
+                }
+                if c.is_ascii_digit() || matches!(c, '.' | '$' | '%' | ',' | ';' | '+' | '-' | ' ')
+                {
+                    i += 1;
+                    end = i;
+                    continue;
+                }
+                break;
+            }
+            &cmd[end..]
+        };
+        let Some(after_s) = stripped.strip_prefix('s') else {
+            return stripped.to_owned();
         };
         let Some(sep) = after_s.chars().next() else {
-            return cmd.to_owned();
+            return stripped.to_owned();
         };
         if sep.is_alphanumeric() {
-            return cmd.to_owned();
+            return stripped.to_owned();
         }
         let fields = Self::split_escaped_fields(&after_s[sep.len_utf8()..], sep);
         match fields.as_slice() {
-            [] => cmd.to_owned(),
+            [] => stripped.to_owned(),
             [pattern] => format!("s{sep}{pattern}"),
             [pattern, rep] => format!("s{sep}{pattern}{sep}{rep}{sep}"),
             [pattern, rep, ..] => format!("s{sep}{pattern}{sep}{rep}{sep}"),
@@ -1831,9 +1860,19 @@ impl VimState {
         search::set_pattern(self, ctx, pattern.clone(), true);
         // cursor BEFORE the bump: the changelist / `.` mark must record the
         // LAST SUBSTITUTED line (vim probe: `:4s` then g; lands on line 4),
-        // not wherever the cursor happened to sit before the command
+        // not wherever the cursor happened to sit before the command. A
+        // splitting replacement (`\r`) shifts the substituted line DOWN by
+        // the newlines inserted above/inside it — vim parks on the
+        // substituted line's POST-SPLIT position (9.1: `%s/a/\r/` on
+        // "aaa\nbbb" → cursor line 2 of ["", "aa", "bbb"], `%s/a/\r/g` →
+        // line 4 of ["","","","","bbb"]).
         if let Some(line_no) = last_sub_line {
-            let line = line_no.min(ctx.buf.line_count() - 1);
+            let slot = line_no - first_line;
+            let splits: usize = joined[..=slot]
+                .iter()
+                .map(|s| s.matches('\n').count())
+                .sum();
+            let line = (line_no + splits).min(ctx.buf.line_count() - 1);
             self.cursor.offset =
                 crate::buffer::clamp_to_line_end(ctx.buf, ctx.buf.first_non_blank(line));
             self.cursor.desired_col = None;

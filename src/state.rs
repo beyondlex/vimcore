@@ -4008,11 +4008,12 @@ impl VimState {
                 ctx.host.scroll_lines(delta);
                 ctx.host.scroll_to_line(line);
             }
-            // &: repeat the last :s on the current line (the stored command
-            // line re-runs through the full Ex parser, so ranges inside it
-            // behave as typed — vim repeats them relative to the cursor).
-            // Flags are dropped on this replay (`&` has none of its own,
-            // vim 9.1), like the bare `:s` repeat.
+            // &: repeat the last :s on the current line — the STORED range
+            // is dropped (vim 9.1 probe: `:1s/a/B/` + `+` + `&` substituted
+            // on line 2, not the stored line 1) and so are the flags (`&`
+            // has none of its own). substitute_without_flags does both
+            // strips; a range typed on the replay itself (`:3,4&` is not
+            // routed here — only the bare `&` key) does not exist.
             NormalCmd::RepeatSubstitute => match self.cmdline.last_substitute.clone() {
                 Some(last) => {
                     let last = Self::strip_substitute_flags_for_repeat(&last);
