@@ -157,7 +157,8 @@ pub fn jump_to_match(
     } else {
         (start_index as u64 + len - steps) as usize % len as usize
     };
-    Some(matches.get(index % matches.len())?.start)
+    // `index` is already in bounds (both branches take it modulo `len`)
+    Some(matches[index].start)
 }
 
 /// `*` / `#`: search for the text at the cursor. Vim's fallback chain

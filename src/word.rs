@@ -239,7 +239,7 @@ pub fn find_char_forward(
     while o < end {
         if buf.char_at(o) == Some(target) {
             if till {
-                return match buf.prev_char_offset(o) {
+                return match crate::buffer::prev_grapheme_offset(buf, o) {
                     Some(prev) if prev >= line_start => Some(prev),
                     // hit is the first char of the line: no room to stop
                     _ => None,
@@ -269,9 +269,11 @@ pub fn find_char_backward(
         o = prev;
         if buf.char_at(o) == Some(target) {
             if till {
-                return match buf.next_char_offset(o) {
+                return match crate::buffer::next_grapheme_offset(buf, o) {
                     // the stop char must be ON the line (hit can't be the
-                    // last content char — there'd be nothing to stop on)
+                    // last content char — there'd be nothing to stop on);
+                    // grapheme-aware: the stop never lands on a trailing
+                    // combining mark of the hit's own cluster
                     Some(next) if next < line_end => Some(next),
                     _ => None,
                 };

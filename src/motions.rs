@@ -717,10 +717,12 @@ impl Motion {
                 o = h;
             }
             if till {
+                // grapheme-aware stop: prev/next CHAR would park on a
+                // combining mark adjacent to the hit (mid-cluster)
                 let stop = if forward {
-                    buf.prev_char_offset(hit)
+                    crate::buffer::prev_grapheme_offset(buf, hit)
                 } else {
-                    buf.next_char_offset(hit)
+                    crate::buffer::next_grapheme_offset(buf, hit)
                 };
                 // the stop char must sit ON the hit's line (same rule as
                 // find_char_forward/backward's till branch)
@@ -756,10 +758,11 @@ impl Motion {
         if till {
             // the stop the loop parked on sits one char from the matched
             // target — record it so operator spans reach the target
+            // (grapheme-aware, as in the fresh path above)
             let target_offset = if forward {
-                buf.next_char_offset(o)
+                crate::buffer::next_grapheme_offset(buf, o)
             } else {
-                buf.prev_char_offset(o)
+                crate::buffer::prev_grapheme_offset(buf, o)
             };
             return match target_offset {
                 Some(t) => MotionResult::till(o, t),
