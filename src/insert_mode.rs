@@ -63,16 +63,21 @@ impl VimState {
                     }
                     "delete" => {
                         let at = self.cursor.offset;
-                        if let Some(c) = ctx.buf.char_at(at) {
+                        // delete the whole GRAPHEME cluster ahead (the twin of
+                        // the BS path's cluster rule, vim delcombine=off: a
+                        // single-char delete on `e\u{0301}` left the bare mark
+                        // behind, re-attaching it to the previous char)
+                        if let Some(end) = crate::buffer::next_grapheme_offset(ctx.buf, at) {
+                            let c = ctx.buf.char_at(at);
                             // deleting the newline would merge the typing row
                             // into its neighbor — same corruption as a
                             // vertical move (block session invariants)
-                            if c == '\n' && self.in_block_insert() {
+                            if c == Some('\n') && self.in_block_insert() {
                                 ctx.host.bell();
                                 return ProcessOutcome::Consumed;
                             }
                             self.begin_edit();
-                            self.edit_delete(ctx, at..at + c.len_utf8());
+                            self.edit_delete(ctx, at..end);
                             // every other edit path republishes the hlsearch
                             // scan; skipping it here left `last_matches`
                             // pointing mid-character (fuzz round 10) — the
