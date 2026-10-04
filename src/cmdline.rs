@@ -256,7 +256,12 @@ impl VimState {
     fn jump_to_current_match(&mut self, ctx: &mut Ctx, forward: bool, count: usize) {
         if let Some(offset) = search::jump_to_match(self, ctx.buf, forward, count) {
             let origin = self.cursor.offset;
-            self.cursor.offset = offset;
+            // clamp_cursor, not the raw match start: a zero-width pattern
+            // (`2/|<CR>` — "|" alternates two empty branches and matches
+            // between every byte) lands the cursor on a width-0 continuation
+            // char when a cluster straddles the match position (fuzz
+            // round 25)
+            self.cursor.offset = clamp_cursor(ctx.buf, offset);
             self.cursor.desired_col = None;
             self.record_jump(origin, offset);
             // publish with the current match marked (respecting `hlsearch`).

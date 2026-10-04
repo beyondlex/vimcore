@@ -4016,10 +4016,16 @@ impl VimState {
                         lo.min(ctx.buf.len()),
                     ));
                     // hi is the exclusive end; floor(hi-1) is the START of
-                    // the last covered char, boundary-safe for multi-byte
-                    self.cursor.offset =
+                    // the last covered char, boundary-safe for multi-byte.
+                    // clamp_cursor on top: the text may have SHRUNK under the
+                    // stored range — a stale hi then points at/past a line
+                    // terminator, and Esc from the restored selection left a
+                    // normal-mode cursor parked on the `\n` (fuzz round 25)
+                    self.cursor.offset = crate::buffer::clamp_cursor(
+                        ctx.buf,
                         crate::buffer::floor_to_char_boundary(ctx.buf, hi.saturating_sub(1))
-                            .min(ctx.buf.len());
+                            .min(ctx.buf.len()),
+                    );
                     self.mode = Mode::Visual { kind };
                 }
             }
