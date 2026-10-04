@@ -80,13 +80,35 @@ pub trait VimBuffer {
     /// instead (vim 9.1: `^` on `"   "` sits on col 3), never on the newline:
     /// a cursor on the `\n` would make later `dw`/`diw` swallow the line
     /// break. An empty line keeps its start.
+    ///
+    /// A width-0 char at the landing spot (a leading combining mark —
+    /// `"\u{0301}abc"`, or a mark trailing the indent) is skipped: it is a
+    /// cluster continuation, invisible, and parking there would let `x`
+    /// split the cluster. The first VISIBLE non-blank char is the target.
     fn first_non_blank(&self, line: usize) -> usize {
         let start = self.line_start(line);
         let (indent, _) = self.line_indent(line);
         let end = self.line_end(line);
-        let at = (start + indent).min(end);
+        let mut at = (start + indent).min(end);
+        while at < end && self.char_at(at).is_some_and(|c| c == '\u{200D}' || char_display_width(c) == 0) {
+            at += self.char_at(at).map_or(1, |c| c.len_utf8());
+        }
         if at == end && end > start && self.char_at(end) == Some('\n') {
-            return self.prev_char_offset(end).unwrap_or(start);
+            // whitespace-only line: park on the last VISIBLE char — walk
+            // back off any trailing continuation run first (a line of
+            // spaces + a combining mark ends in a mark; parking there
+            // would put the cursor mid-cluster)
+            let mut p = end;
+            while let Some(prev) = self.prev_char_offset(p) {
+                if prev < start {
+                    break;
+                }
+                match self.char_at(prev) {
+                    Some(c) if c == '\u{200D}' || char_display_width(c) == 0 => p = prev,
+                    _ => break,
+                }
+            }
+            return self.prev_char_offset(p).unwrap_or(start).max(start);
         }
         at
     }
@@ -253,6 +275,24 @@ pub fn next_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize>
     Some(o)
 }
 
+/// Number of grapheme clusters in `range` — clusters, not chars: a base
+/// plus its combining marks is ONE unit (vim's visual `r` fills composed
+/// characters, so `#`+VS16 takes one replacement char, not two).
+pub fn grapheme_count(buf: &dyn VimBuffer, range: Range<usize>) -> usize {
+    let mut n = 0usize;
+    let mut o = range.start;
+    while o < range.end {
+        match next_grapheme_offset(buf, o) {
+            Some(next) if next <= range.end => {
+                n += 1;
+                o = next;
+            }
+            _ => break,
+        }
+    }
+    n
+}
+
 /// Start of the last grapheme cluster in `s` (`None` when empty) — the
 /// `&str` mirror of [`prev_grapheme_offset`], for byte records kept outside
 /// a buffer (the block-insert session's typed text) that must shrink by the
@@ -296,8 +336,7 @@ pub fn last_grapheme_start(s: &str) -> Option<usize> {
 /// end, where `x` then split the cluster (deleting only the mark).
 pub fn prev_grapheme_offset(buf: &dyn VimBuffer, offset: usize) -> Option<usize> {
     let mut s = buf.prev_char_offset(offset)?;
-    loop {
-        let Some(c) = buf.char_at(s) else { break };
+    while let Some(c) = buf.char_at(s) {
         if c == '\u{200D}' || char_display_width(c) == 0 {
             // s sits on a continuation char: the cluster starts further left
             match buf.prev_char_offset(s) {

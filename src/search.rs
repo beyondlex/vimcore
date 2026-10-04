@@ -175,11 +175,17 @@ pub fn search_word_under_cursor(
     forward: bool,
 ) -> bool {
     let offset = vim.cursor.offset;
-    // not on a word char: scan forward to the next NON-BLANK within this line
+    // not on a word char: scan forward to the next NON-BLANK within this
+    // line. Continuation chars (combining marks) count as blank here —
+    // they are invisible cluster tails (glued to the blank behind them on
+    // a whitespace-only line) and searching for one parks the cursor
+    // mid-cluster
     let offset = if !matches!(buf.char_at(offset), Some(c) if is_word_char(c)) {
         let line_end = buf.line_end(buf.offset_to_line(offset));
         let mut o = offset;
-        while o < line_end && matches!(buf.char_at(o), Some(c) if c.is_whitespace()) {
+        while o < line_end
+            && matches!(buf.char_at(o), Some(c) if c.is_whitespace() || c == '\u{200D}' || crate::buffer::char_display_width(c) == 0)
+        {
             o += buf.char_at(o).map(|c| c.len_utf8()).unwrap_or(1);
         }
         o
