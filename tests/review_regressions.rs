@@ -1486,3 +1486,137 @@ fn macro_records_and_replays_search_motion() {
     f.feed(["@", "b"]);
     assert_eq!(f.text(), "bar yy\n");
 }
+
+// ---- round 22（2026-10-04）：映射键形、提示符 count 溢出、:s 替换转义、:sort E488 ----
+
+#[test]
+fn c_space_mapping_keeps_its_modifier() {
+    // parse_angle 的 "space" 分支曾无条件返回 Key::char(' ')：`<C-Space>`
+    // 的映射被存成普通空格——按空格就会触发它（vim 9.1 :nmap 列表里
+    // <C-Space> 与 <Space> 是两个键）。修饰键必须随形。
+    assert_ne!(
+        Key::parse("<C-Space>"),
+        Key::parse("<Space>"),
+        "<C-Space> must not alias plain Space"
+    );
+    assert_eq!(Key::parse("<C-Space>").modifiers.control, true);
+    // 行为面：映射 <C-Space> → ix，普通空格走 l motion
+    let mut f = Fixture::new("foo bar");
+    f.vim
+        .keymaps_mut()
+        .map_str(vimcore::keymap::ModeClass::Normal, "<C-Space>", "ix");
+    f.feed([" "]);
+    assert_eq!(f.vim.mode(), vimcore::mode::Mode::Normal);
+    assert_eq!(f.cursor(), 1);
+    // 修饰形态本身仍然触发映射
+    f.feed_raw(Key {
+        modifiers: vimcore::key::Modifiers::ctrl(),
+        kind: vimcore::key::KeyKind::Char(' '),
+    });
+    assert_eq!(f.vim.mode(), vimcore::mode::Mode::Insert);
+}
+
+#[test]
+fn lt_and_bar_spellings_keep_modifiers_too() {
+    // 同一丢修饰键家族：<lt>/<bar> 分支
+    assert_ne!(Key::parse("<C-lt>"), Key::parse("<"));
+    assert_ne!(Key::parse("<M-bar>"), Key::parse("|"));
+}
+
+#[test]
+fn named_ctrl_chord_equals_char_ctrl_chord() {
+    // Key::ctrl("w") 与 Key::ctrl_char('w') 是同一次击键的两种宿主拼法，
+    // 但 insert 模式只认 Char 形——Named 形静默 Unknown（键被吞、什么都不删）。
+    // handle_key 现在把单字符 Named 键折叠为 Char。
+    let mut named = Fixture::at("aaaa\nbbbb", 1, 4);
+    named.feed_raw(Key::named("x").clone()); // noop warmup, keep harness shape
+    let mut f = Fixture::at("aaaa\nbbbb", 1, 4);
+    f.feed_raw(Key::ctrl("i")); // Named + ctrl
+    f.feed(["e", "s", "c"]);
+    let mut g = Fixture::at("aaaa\nbbbb", 1, 4);
+    g.feed_raw(Key::ctrl_char('i')); // Char + ctrl（parse 所产形态）
+    g.feed(["e", "s", "c"]);
+    assert_eq!(f.text(), g.text(), "两种 ctrl 拼法必须等价");
+    // 正向验证：<C-w> 在 insert 模式删掉前一个词
+    let mut h = Fixture::at("aaaa\nbbbb", 1, 4);
+    h.feed(["i"]);
+    h.feed_raw(Key::ctrl("w"));
+    assert_eq!(h.text(), "aaaa\n");
+}
+
+#[test]
+fn huge_prompt_count_does_not_overflow_search_jump() {
+    // 提示符前的 count（`3/foo`）走 search_count，绕过了 take_total_count
+    // 的十亿封顶；20 个 9 后 /pat<CR> 曾在 jump_to_match 的 u64 加法上
+    // 溢出——debug 构建直接 panic（release 静默错跳）。步数先按匹配数
+    // 取模，和式永不离开 u64。
+    let mut f = Fixture::new("aa\naa\naa\naa");
+    f.feed(["/", "a"]);
+    f.feed_raw(Key::enter()); // 光标落 match#1（start_index=1）
+    // count 在 / 之前键入（9×25 → saturate 到 usize::MAX）
+    let mut keys: Vec<&str> = std::iter::repeat("9").take(25).collect::<Vec<_>>();
+    keys.push("/");
+    keys.push("a");
+    f.feed(keys);
+    f.feed_raw(Key::enter());
+    // usize::MAX 步按匹配数取模：8 个匹配，u64::MAX-1 ≡ 6 (mod 8)，从
+    // start_index=2 再走 6 步 → (2+6)%8 = 0 → 第 1 个匹配。关键契约是
+    // 「不溢出 + 有界落点」（旧代码此路径 debug panic / release 错跳）。
+    assert_eq!(f.cursor(), 0);
+}
+
+#[test]
+fn substitute_replacement_r_and_n_follow_vim_escapes() {
+    // vim 9.1 字节级探针：替换串 \r 是换行（fX<LF>Yo bar），\n 是 NUL
+    // （fX<NUL>Yo bar）。旧引擎把两者当字面量写进缓冲。
+    let mut f = Fixture::new("foo bar");
+    f.feed([":"]);
+    for c in "s/o/X\\rY/".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert_eq!(f.text(), "fX\nYo bar");
+
+    let mut g = Fixture::new("foo bar");
+    g.feed([":"]);
+    for c in "s/o/X\\nY/".chars() {
+        g.feed_raw(vimcore::key::Key::char(c));
+    }
+    g.feed_raw(Key::enter());
+    assert_eq!(g.text(), "fX\u{0}Yo bar");
+
+    // \\r（转义反斜杠 + r）保持字面，与 vim 一致
+    let mut h = Fixture::new("foo bar");
+    h.feed([":"]);
+    for c in "s/o/X\\\\rY/".chars() {
+        h.feed_raw(vimcore::key::Key::char(c));
+    }
+    h.feed_raw(Key::enter());
+    assert_eq!(h.text(), "fX\\rYo bar");
+}
+
+#[test]
+fn sort_rejects_trailing_count_like_vim() {
+    // :sort 不接受 count——vim 9.1 探针 `:1,3sort 3` 报 E488 且缓冲不动；
+    // 旧引擎静默排序。
+    let mut f = Fixture::new("b\na\nc");
+    f.feed([":"]);
+    for c in "1,3sort 3".chars() {
+        f.feed_raw(vimcore::key::Key::char(c));
+    }
+    f.feed_raw(Key::enter());
+    assert_eq!(f.text(), "b\na\nc");
+    assert!(
+        f.host.statuses.iter().any(|s| s.contains("E488")),
+        "statuses = {:?}",
+        f.host.statuses
+    );
+    // 无数字参数的排序不受影响
+    let mut g = Fixture::new("b\na\nc");
+    g.feed([":"]);
+    for c in "1,3sort".chars() {
+        g.feed_raw(vimcore::key::Key::char(c));
+    }
+    g.feed_raw(Key::enter());
+    assert_eq!(g.text(), "a\nb\nc");
+}

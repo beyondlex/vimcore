@@ -40,10 +40,13 @@ pub enum Motion {
         reverse: bool,
     }, // ; ,
     MatchBracket, // %
-    /// Typed `1%`: the file-percentage form with the count NOT collapsed.
-    /// `1G` has the same absent-vs-typed-1 ambiguity and is rewritten to
-    /// `gg`; here the rewrite lands on this variant (state.rs) because the
-    /// percentage formula needs the original count.
+    /// Typed `1%`: the file-percentage form. `1G` has the same
+    /// absent-vs-typed-1 ambiguity and is rewritten to `gg`; here the
+    /// rewrite lands on this variant (state.rs) — by construction it only
+    /// ever carries the typed-`1` spelling, so the percentage formula
+    /// computes the 1% line directly (`ceil(total/100)`, matching the
+    /// `count*total` formula of the `MatchBracket` count arm at count=1).
+    /// Counts 2..=100 take the MatchBracket percentage arm instead.
     GoToFilePercent,
     GoToLine {
         first: bool,

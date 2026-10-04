@@ -142,15 +142,20 @@ pub fn jump_to_match(
     // `count` steps in the search DIRECTION from the cursor's neighbor
     // match, wrapping around the list — `2N` is two matches BACKWARD (vim
     // 9.1: from the last of five matches, 1N→4th, 2N→3rd, 3N→2nd; the old
-    // code walked +count-1 and went FORWARD). u64 math keeps a huge typed
-    // count from overflowing usize in debug builds.
+    // code walked +count-1 and went FORWARD). The step count is reduced
+    // modulo the list length BEFORE the add: a typed count rides the
+    // prompt's search_count path (the one count that bypasses
+    // take_total_count's cap), and `99999999999999999999/pat<CR>` used to
+    // overflow the u64 arithmetic — debug builds panicked, release builds
+    // silently landed on an arbitrary match. With `steps < len` the sum can
+    // never leave u64 range.
     let len = matches.len() as u64;
     let count = count.max(1) as u64;
+    let steps = (count - 1) % len;
     let index = if forward {
-        (start_index as u64 + (count - 1)) as usize
+        (start_index as u64 + steps) as usize % len as usize
     } else {
-        let back = (count - 1) % len;
-        (start_index as u64 + len - back) as usize % len as usize
+        (start_index as u64 + len - steps) as usize % len as usize
     };
     Some(matches.get(index % matches.len())?.start)
 }

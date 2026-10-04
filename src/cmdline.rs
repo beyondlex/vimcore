@@ -766,7 +766,7 @@ impl VimState {
             .iter()
             .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
-            self.ex_sort(ctx, range, rest.trim());
+            self.ex_sort(ctx, range, rest.trim(), &full_line);
             return;
         }
         // :{range}j[oin][!] [count] — join the range's lines; a ONE-ADDRESS
@@ -867,10 +867,14 @@ impl VimState {
 
     /// vim's replacement-side escapes: `\{sep}` and `\\` fold to their
     /// second character (`:s/a/b\/c/` must produce `b/c`, `:s/a/b\\c/`
-    /// produce `b\c` — probes 9.1). Every other `\x` passes through for the
-    /// regex crate's `$ref` expansion, which does not treat backslash
-    /// specially (so `\c` stays the two characters `\c` — an unknown escape
-    /// is kept verbatim, like vim).
+    /// produce `b\c` — probes 9.1). `\r` is vim's line BREAK (the common
+    /// `:%s/,/,\r/g` line-splitting idiom; probe: `:s/o/X\rY/` on "foo bar"
+    /// yields the two lines `fX` / `Yo bar`) and `\n` inserts a NUL byte —
+    /// vim 9.1 byte-level probe: `fX\x00Yo bar`. Both used to pass through
+    /// as literal `\r`/`\n` text, so the idiom silently didn't work. Every
+    /// other `\x` passes through for the regex crate's `$ref` expansion,
+    /// which does not treat backslash specially (so `\c` stays the two
+    /// characters `\c` — an unknown escape is kept verbatim, like vim).
     fn unescape_replacement(rep: &str, sep: char) -> String {
         let mut out = String::with_capacity(rep.len());
         let mut chars = rep.chars();
@@ -881,6 +885,8 @@ impl VimState {
             }
             match chars.next() {
                 Some(e) if e == sep || e == '\\' => out.push(e),
+                Some('r') => out.push('\n'),
+                Some('n') => out.push('\u{0}'),
                 Some(e) => {
                     out.push('\\');
                     out.push(e);
@@ -1216,8 +1222,15 @@ impl VimState {
 
     /// `:{range}sor[t][!] [flags]` — sort the range's lines. Flags (subset
     /// of vim's): `!` reverse, `i` ignore case, `u` dedupe AFTER sorting.
-    /// Other vim flags (`n` numeric, `x`/`o`/`b`…) are ignored.
-    fn ex_sort(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), flags: &str) {
+    /// Other vim flags (`n` numeric, `x`/`o`/`b`…) are ignored. `:sort`
+    /// takes NO count — vim refuses the whole command with E488 when a
+    /// digit appears in the arguments (9.1 probe: `:1,3sort 3` leaves the
+    /// buffer untouched), while the engine used to silently sort anyway.
+    fn ex_sort(&mut self, ctx: &mut Ctx, (first, last): (usize, usize), flags: &str, line_text: &str) {
+        if flags.chars().any(|c| c.is_ascii_digit()) {
+            Self::report_trailing(ctx, flags, line_text);
+            return;
+        }
         let last = last.min(ctx.buf.line_count().saturating_sub(1));
         let first = first.min(last);
         let reverse = flags.contains('!');

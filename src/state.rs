@@ -652,10 +652,22 @@ impl VimState {
         // key path and `Char(' ')` from the text-input path (and from every
         // `<Space>` mapping, since parse_angle canonicalizes to Char).
         // Canonicalize so mapping lookups and char-argument commands see one
-        // key no matter which path delivered it.
-        if matches!(&key.kind, KeyKind::Named(name) if name == "space") && key.modifiers.is_plain()
-        {
+        // key no matter which path delivered it. The modifiers ride along:
+        // ctrl+space must reach a `<C-Space>` mapping, not the plain `l`.
+        if matches!(&key.kind, KeyKind::Named(name) if name == "space") {
             key.kind = KeyKind::Char(' ');
+        }
+
+        // Any other single-character NAMED key folds to the Char spelling
+        // (modifiers preserved): `Key::ctrl("w")` and `Key::ctrl_char('w')`
+        // are two spellings of the same keystroke, but only the Char form
+        // matched the command tables and the insert-mode ctrl chords — a
+        // host constructing the Named form got a silently dead key.
+        if let KeyKind::Named(name) = &key.kind {
+            let mut chars = name.chars();
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                key.kind = KeyKind::Char(c);
+            }
         }
 
         // A printable key's shift flag is redundant: the character itself
@@ -724,7 +736,9 @@ impl VimState {
 
             self.pending_keys.pop_front();
             // replayed text is applied inline, not through the key pipeline
-            if front.kind == KeyKind::Named(DOT_TEXT_MARKER.to_owned()) {
+            // (matches! — a `KeyKind::Named(String)` build here would
+            // allocate on EVERY key of the pipeline, hot path)
+            if matches!(&front.kind, KeyKind::Named(n) if n == DOT_TEXT_MARKER) {
                 if let Some(text) = self.replay_texts.pop_front() {
                     // an `@` replay re-records the text step (the interactive
                     // path gets it from the host's record_typed_text), or the
