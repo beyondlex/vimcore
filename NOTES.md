@@ -6,7 +6,7 @@
 无关措辞。
 
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十七轮检视增补（2026-10-06，新增 `tests/fuzz_round26.rs`
-（宿主历史轴两条不变量，秒级常驻）+ `tests/review_regressions.rs`（+7 例））
+（宿主历史轴两条不变量，秒级常驻）+ `tests/review_regressions.rs`（+10 例））
 
 本轮主题：**宿主历史轴（undo/redo 组所有权）**。引擎把历史委托给宿主
 （`begin_undo_group`/`undo`/`redo`），自身只在 `edit_*` 漏斗宣布组——
@@ -20,7 +20,13 @@
 
 fuzz_round26 键表混入 IME 组合替换/宿主点击（`replace_range` 的
 owns_group 接缝），24 seeds × 40 轮 × 60-200 步，opt3 下 0.2s。**两条
-不变量全部通过，本轮零语义修复**——历史轴经受住了轰炸。
+不变量全部通过**——历史轴经受住了轰炸。
+
+### 语义修复（vim 9.1 探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **可视算子后 `gv` 塌缩为零宽** | `vlld` 的算子把自己的选区字节对送过 `adjust_delete`，端点折进删除点 → `last_visual = (0,0)`；`gvd` 静默 no-op，undo 也救不回来。vim 的 `'<`/`'>` 是**行列坐标**：`gg0vllld` 后它们保持 (1,1)-(1,3)——删除后的行上 `gv` 复选行首同宽 span（"lo "），undo 后同一对坐标落在复原的文本上，`gv` 重选原选区（探针 gvy 实证）。修复：`c` 路径已有的 `pending_visual_marks` 暂存推广到**全部算子**（d/y/~/r/p/块 d/y/块 p），入口捕获 PRE-EDIT 边界，`finish_visual_op` 按类别分流——char/block 写暂存值（floor 到编辑后文本），linewise 保持现行调整后边界（vim 的行删除会把 mark 折到接续行，round 7 的 `Vjd`→`:'<,'>d` 语义不变）。顺带 `resolve` 增加 buf 参数：`'<`/`'>` 读出时 floor 到字符边界 |
 
 ### 检视中证伪、无需改的（免下轮重查）
 
@@ -43,6 +49,11 @@ owns_group 接缝），24 seeds × 40 轮 × 60-200 步，opt3 下 0.2s。**两�
   光标——harness 用提示值即得 vim 形为（`o<Esc>u` 等已有 parity 测试）。
 - **`u` 后 `.`**：`last_change` 不被 u 触碰，`.` 重放被撤销的变更（vim 同）。
 - **`qA` 追加录制**：seed 自既有步骤、落回小写槽，`@a` 回放合并体。
+- **`last_visual` 换（行, 列）存储的方案被否**：实现一半发现冻结的行列
+  会破坏 vim 也有的行插入位移（`vll y` 后 `ggo<Esc>`，vim 的 lnum 随
+  插行下移，等价于现行字节调整——engine.rs 的 shift 测试钉的就是它）。
+  字节存储 + 写入侧 PRE-EDIT 暂存是更小的正确修复（见修复表 #1），
+  resolve 的 buf 参数保留作读出防御。
 
 ### 新增已知分歧（接全局序号）
 
