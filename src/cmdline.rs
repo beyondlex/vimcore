@@ -938,37 +938,37 @@ impl VimState {
     }
 
     /// vim's `:sort n` key: the first decimal number in the line (a leading
-/// `-` counts as the sign); a line without a number compares as 0. Saturating
-/// arithmetic keeps a pathological 40-digit line from wrapping.
-fn numeric_sort_key(text: &str) -> i64 {
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let (neg, digits_start) = match bytes[i] {
-            b'-' => (true, i + 1),
-            b'0'..=b'9' => (false, i),
-            _ => {
-                i += 1;
-                continue;
+    /// `-` counts as the sign); a line without a number compares as 0. Saturating
+    /// arithmetic keeps a pathological 40-digit line from wrapping.
+    fn numeric_sort_key(text: &str) -> i64 {
+        let bytes = text.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let (neg, digits_start) = match bytes[i] {
+                b'-' => (true, i + 1),
+                b'0'..=b'9' => (false, i),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let mut j = digits_start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
             }
-        };
-        let mut j = digits_start;
-        while j < bytes.len() && bytes[j].is_ascii_digit() {
-            j += 1;
-        }
-        if j > digits_start {
-            let mut v: i64 = 0;
-            for &d in &bytes[digits_start..j] {
-                v = v.saturating_mul(10).saturating_add((d - b'0') as i64);
+            if j > digits_start {
+                let mut v: i64 = 0;
+                for &d in &bytes[digits_start..j] {
+                    v = v.saturating_mul(10).saturating_add((d - b'0') as i64);
+                }
+                return if neg { -v } else { v };
             }
-            return if neg { -v } else { v };
+            i += 1;
         }
-        i += 1;
+        0
     }
-    0
-}
 
-/// One `:registers` listing line: `"x  c|l|b  text` with embedded
+    /// One `:registers` listing line: `"x  c|l|b  text` with embedded
     /// newlines shown as `^J` (vim's rendering) and the tail elided.
     fn register_line(name: char, reg: &crate::registers::Register) -> String {
         const MAX_TEXT: usize = 50;

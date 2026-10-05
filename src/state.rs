@@ -1805,11 +1805,12 @@ impl VimState {
         self.cursor.desired_col = None;
     }
 
-    /// The Esc side of the `insert_did_ai` contract: delete the leading
+    /// The Esc/CR side of the `insert_did_ai` contract: delete the leading
     /// whitespace of `line` when it is whitespace-only (an untouched
     /// autoindent — see the field doc). Returns the number of bytes removed
     /// (0 when the line has content or is empty); callers adjust the cursor
-    /// when the stripped line sits above it.
+    /// when the stripped line sits above it (`exit_insert`) or park at the
+    /// line start (`insert_text_at_cursor`'s CR-led split).
     fn strip_ai_line(&mut self, ctx: &mut Ctx, line: usize) -> usize {
         if !self.insert_did_ai || line >= ctx.buf.line_count() {
             return 0;
@@ -1957,11 +1958,7 @@ impl VimState {
         // line joins, <C-w>...), and stored offsets stay addressable — the
         // engine's standing invariant (fuzz-enforced), same tradeoff as
         // `sanitize_stored_offsets` after a host undo.
-        if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
-            let floor = |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
-            let (lo, hi) = (floor(lo), floor(hi));
-            self.marks.last_visual = Some((lo.min(hi), hi.max(lo), kind));
-        }
+        self.write_pending_visual_marks(ctx);
         self.republish_search(ctx);
         self.end_edit();
         self.mode = Mode::Normal;
@@ -1997,18 +1994,8 @@ impl VimState {
         // (probe S4: `ofoo<BS><BS><BS><Esc>` KEEPS the indent).
         if text.starts_with('\n') && self.insert_did_ai {
             let line = ctx.buf.offset_to_line(self.cursor.offset);
-            let ls = ctx.buf.line_start(line);
-            let le = ctx.buf.line_end(line);
-            if le > ls
-                && ctx
-                    .buf
-                    .slice(ls..le)
-                    .chars()
-                    .all(char::is_whitespace)
-            {
-                self.begin_edit();
-                self.edit_delete(ctx, ls..le);
-                self.cursor.offset = ls;
+            if self.strip_ai_line(ctx, line) > 0 {
+                self.cursor.offset = ctx.buf.line_start(line);
             }
         }
         self.insert_did_ai = self.options.autoindent && text.ends_with('\n');
@@ -2425,14 +2412,7 @@ impl VimState {
                         continue;
                     }
                     let text = ctx.buf.slice(range.clone());
-                    let mapped: String = text
-                        .chars()
-                        .map(|c| match op {
-                            Operator::Lowercase => c.to_lowercase().collect::<String>(),
-                            Operator::Uppercase => c.to_uppercase().collect::<String>(),
-                            _ => crate::ops::toggle_case(c),
-                        })
-                        .collect();
+                    let mapped = crate::ops::case_mapped_text(op, &text);
                     self.edit_replace(ctx, range.clone(), &mapped);
                 }
                 self.end_edit();
@@ -2625,17 +2605,31 @@ impl VimState {
         //   their marks onto the line that took their place (`Vjd` then
         //   `:'<,'>d` must delete just that surviving line — round 7). The
         //   adjusted pair already encodes that collapse, so it wins.
-        if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
-            if kind != crate::mode::VisualKind::Line {
-                let floor = |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
-                let (lo, hi) = (floor(lo), floor(hi));
-                self.marks.last_visual = Some((lo.min(hi), hi.max(lo), kind));
-                self.finish_visual_op_tail(ctx);
-                return;
-            }
+        if !matches!(
+            self.pending_visual_marks,
+            Some((_, _, crate::mode::VisualKind::Line))
+        ) {
+            self.write_pending_visual_marks(ctx);
+            self.finish_visual_op_tail(ctx);
+            return;
         }
         self.write_adjusted_last_visual(ctx);
         self.finish_visual_op_tail(ctx);
+    }
+
+    /// Write the stashed PRE-edit selection bounds ([`Self::pending_visual_marks`])
+    /// onto `'<`/`'>` as the change's lasting visual range, consuming the
+    /// stash. The raw pre-edit offsets are floored onto the post-edit text
+    /// (the op's edits may have shifted byte lengths mid-range) and
+    /// normalized to lo..hi. Linewise ops skip this and keep the ADJUSTED
+    /// live bounds instead — vim moves their marks onto the surviving line
+    /// (see `finish_visual_op`).
+    fn write_pending_visual_marks(&mut self, ctx: &Ctx) {
+        if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
+            let floor = |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
+            let (lo, hi) = (floor(lo), floor(hi));
+            self.marks.last_visual = Some((lo.min(hi), hi.max(lo), kind));
+        }
     }
 
     /// The adjusted-bounds write (`finish_visual_op`'s linewise arm and the
