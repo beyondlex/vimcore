@@ -2167,3 +2167,117 @@ fn marks_listing_shows_both_visual_ends() {
     assert!(joined.contains("\n<  line") || joined.starts_with("<  line"), "应列出 '<\n{joined}");
     assert!(joined.contains("\n>  line") || joined.contains(">  line"), "应列出 '>\n{joined}");
 }
+
+// ---- 第二十七轮：宿主历史轴（undo/redo）与组所有权 ---------------------------
+
+#[test]
+fn count_undo_steps_and_edge_bell() {
+    // `Nu` 撤销 N 步；超出历史深度的余量在历史边缘响一次铃（vim: 撤到
+    // 底 + beep）。三次 x 三个组：2u 停在第二步、3u 到底、5u 到底 + 1 铃。
+    let mk = |keys: &[&str]| {
+        let mut f = Fixture::new("aaa\nbbb\nccc\n");
+        f.feed(["x", "x", "x"]);
+        assert_eq!(f.text(), "\nbbb\nccc\n");
+        f.feed(keys);
+        f
+    };
+    let f = mk(&["2", "u"]);
+    assert_eq!(f.text(), "aa\nbbb\nccc\n", "2u 撤两步");
+    let f = mk(&["3", "u"]);
+    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "3u 撤三步到底");
+    let f = mk(&["5", "u"]);
+    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "5u 撤到底");
+    assert_eq!(f.host.bells, 1, "历史边缘恰好响一次");
+}
+
+#[test]
+fn undo_to_bottom_restores_initial_text() {
+    // 完备性不变量的定向版：混排编辑/可视算子/Ex 删除/IME 提交后，
+    // 一路 u 到底必须逐字节回到初始缓冲——任何一条编辑路径漏开 undo 组
+    // （不走 edit_* 漏斗）都会在这里静默现形。
+    let initial = "hello world\nsecond line\n中文行\n";
+    let mut f = Fixture::new(initial);
+    f.feed(["x", "d", "d", "p", "J", "g", "J", "y", "y", "P"]);
+    f.feed(["v", "l", "d"]);
+    f.ime_replace(0..2, "组");
+    f.feed([":", "2", "d", "\n"]);
+    f.feed(["<C-v>", "j", "I"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    f.feed([">", ">", "<", "<", "~"]);
+    assert_ne!(f.text(), initial, "前置：序列确实改了文本");
+
+    let mut depth = 0;
+    loop {
+        let before = f.host.bells;
+        f.feed(["u"]);
+        if f.host.bells > before {
+            break;
+        }
+        depth += 1;
+        assert!(depth <= 100, "u 未在 100 步内到底");
+    }
+    assert_eq!(f.text(), initial, "undo 到底应回到初始缓冲");
+}
+
+#[test]
+fn substitute_and_block_insert_are_single_undo_groups() {
+    // vim 把整个 :{range}s 与整个块可视 I/A/c 会话各算一个 undo 块
+    let mut f = Fixture::new("aaa\naaa\naaa\n");
+    f.feed([":", "%", "s", "/", "a", "/", "b", "/", "g", "\n"]);
+    assert_eq!(f.text(), "bbb\nbbb\nbbb\n");
+    let groups_before = f.host.group_count;
+    f.feed(["u"]);
+    assert_eq!(f.text(), "aaa\naaa\naaa\n", "整个 :s 一个 undo 组");
+    assert!(f.host.group_count >= groups_before); // (u 不新增组)
+
+    let mut g = Fixture::new("ab\ncd\nef\n");
+    // insert 模式可打印字符走宿主放置路径（type_text），键流只送控制键
+    g.feed(["<C-v>", "j", "I"]);
+    g.type_text("X");
+    g.feed(["<Esc>"]);
+    assert_eq!(g.text(), "Xab\nXcd\nef\n");
+    g.feed(["u"]);
+    assert_eq!(g.text(), "ab\ncd\nef\n", "块 I 会话含复制体一个 undo 组");
+}
+
+#[test]
+fn undo_then_dot_replays_the_undone_change() {
+    // u 不改写 `.` 的重放记录：u 之后 `.` 重放被撤销的那个变更（vim 同）
+    let mut f = Fixture::new("abc\nabc\n");
+    f.feed(["x", "u", "."]);
+    assert_eq!(f.text(), "bc\nabc\n");
+}
+
+#[test]
+fn q_uppercase_appends_to_macro_recording() {
+    // `qA` 在 a 的既有步骤上追加录制（vim :h q_a），停录落回小写槽
+    let mut f = Fixture::new("line1\nline2\nline3\n");
+    f.feed(["q", "a", "x", "q"]);
+    assert_eq!(f.vim.macro_len('a'), 1);
+    f.feed(["q", "A", "x", "q"]);
+    assert_eq!(f.vim.macro_len('a'), 2, "qA 追加而非覆盖");
+    f.feed(["j", "@", "a"]);
+    assert_eq!(f.text(), "ne1\nne2\nline3\n", "@a 回放两步 x");
+}
+
+#[test]
+fn insert_ctrl_o_passes_through_to_host() {
+    // insert 模式只认 C-w/C-u/C-r 等既定弦；<C-o>（临时 normal）未建模，
+    // 以 Unknown 交还宿主——宿主可自行认领（与 printable 字符同款合同）
+    let mut f = Fixture::new("ab\n");
+    f.feed(["i"]);
+    let r = f.feed_raw(Key::ctrl_char('o'));
+    assert!(matches!(r, vimcore::state::KeyResult::Unknown));
+}
+
+#[test]
+fn normal_U_undo_line_is_not_bound() {
+    // 普通模式的 U（行级撤销）未实现：响铃不动光标。引擎把历史委托给
+    // 宿主的线性栈，行级撤销需要宿主协作 API（见 NOTES 分歧 70）。
+    // visual U（大写化算子）不受影响，另有测试覆盖。
+    let mut f = Fixture::new("aaa bbb\n");
+    f.feed(["x", "U"]);
+    assert_eq!(f.host.bells, 1, "U 未绑定应响铃");
+    assert_eq!(f.cursor(), 0, "U 不动光标");
+}
