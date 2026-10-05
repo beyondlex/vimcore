@@ -541,33 +541,40 @@ fn tag_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRa
     // find the innermost pair containing the cursor. A closing tag pops
     // the matching open (rposition = innermost same-name) and truncates the
     // stack below it — children of a matched pair were balanced by their
-    // own closes already. Strict `open_start < offset` bounds mean the
-    // cursor must be strictly BETWEEN the tags: sitting exactly on `<` of
-    // the open tag does NOT select (documented quirk of this engine).
+    // own closes already. Containment follows the vim 9.1 probes: the block
+    // spans `open_start <= offset < close_end` — a cursor on the OPENING
+    // tag (its `<` included) selects THAT tag's block, a cursor on the
+    // CLOSING tag's `<` selects the ENCLOSING one (its own block already
+    // ended at close_start... i.e. the closer's `<` is one past its own
+    // range). The old strict `open_start < offset` skipped the open tag and
+    // climbed to the parent — `dit` on `<div><p>x</p></div>` col 5 deleted
+    // `<p>x</p>` where vim 9.1 deletes just `x`.
     let mut stack: Vec<(usize, &str)> = Vec::new();
-    let mut best: Option<(usize, usize)> = None;
+    // (open_start, close_start, close_end) of the best pair — close_start
+    // is the closer's own `<`: `it` must end there, never swallow the tag
+    let mut best: Option<(usize, usize, usize)> = None;
     for (start, end, name, is_open) in tags {
         if is_open {
             stack.push((start, name));
         } else if let Some(pos) = stack.iter().rposition(|(_, n)| *n == name) {
             let (open_start, _) = stack[pos];
             stack.truncate(pos);
-            if open_start < offset && offset < end {
+            if open_start <= offset && offset < end {
                 let better = match best {
-                    Some((bs, _)) => open_start > bs,
+                    Some((bs, _, _)) => open_start > bs,
                     None => true,
                 };
                 if better {
-                    best = Some((open_start, end));
+                    best = Some((open_start, start, end));
                 }
             }
         }
     }
-    let (open_start, close_end) = best?;
+    let (open_start, close_start, close_end) = best?;
     if inner {
         // empty elements (`<p></p>`) yield a zero-width inner range
         let after_open = text[open_start..].find('>')? + open_start + 1;
-        Some(ObjectRange::charwise(after_open, close_end))
+        Some(ObjectRange::charwise(after_open, close_start))
     } else {
         Some(ObjectRange::charwise(open_start, close_end))
     }
