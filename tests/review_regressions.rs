@@ -2328,3 +2328,267 @@ fn gv_after_linewise_delete_still_targets_the_surviving_line() {
     f.feed(["g", "v", "d"]);
     assert_eq!(f.text(), "ddd\n", "gv 复选接续行 ccc 并删除");
 }
+
+// ---- round 28：空 linewise 删除不碰寄存器（vim 9.1 PTY 探针） ---------------
+
+fn unnamed(f: &Fixture) -> Option<String> {
+    f.vim.registers.get('"').map(|r| r.text.clone())
+}
+
+#[test]
+fn empty_linewise_delete_leaves_registers_alone() {
+    // vim 9.1 探针：空缓冲上 dd/Vd/dip/dap/dG 全部不动寄存器（p 后 bell，
+    // `:reg` 只有 "%）。引擎把 0..0 的 linewise span 送进了编号环 + unnamed，
+    // 之后一个 p 会开出幽灵空行。yank 是相反规则：yy/yip 在空缓冲上**要**
+    // 存空行（见下一测试）——这个不对称是 vim 的原样。
+    for keys in [
+        vec!["d", "d"],
+        vec!["V", "d"],
+        vec!["d", "i", "p"],
+        vec!["d", "a", "p"],
+        vec!["d", "G"],
+    ] {
+        let mut f = Fixture::new("");
+        f.feed(keys.iter().copied());
+        assert_eq!(f.text(), "");
+        assert_eq!(unnamed(&f), None, "keys {keys:?} 必须不写 unnamed");
+        assert_eq!(f.vim.registers.get('1').map(|r| r.text.clone()), None);
+    }
+}
+
+#[test]
+fn empty_linewise_yank_stores_an_empty_line() {
+    // vim 9.1 探针：空缓冲 yy 后 `:reg` 里 ""/"0 各有一条 linewise 空行，
+    // p 开出一个新行——与 delete 的不写形成刻意对照。
+    let mut f = Fixture::new("");
+    f.feed(["y", "y"]);
+    assert_eq!(unnamed(&f), Some(String::new()));
+    assert_eq!(f.vim.registers.get('0').map(|r| r.text.clone()), Some(String::new()));
+    f.feed(["p"]);
+    assert_eq!(f.text(), "\n", "空缓冲 yy+p 开一个空行（vim lines=1→2）");
+}
+
+// ---- round 28：:s 旗标校验（E488）与 `e` 旗标 -------------------------------
+
+fn ex(f: &mut Fixture, line: &str) {
+    let mut keys: Vec<String> = vec![":".to_owned()];
+    keys.extend(line.chars().map(|c| c.to_string()));
+    keys.push("\r".to_owned());
+    f.feed(keys.iter().map(|s| s.as_str()));
+}
+
+#[test]
+fn substitute_rejects_junk_flags_with_e488() {
+    // vim 9.1 探针：`:s/a/X/z` → "E488: Trailing characters: z"，缓冲不动。
+    // 旧引擎忽略未知旗标字母照常替换——打错旗标悄悄改了文本。
+    let mut f = Fixture::new("aaa zzz\n");
+    ex(&mut f, "s/a/X/z");
+    assert_eq!(f.text(), "aaa zzz\n", "垃圾旗标必须让整条命令不运行");
+    assert!(
+        f.host.statuses.iter().any(|s| s.contains("E488")),
+        "statuses = {:?}",
+        f.host.statuses
+    );
+}
+
+#[test]
+fn substitute_still_accepts_valid_flag_letters() {
+    // 合法旗标（g/i/I/n + 容忍集 c/e/l/p/#/&）不触发 E488
+    let mut f = Fixture::new("aaa\n");
+    ex(&mut f, "s/a/X/g");
+    assert_eq!(f.text(), "XXX\n");
+}
+
+#[test]
+fn substitute_e_flag_suppresses_the_miss_report() {
+    // vim 9.1 探针：`:s/q/W/e` 未命中 → 无 E486（e 的本职就是压掉它）
+    let mut f = Fixture::new("aaa zzz\n");
+    ex(&mut f, "s/q/W/e");
+    assert_eq!(f.text(), "aaa zzz\n");
+    assert!(f.host.statuses.is_empty(), "statuses = {:?}", f.host.statuses);
+    // 无 e 时照旧报 E486
+    let mut f = Fixture::new("aaa zzz\n");
+    ex(&mut f, "s/q/W/");
+    assert!(f.host.statuses.iter().any(|s| s.contains("E486")));
+}
+
+// ---- round 28：块可视 `$`（:h v_$，PTY 探针） --------------------------------
+
+#[test]
+fn block_dollar_delete_extends_to_every_line_end() {
+    // vim 9.1 探针：`<C-v>j$d` → ['','','def']——块延伸到**每行**行尾。
+    // 旧引擎把 $ 当普通 motion，只删到光标行 $ 所在列（"g line here"）。
+    let f = edit("long line here\nabc\ndef\n", 0, 0, &["<C-v>", "j", "$", "d"]);
+    assert_eq!(f.text(), "\n\ndef\n");
+}
+
+#[test]
+fn block_dollar_ignores_the_anchor_column() {
+    // vim 9.1 探针：`<C-v>jll$d` 与 `<C-v>j$d` 同果——$ 一旦按下，
+    // 锚点列出局，每行整行内容被覆盖。
+    let f = edit("long line here\nabc\ndef\n", 0, 0, &["<C-v>", "j", "l", "l", "$", "d"]);
+    assert_eq!(f.text(), "\n\ndef\n");
+}
+
+#[test]
+fn block_dollar_i_inserts_at_line_starts_and_a_at_line_ends() {
+    // vim 9.1 探针：$+I 在每行行首插（"_Xabc…）；$+A 在各行自己的行尾
+    // 追加且**不填充**（"long line hereX"/"abcX"）。
+    let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
+    f.feed(["<C-v>", "j", "$", "I"]);
+    f.type_text("_X");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "_Xlong line here\n_Xabc\ndef\n");
+
+    let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
+    f.feed(["<C-v>", "j", "$", "A"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "long line hereX\nabcX\ndef\n");
+}
+
+#[test]
+fn block_dollar_change_replicates_over_whole_rows() {
+    // vim 9.1 探针：`<C-v>j$cyz<Esc>` → 两行都变成 "yz"
+    let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
+    f.feed(["<C-v>", "j", "$", "c"]);
+    f.type_text("yz");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "yz\nyz\ndef\n");
+}
+
+#[test]
+fn block_dollar_yank_register_is_unpadded() {
+    // vim 9.1 探针（:reg）：$ 块 yank 的寄存器是未填充的整行文本
+    let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
+    f.feed(["<C-v>", "j", "$", "y"]);
+    let reg = f.vim.registers.get('"').expect("unnamed set");
+    assert_eq!(reg.text, "long line here\nabc");
+    assert_eq!(reg.kind, vimcore::registers::RegisterKind::Blockwise);
+}
+
+// ---- round 28：块可视的寄存器语义 -------------------------------------------
+
+#[test]
+fn block_delete_stores_the_block_for_paste() {
+    // vim 9.1 探针：`<C-v>jlld` 后 p 粘回被删块（块寄存器行不填充），
+    // "0 不动。旧引擎的块删除不写任何寄存器。
+    let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
+    f.feed(["<C-v>", "j", "l", "l", "d"]);
+    let reg = f.vim.registers.get('"').expect("unnamed set");
+    assert_eq!(reg.text, "lon\nabc");
+    assert_eq!(reg.kind, vimcore::registers::RegisterKind::Blockwise);
+    assert_eq!(f.vim.registers.get('0'), None, "删除不进 \"0");
+    // p 粘回
+    f.feed(["g", "g", "0", "p"]);
+    assert_eq!(f.text(), "glon line here\n abc\ndef\n");
+}
+
+#[test]
+fn block_change_stores_the_deleted_block() {
+    // vim 9.1 探针：`<C-v>jlc` + 输入 + Esc 后 p 粘回被删块
+    let mut f = Fixture::at("ab\nef\nij\nkl\n", 0, 0);
+    f.feed(["<C-v>", "j", "l", "c"]);
+    f.type_text("X");
+    f.feed(["<Esc>"]);
+    // 块 2 列宽（"ab"/"ef" 被删），X 复制到两行
+    assert_eq!(f.text(), "X\nX\nij\nkl\n");
+    f.feed(["g", "g", "0", "p"]);
+    assert_eq!(f.text(), "Xab\nXef\nij\nkl\n");
+}
+
+#[test]
+fn block_yank_keeps_rows_unpadded() {
+    // vim 9.1 探针（:reg strtrans）：块 yank 短行不填充——寄存器就是
+    // "long\nabc"。填充是 put 侧的职责（put_blockwise 已做）。
+    // 光标行是 "abc"（3 列），l 在行尾钳住：块宽 3（"lon"/"abc"）。
+    // 断言点是短行 "abc" 不带填充——vim 的寄存器同款（宽度在寄存器
+    // 类型里，填充是 put 侧的事）。
+    let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
+    f.feed(["<C-v>", "j", "l", "l", "y"]);
+    let reg = f.vim.registers.get('"').expect("unnamed set");
+    assert_eq!(reg.text, "lon\nabc");
+}
+
+#[test]
+fn visual_block_put_swaps_with_the_deleted_selection() {
+    // vim 9.1 探针（交换成语）：`<C-v>jy` + `<C-v>jp` 再 p，第二次 p
+    // 粘回的是刚被删掉的 ij/kl。
+    // 1 列块（"a"/"e"）与 vim 探针同形：第一次 p 替换 i/k 列，第二次
+    // p（普通模式）粘回被删块 "i"/"k" → "aij"/"ekl"
+    let mut f = Fixture::at("ab\nef\nij\nkl\n", 0, 0);
+    f.feed(["<C-v>", "j", "y"]);
+    f.feed(["j", "j", "<C-v>", "j", "p"]);
+    assert_eq!(f.text(), "ab\nef\naj\nel\n");
+    f.feed(["p"]);
+    assert_eq!(f.text(), "ab\nef\naij\nekl\n", "第二次 p 粘回被删块（交换）");
+}
+
+#[test]
+fn visual_put_leaves_the_explicit_paste_register_alone() {
+    // vim 9.1 探针：viw"ap 后 "a 仍是 aaa，被替换文本进 unnamed。
+    // 旧引擎把粘贴寄存器传给了 delete_span，把 "a 覆盖掉了。
+    let mut f = Fixture::at("aaa bbb\n", 0, 0);
+    f.feed(["\"", "a", "y", "i", "w"]);
+    f.feed(["w", "v", "i", "w", "\"", "a", "p"]);
+    assert_eq!(f.text(), "aaa aaa\n");
+    assert_eq!(
+        f.vim.registers.get('a').map(|r| r.text.clone()),
+        Some("aaa".to_owned()),
+        "粘贴源寄存器不能被被删文本覆盖"
+    );
+    assert_eq!(unnamed(&f), Some("bbb".to_owned()));
+}
+
+#[test]
+fn block_put_extra_register_rows_append_below_the_selection() {
+    // vim 9.1 探针：3 行块寄存器贴到 2 行块选区上——第三行成为最后
+    // 覆盖行下方的新行（旧引擎直接丢弃）。
+    let mut f = Fixture::at("aa\nbb\ncc\ndd\nee\n", 0, 0);
+    f.feed(["<C-v>", "j", "j", "y"]);
+    f.feed(["j", "j", "j", "<C-v>", "j", "p"]);
+    assert_eq!(f.text(), "aa\nbb\ncc\nad\nbe\nc\n");
+}
+
+// ---- round 28：块 put 的合并模型（PTY 探针修正「推下去」旧模型） --------------
+
+#[test]
+fn blockwise_put_merges_into_existing_lines_below() {
+    // vim 9.1 探针：`2G0p` 于中段——寄存器第 2/3 行并到光标行**下方已有的
+    // 行**上（同列插入，行长先补空格），不再无条件开新行。旧「推下去」
+    // 模型来自只压在末行上的探针（两种模型在缓冲末尾重合）。
+    let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
+    f.feed(["<C-v>", "j", "y"]); // 1 列块 ["a", "b"]
+    f.feed(["2", "G", "0", "p"]);
+    assert_eq!(f.text(), "aaaa\nbabbb\ncbccc\ndddd\n");
+}
+
+#[test]
+fn blockwise_put_before_merges_at_cursor_column() {
+    // vim 9.1 探针：`2G0P` → "abbbb"/"bcccc"（P 在光标列本身，
+    // 后续行仍向下走）
+    let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
+    f.feed(["<C-v>", "j", "y"]);
+    f.feed(["2", "G", "0", "P"]);
+    assert_eq!(f.text(), "aaaa\nabbbb\nbcccc\ndddd\n");
+}
+
+#[test]
+fn blockwise_put_merges_mid_line_at_display_column() {
+    // vim 9.1 探针：`3G02lp` —— 行宽 4、列 2：插入点在第 3 字符前，
+    // "cccc"+"aaaa" → "cccaaaac"；下一行同列 "dddd" → "ddbbbbdd"
+    let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
+    f.feed(["<C-v>", "j", "l", "l", "l", "y"]); // 4 列块
+    f.feed(["3", "G", "0", "2", "l", "p"]);
+    assert_eq!(f.text(), "aaaa\nbbbb\ncccaaaac\ndddbbbbd\n");
+}
+
+#[test]
+fn visual_block_put_overflow_merges_into_the_next_line() {
+    // vim 9.1 探针：3 行寄存器贴到 2 行选区——第 3 行并入选区**下方的
+    // 已有行**（"ee" → "cee"）；只有越过缓冲末尾才开新行
+    let mut f = Fixture::at("aa\nbb\ncc\ndd\nee\nff\n", 0, 0);
+    f.feed(["<C-v>", "j", "j", "y"]); // ["a", "b", "c"]
+    f.feed(["3", "G", "<C-v>", "j", "p"]); // 选区 = 行 2-3
+    assert_eq!(f.text(), "aa\nbb\nac\nbd\ncee\nff\n");
+}
