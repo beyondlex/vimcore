@@ -555,17 +555,7 @@ pub fn apply(
         }
         Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
             let text = ctx.buf.slice(span.start..span.end);
-            // multi-char case mappings exist (ß ↔ SS, İ → i̇), so each char
-            // maps to a String; edit_replace absorbs the changed byte length
-            // (marks and the visual span shift with it through the wrapper)
-            let mapped: String = text
-                .chars()
-                .map(|c| match op {
-                    Operator::Lowercase => c.to_lowercase().collect::<String>(),
-                    Operator::Uppercase => c.to_uppercase().collect::<String>(),
-                    _ => toggle_case(c),
-                })
-                .collect();
+            let mapped = case_mapped_text(op, &text);
             vim.edit_replace(ctx, span.start..span.end, &mapped);
             vim.cursor.offset = clamp_cursor(ctx.buf, span.start);
             vim.cursor.desired_col = None;
@@ -587,6 +577,19 @@ pub fn toggle_case(c: char) -> String {
     } else {
         c.to_lowercase().collect()
     }
+}
+
+/// Map every char of `text` through the case operator. Multi-char case
+/// mappings (ß ↔ SS, İ → i̇) make each char a String; callers splice the
+/// result back with `edit_replace`, which absorbs the changed byte length.
+pub(crate) fn case_mapped_text(op: Operator, text: &str) -> String {
+    text.chars()
+        .map(|c| match op {
+            Operator::Lowercase => c.to_lowercase().collect::<String>(),
+            Operator::Uppercase => c.to_uppercase().collect::<String>(),
+            _ => toggle_case(c),
+        })
+        .collect()
 }
 
 /// Shift one line left/right by `shiftwidth` — vim's COLUMN model: the
