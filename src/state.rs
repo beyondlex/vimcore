@@ -3951,7 +3951,9 @@ impl VimState {
             }
             // `.`: replay the last recorded change, count times. Steps are
             // queued, not executed inline, so each step flows back through
-            // the normal key pipeline (mappings off while replaying).
+            // the normal key pipeline — mappings INCLUDED (the recording
+            // holds keys as typed, so a mapped key re-expands on replay,
+            // exactly like vim).
             NormalCmd::RepeatChange => {
                 let count = self.take_total_count().max(1);
                 if self.last_change.is_empty() {
