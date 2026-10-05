@@ -351,12 +351,14 @@ pub struct VimState {
     /// text alone; the old bare-LIFO popped it and wrote the wrong char).
     pub(crate) replace_overwritten: Vec<(usize, Option<char>)>,
 
-    /// Pre-edit selection bounds of a visual change that opened the current
-    /// insert session (`viwc`, visual-block `I`/`A`/`c`). vim re-selects the
-    /// ORIGINAL selection with `gv` after such a change (9.1 probe:
-    /// `viwcX<Esc>gv` spans the original byte range; block `I` the original
-    /// block) — the stash is written back unadjusted in `exit_insert`,
-    /// because the session's edits would otherwise shift/collapse it.
+    /// Pre-edit selection bounds of a visual change (`viwc`, visual `d`/`y`/`~`,
+    /// visual-block `I`/`A`/`c`, visual `p`/`r`). vim re-selects the ORIGINAL
+    /// selection with `gv` after such a change (9.1 probes: `viwcX<Esc>gv`
+    /// spans the original byte range; after `vlld` undo brings the selection
+    /// back) — the stash is written back (floored onto the post-edit text) in
+    /// `exit_insert`/`finish_visual_op`, because the op.s own edit funnels
+    /// would otherwise adjust the pair: an inner delete collapses it onto the
+    /// deletion point, leaving `gv` zero-width.
     pending_visual_marks: Option<(usize, usize, VisualKind)>,
 
     undo_seq: u64,
@@ -2275,6 +2277,14 @@ impl VimState {
             ctx.host.bell();
             return;
         };
+        // PRE-edit block bounds for `gv` — all ops share one capture (see
+        // `pending_visual_marks`); the insert-opening arms (`c`/`I`/`A`)
+        // hand the same stash to `exit_insert` later.
+        self.pending_visual_marks = Some((
+            block.rows.first().map(|r| r.start).unwrap_or(0),
+            block.rows.last().map(|r| r.end).unwrap_or(0),
+            crate::mode::VisualKind::Block,
+        ));
         match op {
             Operator::Delete => {
                 self.begin_edit();
@@ -2314,13 +2324,8 @@ impl VimState {
             }
             Operator::Change => {
                 self.begin_edit();
-                // block `c` continues into insert: stash the block bounds for
-                // `gv` (see `pending_visual_marks`)
-                self.pending_visual_marks = Some((
-                    block.rows.first().map(|r| r.start).unwrap_or(0),
-                    block.rows.last().map(|r| r.end).unwrap_or(0),
-                    crate::mode::VisualKind::Block,
-                ));
+                // block `c` continues into insert: the stash captured at
+                // entry rides to `exit_insert` (see `pending_visual_marks`)
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
                 self.bump(ctx);
                 self.reset_pending();
@@ -2491,8 +2496,9 @@ impl VimState {
             ctx.host.bell();
             return;
         };
-        // block `I`/`A` continue into insert: stash the block bounds for `gv`
-        // (see `pending_visual_marks`)
+        // block `I`/`A` continue into insert: stash the block bounds for
+        // `gv` (see `pending_visual_marks`) — this entry does not pass
+        // through `apply_block_operator`, so it captures its own
         self.pending_visual_marks = Some((
             block.rows.first().map(|r| r.start).unwrap_or(0),
             block.rows.last().map(|r| r.end).unwrap_or(0),
@@ -2531,10 +2537,43 @@ impl VimState {
     }
 
     pub(crate) fn finish_visual_op(&mut self, ctx: &mut Ctx) {
+        // The op's own edit already ran, so the live selection's byte pair
+        // is ADJUSTED — and the adjustment has two different vim truths:
+        //
+        // * char/block selections: the lines survive, and vim's marks keep
+        //   their columns (`vlld` on "hello world" leaves '< '> over the
+        //   line head; undo restores the text under the same marks). The
+        //   byte adjust instead collapses an inner pair onto the deletion
+        //   point, which left `gv` zero-width with no way back — so write
+        //   the PRE-edit bounds stashed at op entry, floored onto the
+        //   post-edit text (`exit_insert` does the same for `c`).
+        // * linewise selections: the selected LINES are gone, and vim moves
+        //   their marks onto the line that took their place (`Vjd` then
+        //   `:'<,'>d` must delete just that surviving line — round 7). The
+        //   adjusted pair already encodes that collapse, so it wins.
+        if let Some((lo, hi, kind)) = self.pending_visual_marks.take() {
+            if kind != crate::mode::VisualKind::Line {
+                let floor = |off: usize| crate::buffer::floor_to_char_boundary(ctx.buf, off);
+                let (lo, hi) = (floor(lo), floor(hi));
+                self.marks.last_visual = Some((lo.min(hi), hi.max(lo), kind));
+                self.finish_visual_op_tail(ctx);
+                return;
+            }
+        }
+        self.write_adjusted_last_visual(ctx);
+        self.finish_visual_op_tail(ctx);
+    }
+
+    /// The adjusted-bounds write (`finish_visual_op`'s linewise arm and the
+    /// no-stash fallback).
+    fn write_adjusted_last_visual(&mut self, ctx: &mut Ctx) {
         if let Some((lo, hi, kind)) = self.clamped_visual_bounds(ctx.buf) {
             let end = ctx.buf.next_char_offset(hi).unwrap_or(hi);
             self.marks.last_visual = Some((lo, end, kind));
         }
+    }
+
+    fn finish_visual_op_tail(&mut self, ctx: &mut Ctx) {
         self.visual_anchor = None;
         // the selection is resolved — the live range must go, or `parse_range`
         // keeps preferring it over the just-written `'<`/`'>` marks while the
@@ -3307,15 +3346,15 @@ impl VimState {
             ctx.host.bell();
             return;
         };
-        // `c` continues into insert: remember the selection for `gv` (see
-        // `pending_visual_marks`) before the operator's edits shift it
-        if op == Operator::Change {
-            let kind = match self.mode {
-                Mode::Visual { kind } => kind,
-                _ => crate::mode::VisualKind::Char,
-            };
-            self.pending_visual_marks = Some((span.start, span.end, kind));
-        }
+        // PRE-edit bounds for `gv`/`'<`/`'>` — every op, not just `c`: the
+        // op's own edit must not eat the selection's bounds (see
+        // `pending_visual_marks`). Consumed by `exit_insert` (ops that enter
+        // insert) or `finish_visual_op` (the rest).
+        let kind = match self.mode {
+            Mode::Visual { kind } => kind,
+            _ => crate::mode::VisualKind::Char,
+        };
+        self.pending_visual_marks = Some((span.start, span.end, kind));
         let count = self.take_total_count().max(1);
         let gen_before = self.edit_generation;
         self.begin_edit();
@@ -4065,6 +4104,12 @@ impl VimState {
             ctx.host.bell();
             return;
         };
+        // PRE-edit block bounds for `gv` (see `pending_visual_marks`)
+        self.pending_visual_marks = Some((
+            block.rows.first().map(|r| r.start).unwrap_or(0),
+            block.rows.last().map(|r| r.end).unwrap_or(0),
+            crate::mode::VisualKind::Block,
+        ));
         let Some(data) = self.registers.get_for_paste(register, ctx.host) else {
             ctx.host.bell();
             return;
@@ -4191,6 +4236,12 @@ impl VimState {
                 let Some(span) = ops::span_from_visual(self, ctx.buf) else {
                     return;
                 };
+                // PRE-edit bounds for `gv` (see `pending_visual_marks`)
+                let kind = match self.mode {
+                    Mode::Visual { kind } => kind,
+                    _ => crate::mode::VisualKind::Char,
+                };
+                self.pending_visual_marks = Some((span.start, span.end, kind));
                 // an unset register: vim reports E353 and leaves the
                 // selection INTACT — delete-then-nothing would lose it
                 let Some(stashed) = self.registers.get_for_paste(register, ctx.host) else {
@@ -4290,15 +4341,14 @@ impl VimState {
                     end: ctx.buf.line_range(last).end,
                     linewise: true,
                 };
-                // `c` continues into insert: remember the covered lines for
-                // `gv` (see `pending_visual_marks`) before the edit shifts
-                if op == Operator::Change {
-                    let kind = match self.mode {
-                        Mode::Visual { kind } => kind,
-                        _ => crate::mode::VisualKind::Char,
-                    };
-                    self.pending_visual_marks = Some((line_span.start, line_span.end, kind));
-                }
+                // PRE-edit bounds for `gv` — every op (see
+                // `pending_visual_marks`); `c` hands the same stash to
+                // `exit_insert`, the rest consume it in `finish_visual_op`
+                let kind = match self.mode {
+                    Mode::Visual { kind } => kind,
+                    _ => crate::mode::VisualKind::Char,
+                };
+                self.pending_visual_marks = Some((line_span.start, line_span.end, kind));
                 let count = self.take_total_count();
                 let gen_before = self.edit_generation;
                 self.begin_edit();
@@ -4505,7 +4555,13 @@ impl VimState {
             }
             CharArgCmd::VisualReplace => {
                 // Visual `r{char}`: replace every selected char (the visual
-                // op path exits visual mode + commits the change record)
+                // op path exits visual mode + commits the change record).
+                // Stash the PRE-edit bounds for `gv` (see
+                // `pending_visual_marks`)
+                if let Some((lo, hi, kind)) = self.clamped_visual_bounds(ctx.buf) {
+                    let end = ctx.buf.next_char_offset(hi).unwrap_or(hi);
+                    self.pending_visual_marks = Some((lo, end, kind));
+                }
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::visual_replace(self, ctx, c);
@@ -4581,7 +4637,7 @@ impl VimState {
                 // An unset mark gets vim's message channel, not just a bare
                 // bell (`:h mark-motions`: "E20: Mark 'a not set" — same text
                 // the Ex range parser reports for `:'a`).
-                if self.marks.resolve(c).is_none() {
+                if self.marks.resolve(c, ctx.buf).is_none() {
                     ctx.host
                         .status_message(&format!("E20: Mark '{c} not set"));
                 }

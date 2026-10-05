@@ -2272,7 +2272,7 @@ fn insert_ctrl_o_passes_through_to_host() {
 }
 
 #[test]
-fn normal_U_undo_line_is_not_bound() {
+fn normal_u_undo_line_is_not_bound() {
     // 普通模式的 U（行级撤销）未实现：响铃不动光标。引擎把历史委托给
     // 宿主的线性栈，行级撤销需要宿主协作 API（见 NOTES 分歧 70）。
     // visual U（大写化算子）不受影响，另有测试覆盖。
@@ -2280,4 +2280,51 @@ fn normal_U_undo_line_is_not_bound() {
     f.feed(["x", "U"]);
     assert_eq!(f.host.bells, 1, "U 未绑定应响铃");
     assert_eq!(f.cursor(), 0, "U 不动光标");
+}
+
+// ---- 第二十七轮二批：可视算子后 gv 的选区存活 -------------------------------
+
+#[test]
+fn gv_after_charwise_delete_selects_the_line_head() {
+    // vim 9.1：`vllld` 后 '< '> 保持选区的行列坐标——gv 在删除后的行上
+    // 复选行首同宽 span，而不是塌成零宽。旧行为把 last_visual 经
+    // adjust_delete 折进删除点，gv 复选空、`gv d` 变 no-op。
+    let mut f = Fixture::new("hello world\nsecond\n");
+    f.feed(["v", "l", "l", "d"]); // 删 "hel" → "lo world"
+    assert_eq!(f.text(), "lo world\nsecond\n");
+    f.feed(["g", "v"]);
+    assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
+    f.feed(["d"]);
+    assert_eq!(
+        f.text(),
+        "world\nsecond\n",
+        "gv 复选删除后行的头部三字符 \"lo \"（vim: 行列坐标投影）并删除"
+    );
+}
+
+#[test]
+fn gv_after_undo_reselects_the_original_selection() {
+    // vim 9.1：vllld 后 u，同一对 '< '> 落回复原的文本上——gv 重选
+    // 原选区（"hel"）。旧行为 last_visual 已被删除折叠成 (0,0)，
+    // undo 救不回来。
+    // "abcdef" 删 "abc" → "def"；undo 复原后 gv 必须重选 "abc"
+    let mut f = Fixture::new("abcdef\nsecond\n");
+    f.feed(["v", "l", "l", "d"]);
+    assert_eq!(f.text(), "def\nsecond\n");
+    f.feed(["u"]);
+    assert_eq!(f.text(), "abcdef\nsecond\n");
+    f.feed(["g", "v"]);
+    f.feed(["d"]);
+    assert_eq!(f.text(), "def\nsecond\n", "gv 复活原选区 abc 并删除");
+}
+
+#[test]
+fn gv_after_linewise_delete_still_targets_the_surviving_line() {
+    // 行级选区走另一条 vim 规则：被删行的 mark 折到接续行（round 7
+    // 的 `Vjd` 语义不能被 charwise 冻结规则破坏）
+    let mut f = Fixture::new("aaa\nbbb\nccc\nddd\n");
+    f.feed(["V", "j", "d"]);
+    assert_eq!(f.text(), "ccc\nddd\n");
+    f.feed(["g", "v", "d"]);
+    assert_eq!(f.text(), "ddd\n", "gv 复选接续行 ccc 并删除");
 }

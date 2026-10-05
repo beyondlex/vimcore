@@ -544,7 +544,7 @@ impl Motion {
                 let Some(name) = vim.char_arg else {
                     return MotionResult::stuck(vim.cursor.offset);
                 };
-                match vim.marks.resolve(name) {
+                match vim.marks.resolve(name, buf) {
                     Some(o) => {
                         // a length-preserving replace can leave a stored
                         // mark mid-character; floor before cursor math

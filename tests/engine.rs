@@ -820,16 +820,16 @@ fn marks_inside_deleted_range_move_to_range_start() {
 fn visual_marks_shift_and_gv_tracks_the_text() {
     let mut f = Fixture::at("aa\nbbbb\n", 1, 0);
     f.feed(["v", "l", "l", "y"]); // select bbb, sets '< '>
-    assert_eq!(f.vim.marks.resolve('<'), Some(3));
-    assert_eq!(f.vim.marks.resolve('>'), Some(6)); // stored as an exclusive end
+    assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(3));
+    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(6)); // stored as an exclusive end
                                                    // open a line above: everything shifts by 2 ("x\n")
     f.feed(["g", "g"]);
     f.feed(["o"]);
     f.type_text("x");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "aa\nx\nbbbb\n");
-    assert_eq!(f.vim.marks.resolve('<'), Some(5));
-    assert_eq!(f.vim.marks.resolve('>'), Some(8)); // stored as an exclusive end
+    assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(5));
+    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(8)); // stored as an exclusive end
                                                    // gv restores the selection over the SHIFTED text
     f.feed(["g", "v"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
@@ -1622,8 +1622,8 @@ fn ex_range_visual_marks() {
     f.feed(["j", "V", "j", "<Esc>"]); // select lines 1-2
     eprintln!(
         "PROBE marks <={:?} >={:?}",
-        f.vim.marks.resolve('<'),
-        f.vim.marks.resolve('>')
+        f.vim.marks.resolve('<', &f.buf),
+        f.vim.marks.resolve('>', &f.buf)
     );
     f.feed([
         ":", "'", "<", ",", "'", ">", "s", "/", "f", "o", "o", "/", "x", "/", "<CR>",
@@ -1815,7 +1815,7 @@ fn visual_colon_execute_drops_to_normal_on_range() {
     assert_eq!(f.vim.mode(), vimcore::Mode::Normal);
     assert!(f.vim.visual_selection().is_none());
     // and '<,'> marks were written for a follow-up :'<,'>s
-    assert_eq!(f.vim.marks.resolve('<'), Some(4));
+    assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(4));
 }
 
 // ---- incremental hlsearch splice (performance task) -----------------------------

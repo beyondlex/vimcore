@@ -1,5 +1,6 @@
 //! Marks: user marks `a-z`, special marks (` ^ . < >), and jump helpers.
 
+use crate::buffer::VimBuffer;
 use crate::mode::VisualKind;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -14,6 +15,15 @@ pub struct Marks {
     /// used to exist twice — a kind-less pair here and a kind-bearing copy
     /// on the engine — and the copies drifted apart under byte-grid-redrawing
     /// edits, letting `gv` restore a mid-char anchor; fuzz round 8 caught it.)
+    ///
+    /// The WRITE side carries the vim parity subtlety: an operator must
+    /// store the selection's PRE-edit bounds (stashed in
+    /// `VimState::pending_visual_marks`, the same treatment the `c` path
+    /// always had), because the op's own `adjust_delete` collapses a pair
+    /// inside the deleted span onto the deletion point — `vlld` used to
+    /// leave `gv` zero-width, and no undo could bring the selection back
+    /// (vim's line/col marks survive the op and, after undo, the original
+    /// text re-projects onto them; 9.1 probes).
     pub last_visual: Option<(usize, usize, VisualKind)>,
     /// Live `(anchor, cursor_end)` of the current visual selection, kept in
     /// sync by the engine (used for `'<`/`'>` inside visual mode).
@@ -55,11 +65,18 @@ impl Marks {
 
     /// Resolve special names used by `` ` ``/`'` jumps: the visual marks,
     /// the jump-context marks (`''` / `` `` ``), the last change and the
-    /// last insert exit — beyond the plain named marks.
-    pub fn resolve(&self, name: char) -> Option<usize> {
+    /// last insert exit — beyond the plain named marks. The visual marks
+    /// come back floored onto the CURRENT text: the buffer may have changed
+    /// since they were written (a host text swap between engine calls), and
+    /// an unfloored read would hand jump/range math a mid-char offset.
+    pub fn resolve(&self, name: char, buf: &dyn VimBuffer) -> Option<usize> {
         match name {
-            '<' => self.last_visual.map(|(a, _, _)| a),
-            '>' => self.last_visual.map(|(_, b, _)| b),
+            '<' => self
+                .last_visual
+                .map(|(a, _, _)| crate::buffer::floor_to_char_boundary(buf, a)),
+            '>' => self
+                .last_visual
+                .map(|(_, b, _)| crate::buffer::floor_to_char_boundary(buf, b)),
             // `''` (linewise) and `` `` `` (exact) share the jump origin
             '\'' | '`' => self.last_jump,
             '.' => self.last_change.or_else(|| self.get('.')),

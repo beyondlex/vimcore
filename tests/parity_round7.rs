@@ -150,8 +150,8 @@ fn visual_colon_keeps_prompt_time_range_in_marks() {
     f.feed([":", "s", "/", "h", "e", "l", "/", "H", "E", "L", "/", "\n"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "HELlo world\nsecond\n");
     // :s 把光标留在行首（col 0）——若按执行后光标重写，'> 会塌缩到 1
-    let lt = f.vim.marks.resolve('<').unwrap();
-    let gt = f.vim.marks.resolve('>').unwrap();
+    let lt = f.vim.marks.resolve('<', &f.buf).unwrap();
+    let gt = f.vim.marks.resolve('>', &f.buf).unwrap();
     assert_eq!(lt, 0, "'< = 提示符时选区起点");
     assert_eq!(gt, 5, "'> = 提示符时选区末字符之后，不随命令后的光标塌缩");
     // gv 复选原选区（0..5，cursor 停在末字符 o=4）

@@ -501,7 +501,9 @@ impl VimState {
         let (lo, hi) = (lo.min(hi), hi.max(lo));
         // `'<`/`'>` resolve through `last_visual` (the single source of
         // truth — `Marks::set` only stores letter marks anyway); the kind
-        // rides along so `gv` restores the same selection shape.
+        // rides along so `gv` restores the same selection shape. Stored in
+        // (line, col) coordinates on the CURRENT text — the Ex command's
+        // own mark adjustment already happened through the byte pair above.
         let end = buf.next_char_offset(hi).unwrap_or(hi);
         // one source of truth (kind included) — `gv` and `'<`/`'>` read it
         self.marks.last_visual = Some((lo, end, kind));
@@ -1011,7 +1013,7 @@ fn numeric_sort_key(text: &str) -> i64 {
                     .active_visual()
                     .map(|(a, _)| Base::Line(ctx.buf.offset_to_line(a)))
                     .or_else(|| {
-                        vim.marks.resolve('<').map(|off| {
+                        vim.marks.resolve('<', ctx.buf).map(|off| {
                             let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
                             Base::Line(ctx.buf.offset_to_line(off))
                         })
@@ -1026,7 +1028,7 @@ fn numeric_sort_key(text: &str) -> i64 {
                             ))
                         })
                         .or_else(|| {
-                            vim.marks.resolve('>').map(|off| {
+                            vim.marks.resolve('>', ctx.buf).map(|off| {
                                 // '<'> hi is exclusive; floor(hi-1) = last char
                                 let off = crate::buffer::floor_to_char_boundary(
                                     ctx.buf,
@@ -1066,7 +1068,7 @@ fn numeric_sort_key(text: &str) -> i64 {
                         return Err("E78: Unknown mark".to_owned());
                     }
                     vim.marks
-                        .resolve(name)
+                        .resolve(name, ctx.buf)
                         .map(|off| {
                             // `'>` stores the EXCLUSIVE end (one char past
                             // the selection): the exact `'>` arm above
