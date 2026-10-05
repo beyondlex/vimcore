@@ -297,13 +297,17 @@ fn register_kind(span: &OpSpan) -> RegisterKind {
 
 /// Delete the span into the register; updates the cursor.
 ///
-/// An EMPTY charwise span is a failed motion (e.g. a `dw` whose landing
-/// equals the cursor): it deletes nothing AND stores nothing — vim keeps the
-/// previous register content there (vim 9.1 probe: `ci(` on `()` leaves the
-/// unnamed register untouched). Zero-width inner text objects rely on this
-/// (`ci(` on `()` still enters insert).
+/// An EMPTY span is a failed operator, charwise OR LINEWISE: it deletes
+/// nothing AND stores nothing. The charwise case is a `dw` whose landing
+/// equals the cursor (`ci(` on `()` still enters insert, register untouched —
+/// vim 9.1 probe); the linewise case is `dd`/`dip`/`dap`/`Vd`/`dG` on an
+/// empty buffer, whose span is 0..0 — the old charwise-only guard let the
+/// empty linewise delete into the numbered ring + unnamed register, so a
+/// later `p` opened a stray empty line where vim beeps (round 28 probe).
+/// YANK has the OPPOSITE rule: an empty linewise yank stores an empty line
+/// (`yy` on an empty buffer puts an empty line in `"0`, 9.1 probe).
 pub fn delete_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: Option<char>) {
-    if !span.linewise && span.start >= span.end {
+    if span.start >= span.end {
         return;
     }
     let text = ctx.buf.slice(span.start..span.end);
@@ -336,6 +340,14 @@ pub struct BlockSpan {
     pub first_line: usize,
     /// One byte range per selected line, in line order.
     pub rows: Vec<Range<usize>>,
+    /// The `$` spelling was used inside the block selection: the block
+    /// covers each selected row from column 0 to its own content end —
+    /// the anchor column is IGNORED, rows carry whole lines, and vim's
+    /// 9.1 probes show delete/yank both treat them that way (`jll$d`
+    /// empties the covered lines from col 0; the yank register holds the
+    /// UNPADDED row texts). The flag rides along so the yank skips its
+    /// rectangle padding and block `A` skips its append-column pads.
+    pub dollar: bool,
 }
 
 /// The block's byte range on ONE line: every char whose display-column
@@ -396,6 +408,24 @@ pub fn span_from_visual_block(
     if kind != crate::mode::VisualKind::Block {
         return None;
     }
+    let first_line = buf.offset_to_line(anchor.min(cursor));
+    let last_line = buf.offset_to_line(anchor.max(cursor));
+    // `$` in blockwise visual (`:h v_$`): the block extends to the end of
+    // EVERY selected line — and the probes showed the anchor column drops
+    // out entirely (each row covers col 0..content end). Tracked on the
+    // engine by `VimState::block_dollar`, armed by the LineEnd motion.
+    if vim.block_dollar {
+        let rows = (first_line..=last_line)
+            .map(|line| buf.line_start(line)..buf.line_end(line))
+            .collect();
+        return Some(BlockSpan {
+            col_lo: 0,
+            col_hi: 0, // unused: dollar skips both the yank pads and the A pads
+            first_line,
+            rows,
+            dollar: true,
+        });
+    }
     let a_col = crate::buffer::display_column(buf, anchor);
     let c_col = crate::buffer::display_column(buf, cursor);
     let (col_lo, col_hi) = if a_col <= c_col {
@@ -403,8 +433,6 @@ pub fn span_from_visual_block(
     } else {
         (c_col, a_col)
     };
-    let first_line = buf.offset_to_line(anchor.min(cursor));
-    let last_line = buf.offset_to_line(anchor.max(cursor));
     // the cursor char is part of the block: exclusive end = corner col + 1
     let rows = (first_line..=last_line)
         .map(|line| block_row_range(buf, line, col_lo, col_hi + 1))
@@ -414,6 +442,7 @@ pub fn span_from_visual_block(
         col_hi: col_hi + 1,
         first_line,
         rows,
+        dollar: false,
     })
 }
 
@@ -820,12 +849,16 @@ pub(crate) fn clamped_repeat_count(per: usize, count: usize) -> usize {
 }
 
 /// Blockwise `p`/`P` from a block register (normal mode). Semantics probed
-/// against vim 9.1: the FIRST row lands at the target column on the cursor
-/// line (`p`: one column right of the cursor char; `P`: at it, short lines
-/// padded with spaces), and every following row becomes a NEW line inserted
-/// below the cursor line, padded out to the same column — existing lines are
-/// pushed down, never merged into. The cursor sits on the first pasted
-/// character. `count` repeats each row horizontally (vim's blockwise count).
+/// against vim 9.1 (round 28 PTY): the FIRST row lands at the target column
+/// on the cursor line (`p`: one column right of the cursor char; `P`: at it,
+/// short lines padded with spaces up to the column). Every following row
+/// lands at the SAME display column on the EXISTING line below — merged
+/// into it, padding the line with spaces first when it is short. Only rows
+/// past the buffer's last line open padded NEW lines at the tail (the old
+/// "push down, never merge" model came from probes that all sat on the
+/// buffer's last line, where the two models coincide). The cursor sits on
+/// the first pasted character. `count` repeats each row horizontally (vim's
+/// blockwise count).
 fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, after: bool) {
     // NO trailing-newline trim: the block yank stores rows joined by `\n`
     // with no terminator, but an EMPTY last row legitimately produces a
@@ -836,23 +869,31 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
     let col = if after { cur_col + 1 } else { cur_col };
 
     let line = ctx.buf.offset_to_line(vim.cursor.offset);
-    let line_start = ctx.buf.line_start(line);
-    let line_end = ctx.buf.line_end(line);
-    // rows 2.. become new lines after the cursor line's content (before its
-    // newline), each padded out to the column
-    let mut suffix = String::new();
-    for row in &rows[1..] {
-        suffix.push('\n');
-        for _ in 0..col {
-            suffix.push(' ');
+    let line_count = ctx.buf.line_count();
+    // rows 2..: bottom-up over the lines below the cursor line, then the
+    // overflow (targets past the buffer end) appends at the tail in order
+    let merged = (rows.len() - 1).min(line_count.saturating_sub(line + 1));
+    if rows.len() > merged + 1 {
+        let indent = " ".repeat(col);
+        let mut extra = String::new();
+        for row in &rows[merged + 1..] {
+            extra.push('\n');
+            extra.push_str(&indent);
+            extra.push_str(row);
         }
-        suffix.push_str(row);
+        // before the LAST line's newline: the overflow rows become the new
+        // tail lines (a trailing `\n`-less buffer gets its separator from
+        // the same `\n` prefix — line_end == len there)
+        let at = ctx.buf.line_end(line_count - 1);
+        vim.edit_insert(ctx, at, &extra);
     }
-    if !suffix.is_empty() {
-        vim.edit_insert(ctx, line_end, &suffix);
+    for i in (0..merged).rev() {
+        insert_block_row_at_column(vim, ctx, line + 1 + i, col, &rows[i + 1]);
     }
     // first row: byte boundary at display column `col` on the cursor line;
     // short lines get padded with spaces up to the column first
+    let line_start = ctx.buf.line_start(line);
+    let line_end = ctx.buf.line_end(line);
     let mut at = line_start;
     let mut covered = 0usize;
     while covered < col && at < line_end {
@@ -870,6 +911,34 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
     // leaves the cursor at the insert column of the cursor line)
     vim.cursor.offset = clamp_cursor(ctx.buf, at);
     vim.cursor.desired_col = None;
+}
+
+/// Insert `row` at display column `col` of `target`, padding the line with
+/// spaces up to `col` first when the line is shorter (vim's blockwise put
+/// merge: "cccc" + row at col 1 → "c<row>ccc"; a 2-char line at col 3 pads
+/// to "bb " before the row). Shared by the normal-mode put (`put_blockwise`)
+/// and the visual-block put's overflow rows.
+pub(crate) fn insert_block_row_at_column(
+    vim: &mut VimState,
+    ctx: &mut Ctx,
+    target: usize,
+    col: usize,
+    row: &str,
+) {
+    let le = ctx.buf.line_end(target);
+    let width = crate::buffer::display_column(ctx.buf, le);
+    // col == width is an APPEND (byte point = line end), not the clamped
+    // "last char" landing offset_for_display_column gives — `X` + row at
+    // col 1 must make "X<row>", not "<row>X"
+    let (at, pad) = if col < width {
+        (crate::buffer::offset_for_display_column(ctx.buf, target, col), 0)
+    } else {
+        (le, col - width)
+    };
+    let text = format!("{}{}", " ".repeat(pad), row);
+    if !text.is_empty() {
+        vim.edit_insert(ctx, at, &text);
+    }
 }
 
 /// `J` / `gJ`: join `count` lines (at least one join). `literal` = `gJ`

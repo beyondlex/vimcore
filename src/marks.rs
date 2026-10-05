@@ -137,13 +137,11 @@ impl Marks {
         });
     }
 
-    /// [`Self::for_each_pos`] variant usable with only a shared closure —
-    /// used by the engine's post-edit clamp pass.
-    pub(crate) fn for_each_pos_clamped(&mut self, mut f: impl FnMut(&mut usize)) {
-        self.for_each_pos(&mut f);
-    }
-
-    fn for_each_pos(&mut self, mut f: impl FnMut(&mut usize)) {
+    /// Visit every stored byte offset (named marks, the visual pair, the
+    /// live selection, `.`/`^`/jump-origin). The engine's edit funnels and
+    /// the post-edit clamp pass both run their shift/floor closures through
+    /// this single walk.
+    pub(crate) fn for_each_pos(&mut self, mut f: impl FnMut(&mut usize)) {
         for pos in self.offsets.values_mut() {
             f(pos);
         }

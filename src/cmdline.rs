@@ -736,13 +736,7 @@ impl VimState {
                     return;
                 }
             };
-            let (mut first, last) = range;
-            if count >= 1 {
-                first = last;
-            }
-            let last = last
-                .saturating_add(count.saturating_sub(1))
-                .min(ctx.buf.line_count().saturating_sub(1));
+            let (first, last) = Self::reanchor_range(ctx.buf, range, count);
             self.ex_delete_lines(ctx, (first, last), register);
             return;
         }
@@ -788,6 +782,21 @@ impl VimState {
         ctx.host
             .status_message(&format!("E492: Not an editor command: {line}"));
         ctx.host.bell();
+    }
+
+    /// The COUNT argument of `:d`/`:y`/`:j`/`:s` (vim `:h :d`): any explicit
+    /// count — 1 included — re-anchors the range to `count` lines STARTING
+    /// at the range's LAST line (`:1,2y 3` = lines 2-4). Shared by the four
+    /// commands; the returned range is clamped to the buffer.
+    fn reanchor_range(
+        buf: &dyn crate::buffer::VimBuffer,
+        (first, last): (usize, usize),
+        count: usize,
+    ) -> (usize, usize) {
+        let buf_last = buf.line_count().saturating_sub(1);
+        let last = last.min(buf_last);
+        let first = if count >= 1 { last } else { first.min(last) };
+        (first, last.saturating_add(count.saturating_sub(1)).min(buf_last))
     }
 
     /// `cmd` at the line start with a command boundary (end, space, `!`).
@@ -1255,14 +1264,7 @@ fn numeric_sort_key(text: &str) -> i64 {
                 return;
             }
         };
-        let last = last.min(ctx.buf.line_count().saturating_sub(1));
-        let mut first = first.min(last);
-        if count >= 1 {
-            first = last;
-        }
-        let last = last
-            .saturating_add(count.saturating_sub(1))
-            .min(ctx.buf.line_count().saturating_sub(1));
+        let (first, last) = Self::reanchor_range(ctx.buf, (first, last), count);
         if addr_count >= 2 && first == last {
             // `:2,2j` — vim: nothing happens, not even a seam
             return;
@@ -1496,16 +1498,9 @@ fn numeric_sort_key(text: &str) -> i64 {
                 return;
             }
         };
-        let (mut first, mut last) = (first, last);
         // any EXPLICIT count (even 1) re-anchors at the range's last line
         // (vim: `:1,2y 1` yanks just line 2)
-        if count >= 1 {
-            first = last;
-        }
-        last = last
-            .saturating_add(count.saturating_sub(1))
-            .min(ctx.buf.line_count().saturating_sub(1));
-        let first = first.min(last);
+        let (first, last) = Self::reanchor_range(ctx.buf, (first, last), count);
         let span = crate::ops::OpSpan {
             start: ctx.buf.line_start(first),
             end: ctx.buf.line_range(last).end,
@@ -1806,16 +1801,27 @@ fn numeric_sort_key(text: &str) -> i64 {
             }
             None => (flags_raw, None),
         };
+        // vim rejects a flag outside its set with E488 and runs NOTHING
+        // (9.1 probe: `:s/a/X/z` → "E486"-style E488 "Trailing characters:
+        // z", buffer untouched). The engine used to ignore unknown letters
+        // and substitute anyway — a typo'd flag silently changed the text.
+        // VALID vim flags: g i I n + the accepted-no-op set below (`c` is
+        // the documented no-UI divergence; `e` suppresses the miss report
+        // below; `l`/`p`/`#`/`&` ride along). Digits/whitespace are the
+        // count, handled above.
+        if let Some(bad) = flags_raw
+            .chars()
+            .filter(|c| !c.is_whitespace() && !c.is_ascii_digit())
+            .find(|c| !matches!(c, 'g' | 'i' | 'I' | 'n' | 'c' | 'e' | 'l' | 'p' | '#' | '&'))
+        {
+            Self::report_trailing(ctx, &bad.to_string(), line);
+            return true;
+        }
+        // a trailing count re-anchors at the range's LAST line and extends
+        // DOWN (`reanchor_range`; probe 9.1: `:5s/a/X/20` on ten lines
+        // replaces 5-10, `:1,3s/a/X/2` replaces 3-4)
         let range = match count {
-            Some(n) if n >= 1 => {
-                // vim starts the window AT the range's last line and extends
-                // DOWN (probe 9.1: `:5s/a/X/20` on ten lines replaces 5-10;
-                // `:1,3s/a/X/2` replaces 3-4). Clamping at EOF must not slide
-                // the start upward — the old `(last - (n-1))` form turned
-                // `:5s/a/X/20` into a whole-file replace once `last` hit `$`.
-                let buf_last = ctx.buf.line_count().saturating_sub(1);
-                (range.1, range.1.saturating_add(n - 1).min(buf_last))
-            }
+            Some(n) if n >= 1 => Self::reanchor_range(ctx.buf, range, n),
             _ => range,
         };
 
@@ -1864,9 +1870,13 @@ fn numeric_sort_key(text: &str) -> i64 {
                 }
             }
             if total == 0 {
-                ctx.host
-                    .status_message(&format!("E486: Pattern not found: {pattern}"));
-                ctx.host.bell();
+                // the `e` flag is vim's "no error message for a failed
+                // substitute" — a silent return, not a miss report
+                if !flags.contains('e') {
+                    ctx.host
+                        .status_message(&format!("E486: Pattern not found: {pattern}"));
+                    ctx.host.bell();
+                }
                 return true;
             }
             let msg = if lines_with == 1 {
@@ -1946,9 +1956,12 @@ fn numeric_sort_key(text: &str) -> i64 {
         }
 
         if total == 0 {
-            ctx.host
-                .status_message(&format!("E486: Pattern not found: {pattern}"));
-            ctx.host.bell();
+            // `e` (no error message) takes the miss report out too
+            if !flags.contains('e') {
+                ctx.host
+                    .status_message(&format!("E486: Pattern not found: {pattern}"));
+                ctx.host.bell();
+            }
             return true;
         }
 
