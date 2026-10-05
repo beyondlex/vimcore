@@ -279,6 +279,14 @@ pub struct VimState {
     /// A user mapping just expanded: the queued expansion belongs to the
     /// mapping, so a cmdline entry inside it must not break the queue early.
     expanding_mapping: bool,
+    /// Keys still queued from a mapping expansion: the pipeline must not
+    /// RECORD them. Vim's macros and redo buffer store keys AS TYPED
+    /// (`qaxq` with `:nmap x dd` stores "x" — 9.1 probe: `@a` runs one dd,
+    /// not three): the LHS is recorded where the mapping MATCHES, and its
+    /// expansion replays from that match instead of living in the macro.
+    /// Decrementing here keeps the skip exactly in step with the queued
+    /// expansion keys, including nested expansions.
+    expansion_keys_left: usize,
     /// Changelist (`g;`/`g,`): positions of recent changes, newest last;
     /// `change_pos` indexes the current entry.
     changes: Vec<usize>,
@@ -428,6 +436,7 @@ impl VimState {
             last_macro_played: None,
             no_remap_left: 0,
             expanding_mapping: false,
+            expansion_keys_left: 0,
             lenient_actions: false,
             hlsearch_live_update: true,
             changes: Vec::new(),
@@ -724,6 +733,7 @@ impl VimState {
                 // a stale no-remap budget would silently bypass mapping
                 // resolution for every LATER keystroke until it drained
                 self.no_remap_left = 0;
+                self.expansion_keys_left = 0;
                 self.reset_pending();
                 self.discard_change_record();
                 self.replaying = false;
@@ -774,12 +784,20 @@ impl VimState {
             // (insert-mode printables on macOS: the host places that text
             // itself) are popped again below — the text placement records
             // the Text step instead, exactly once. Otherwise every typed
-            // char would replay twice.
-            if self.recording_active() {
+            // char would replay twice. Mapping-expansion keys are never
+            // recorded here (see `expansion_keys_left`): the LHS was
+            // recorded where the mapping matched.
+            let recorded = if self.expansion_keys_left > 0 {
+                self.expansion_keys_left -= 1;
+                false
+            } else if self.recording_active() {
                 self.record_key(&front);
-            }
+                true
+            } else {
+                false
+            };
             let outcome = self.process_key(ctx, front);
-            if self.recording_active() && outcome == ProcessOutcome::Unknown {
+            if recorded && outcome == ProcessOutcome::Unknown {
                 self.unrecord_key();
             }
             match outcome {
@@ -864,7 +882,22 @@ impl VimState {
                 expansion,
                 noremap,
             } => {
-                self.pending_keys.drain(..used);
+                // Record the keys AS TYPED (see `expansion_keys_left`): the
+                // LHS keys are drained here and would otherwise never reach
+                // the pipeline's record site, while their expansion would be
+                // recorded key by key — a recorded macro then held the RHS
+                // text instead of the user's keystroke, and replaying it ran
+                // the command once per expansion key.
+                let typed: Vec<Key> = self.pending_keys.drain(..used).collect();
+                if self.expansion_keys_left == 0 && self.recording_active() {
+                    for k in &typed {
+                        self.record_key(k);
+                    }
+                }
+                self.expansion_keys_left = self
+                    .expansion_keys_left
+                    .saturating_sub(used)
+                    .saturating_add(expansion.len());
                 if noremap {
                     self.no_remap_left = expansion.len();
                 }
@@ -876,6 +909,7 @@ impl VimState {
                 if self.map_depth > MAX_MAP_DEPTH {
                     self.pending_keys.clear();
                     self.no_remap_left = 0;
+                    self.expansion_keys_left = 0;
                     self.reset_pending();
                     ctx.host.bell();
                     return MappingStep::Done;
@@ -922,11 +956,15 @@ impl VimState {
                 let kind = *kind;
                 let queued: Vec<Key> = self.pending_keys.drain(..).collect();
                 self.cmd_seq.clear();
-                if self.recording_active() {
+                // typed keys only (see `expansion_keys_left`): an expansion
+                // that resolves straight into a builtin must not bake its
+                // RHS text into the macro either
+                if self.expansion_keys_left == 0 && self.recording_active() {
                     for k in &queued {
                         self.record_key(k);
                     }
                 }
+                self.expansion_keys_left = self.expansion_keys_left.saturating_sub(queued.len());
                 // a resolved command consumes cleanly; Feed can't occur for
                 // a terminal trie hit
                 let _ = self.execute_command(ctx, kind);
