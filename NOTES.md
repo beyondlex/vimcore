@@ -5,7 +5,74 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
-## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十八轮检视增补（2026-10-06，回归测试并入
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十九轮检视增补（2026-10-06，新增 `tests/probe_round29{,b,c,d}.rs`
+（+35 例定向探针））
+
+本轮主题：**tag 对象语义、宏录制对映射展开键的记录方式、incsearch 空
+模式预览**。探针设施再升级：round 28 的 PTY 逐键投递对宏录制（`q`）仍
+不可靠——`:normal`/`-es` 里的 `q` 行为特殊（寄存器内容会被命令文本污
+染），本轮改用 `vim -s scriptfile` 真 typeahead（键序列文件 + 脚本内
+`writefile` 采样），`q` 录制在该通道下完全正常。**教训入库：涉及宏录
+制、映射、重放的实证必须走 `-s` typeahead，`-es` 的结论一律作废重验**
+——round 28 早期一个「vim 也存展开键」的假阴性就是这么来的。
+
+### 语义修复（vim 9.1 typeahead 探针实证）
+
+| # | 问题 | 实证/根因 |
+|---|------|-----------|
+| 1 | **tag 对象 inner 吞闭合标签** | `<div><p>x</p></div>` 光标在 x 上 `dit` 删出 `<div><p></div>`——inner 范围终点用了 `close_end`（闭标签 `>` 之后），把 `</p>` 一起删了。vim：`<div><p></p></div>`。`tag_range` 的 inner 终点改为闭标签自己的 `<`（`close_start`）。现有测试只钉过不变量（不 panic），没钉过语义——`it`/`at` 的语义面由此进入探针常驻 |
+| 2 | **tag 对象容器判定：开标签上爬错层** | 光标在 `<p>` 的 `<` 上（col 5）`dit` 旧引擎删 `<p>x</p>`（爬到 div 层）；vim 删 `x`（取 p 自己的块）。闭标签侧 vim 相反：光标在 `</p>` 的 `<` 上取**外层**。实证规则 `open_start <= offset < close_end`（12 个光标位置 dit/dat 全对齐），旧代码的严格 `open_start < offset` 放开一档。NOTES 分歧 #9 的「开标签 `<` 上不选中」条目随之**作废删除** |
+| 3 | **宏/redo 记录映射展开键** | `:nmap x dd` + `qaxjyyq`：vim 寄存器 a = `"xjyy"`（原始键）；引擎记成展开后的 `xdd…`（pipeline 逐键 record），宏长度按展开计、`@a` 重放按展开键重复执行（一次 dd 变多次）。修复：映射 Match 处记录 LHS 原始键，新增 `expansion_keys_left` 计数让展开键在 pipeline 跳过录制（Unknown 退录同步走 `recorded` 布尔，noremap/失控护栏/内建解析路径的计数复位都收口）。`2.`、`2@a`、`u`、Named 键映射、嵌套展开各有探针 |
+| 4 | **incsearch 空模式预览发布零宽匹配** | `/foo` 后 `<BS>`×3 清空提示符：空正则在每个字节位置零宽匹配，旧实现把上万个 `i..i` 区间发布给宿主渲染。vim 的预览回落到上一次已接受搜索的高亮集合。`publish_incsearch` 空模式臂改为与 `cancel_cmdline` 同源的恢复逻辑 |
+
+### 检视中证伪、无需改的（免下轮重查）
+
+- **宏录制会话的 `.` 污染担忧**：`qaxix<Esc>q` 后 `last_change` 是否裹挟
+  `q`/`a` 前缀？证伪——`complete_char_arg` 尾部的 `end_command` 在宏启动
+  时就清掉了 `recording`（`mutated=false` 走 else 分支），`last_change`
+  干净地只有 `[i, Text, Esc]`。探针钉死：`.` 重放不重启录制会话、不改写
+  宏内容。
+- **`-0` 上 `<C-a>`**：结果非负时去负号得 `1`，vim 同。
+- **`0x`/`0b` 前缀后无合法数字**：光标在前缀 `0` 上按十进制递增（`0x
+  tail` → `1x tail`）；光标在 `x` 上报 E18（0 在光标之前）——与 vim 一致。
+- **`:0d`** 删第一行；**空行 `~`** 静默无操作（typeahead 实证 vim 同）；
+  **空行 `v$d`** 删掉空行本身（可视选区覆盖换行符）；**insert `<C-r>` 贴
+  linewise 寄存器**按文本原样进插入点（寄存器尾 `\n` 拆行）——全部一致。
+- **`.` 之后的 x**：重放插入后光标停在首字符，`x` 删该字符——与 vim 的
+  光标落点一致。
+- **`f<CR>` 失败**：不覆盖 last_find，但**不回绕**（`;` 在行尾找不到就失
+  败响铃）；引擎与 vim 一致（round 28 曾证伪过「失败恢复旧目标」，本轮补
+  的探针把响铃次数也钉住）。
+
+### 新增已知分歧（接全局序号）
+
+75. **insert 映射展开为可打印字符的 `@` 重放**：`:imap z xy` 后宏里的 `z`
+    存原始键（正确），但重放时展开出的 `x`/`y` 走宿主文本放置路径，
+    `record_typed_text` 会把文本再记一层（`@` 重放的 `replay_records` 开
+    着）。`.` 重放不受影响（录制关闭）。罕见组合（宏 × insert 打字映
+    射），宿主也可在放置路径自查。
+76. **无。（`~` 空行、radix 边界等本轮候选全部实证一致，未新增分歧项）**
+
+### 重构（零行为变化）
+
+- `pending_visual_marks` 写回块在 `exit_insert` 与 `finish_visual_op` 逐字
+  重复 → `write_pending_visual_marks`（floor + lo..hi 归一一处收口；
+  linewise 走 adjusted 分支的 peek 逻辑内联为 `matches!`）。
+- case 映射闭包在 `ops::apply` 与 `apply_block_operator` 重复 →
+  `case_mapped_text`（Line/Block 两路共享 ß↔SS 多字符映射规则）。
+- `insert_text_at_cursor` 内联的空白行剥离 → 复用 `strip_ai_line`（CR 拆
+  行的 did_ai 剥离单一实现）。
+- `numeric_sort_key` 函数体与文档注释错排在列 0 → 修正缩进。
+- `RepeatChange` 处「mappings off while replaying」注释作废修正——重放按
+  vim 语义照常经过映射表（记录的是原始键，重放时再展开）。
+
+### 性能备注
+
+无热路径变化。宏录制路径每键多一次 `expansion_keys_left` 计数比较（分支
+预测友好）；`publish_incsearch` 空模式少一次全缓冲扫描（原来对空正则照
+扫）。
+
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第二十八轮检视增补（2026-10-06，回归测试并入
 `tests/review_regressions.rs`（+20 例））
 
 本轮主题：**块可视（visual block）的寄存器与 `$` 全链路 + 空算子的寄存器
@@ -1841,8 +1908,10 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
    存入 `"a`）。
 8. **句子 motion 只认 `.!?` 单字符**，无 `...`、换行跟随等规则
    （`Motion::SentenceNext` 注释已声明）。
-9. **tag 对象（`it`/`at`）**：属性值里的 `<`/`>` 会干扰解析；光标恰好
-   停在开标签 `<` 上不选中（代码注释已声明）。
+9. ~~tag 对象（`it`/`at`）光标停在开标签 `<` 上不选中~~（**第二十九轮已
+   修复**：容器判定改为 `open_start <= offset < close_end`，与 vim 9.1 的
+   12 位置探针矩阵对齐——开标签上取该块自己、闭标签 `<` 上取外层；inner
+   终点同步修正为闭标签自己的 `<`。属性值里的 `<`/`>` 干扰解析仍属现状）。
 10. ~~`\\"` 转义引号~~（**第十四轮已修复**：`quote_positions` 按反斜杠
     游程长度 mod 2 判定，`\\"` 后的引号正确配对为字面反斜杠 + 真引号）。
 11. ~~insert 模式 `<C-w>`/`<C-u>` 在行首不删除换行~~（**第九轮已修复**：
