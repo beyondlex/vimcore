@@ -361,6 +361,13 @@ pub struct VimState {
     /// deletion point, leaving `gv` zero-width.
     pending_visual_marks: Option<(usize, usize, VisualKind)>,
 
+    /// `$` was pressed inside a BLOCKWISE visual selection (the LineEnd
+    /// motion armed it; any other motion disarms it — vim tracks the same
+    /// state as curswant=MAXCOL). While set, the block covers each selected
+    /// row from column 0 to its own content end (see
+    /// [`crate::ops::BlockSpan::dollar`]).
+    pub(crate) block_dollar: bool,
+
     undo_seq: u64,
     open_undo: Option<u64>,
     /// Whether `open_undo` has been announced to the host (lazy group
@@ -445,6 +452,7 @@ impl VimState {
             tables: CommandTables::build(),
             replace_overwritten: Vec::new(), // (offset, original) pairs — see field doc
             pending_visual_marks: None,
+            block_dollar: false,
             undo_seq: 0,
             open_undo: None,
             undo_group_announced: false,
@@ -1499,7 +1507,7 @@ impl VimState {
         let floor = |p: &mut usize| {
             *p = crate::buffer::floor_to_char_boundary(buf, *p);
         };
-        self.marks.for_each_pos_clamped(floor);
+        self.marks.for_each_pos(floor);
         for pos in self.changes.iter_mut() {
             floor(pos);
         }
@@ -1573,6 +1581,15 @@ impl VimState {
             None
         };
         self.cursor.offset = clamp_cursor(ctx.buf, result.offset);
+        // the blockwise `$` state rides on the motion: LineEnd arms it
+        // (`$`, `<End>` — vim's curswant=MAXCOL), anything else disarms it
+        self.block_dollar = matches!(motion, Motion::LineEnd)
+            && matches!(
+                self.mode,
+                Mode::Visual {
+                    kind: crate::mode::VisualKind::Block
+                }
+            );
         if result.kind == crate::motions::MotionKind::Linewise {
             if preserves_column {
                 let desired = desired.unwrap();
@@ -1679,6 +1696,20 @@ impl VimState {
     /// dropped, matching how vim strips a whitespace-only autoindented line
     /// at Esc (see `insert_did_ai`). Charwise kinds (`3i`/`3A`/`3R`) with
     /// nothing typed repeat nothing.
+    /// The cursor-anchored LINEWISE span `[count]` lines tall — the shared
+    /// shape of the doubling path (`3dd`), `S`, `Y` and the `guu`-family:
+    /// from the cursor line through the (count-1)-th line below, clamped at
+    /// the buffer end.
+    fn linewise_span_at_cursor(&self, ctx: &Ctx, count: usize) -> ops::OpSpan {
+        let line = ctx.buf.offset_to_line(self.cursor.offset);
+        let last = (line + count - 1).min(ctx.buf.line_count() - 1);
+        ops::OpSpan {
+            start: ctx.buf.line_start(line),
+            end: ctx.buf.line_range(last).end,
+            linewise: true,
+        }
+    }
+
     fn replicate_count_insert(&mut self, ctx: &mut Ctx) {
         let Some(rep) = self.insert_repeat.take() else {
             return;
@@ -2237,6 +2268,7 @@ impl VimState {
         let cursor = crate::buffer::floor_to_char_boundary(buf, cursor);
         self.visual_anchor = Some(clamp_cursor(buf, anchor));
         self.cursor.offset = clamp_cursor(buf, cursor);
+        self.block_dollar = false;
         if !matches!(self.mode, Mode::Visual { .. }) {
             self.mode = Mode::Visual {
                 kind: VisualKind::Char,
@@ -2250,6 +2282,7 @@ impl VimState {
         self.visual_anchor = Some(self.cursor.offset);
         self.mode = Mode::Visual { kind };
         self.marks.active_visual = Some((self.cursor.offset, self.cursor.offset));
+        self.block_dollar = false;
     }
 
     pub(crate) fn exit_visual(&mut self, ctx: &mut Ctx) {
@@ -2265,6 +2298,7 @@ impl VimState {
         self.visual_anchor = None;
         self.marks.active_visual = None;
         self.mode = Mode::Normal;
+        self.block_dollar = false;
         self.discard_change_record();
         ctx.host.changed();
     }
@@ -2272,6 +2306,27 @@ impl VimState {
     /// Restore the cursor to a visual range start (used after visual ops).
     /// Row-wise application of an operator over a visual block. Only
     /// Delete / Yank / Change are supported in v1 (other operators bell).
+    /// Store the block rows into the register file (blockwise, rows joined
+    /// by `\n` WITHOUT padding — vim's block registers keep the raw row
+    /// texts; the width rides in the register type, and the put side pads).
+    /// The explicit `register` prefix is honored (`"a` + block delete);
+    /// without one the delete targets (numbered ring / `-`) + unnamed
+    /// mirror apply. Row texts must be sliced BEFORE any edit.
+    fn store_block_rows(
+        &mut self,
+        ctx: &Ctx,
+        rows: &[std::ops::Range<usize>],
+        register: Option<char>,
+    ) {
+        let text = rows
+            .iter()
+            .map(|r| ctx.buf.slice(r.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.registers
+            .store_delete(register, text, crate::registers::RegisterKind::Blockwise);
+    }
+
     fn apply_block_operator(&mut self, ctx: &mut Ctx, op: Operator) {
         let Some(block) = ops::span_from_visual_block(self, ctx.buf) else {
             ctx.host.bell();
@@ -2287,6 +2342,11 @@ impl VimState {
         ));
         match op {
             Operator::Delete => {
+                // the deleted block becomes the register content (vim 9.1:
+                // `<C-v>jlld` + `p` pastes the block back; `"0` untouched).
+                // The engine used to store NOTHING here, so `p` after a
+                // block delete pasted stale register content.
+                self.store_block_rows(ctx, &block.rows, self.register);
                 self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
                 self.end_edit();
@@ -2297,20 +2357,19 @@ impl VimState {
                 self.finish_visual_op(ctx);
             }
             Operator::Yank => {
-                let width = block.col_hi.saturating_sub(block.col_lo);
-                let mut texts = Vec::new();
-                for range in &block.rows {
-                    let mut text = ctx.buf.slice(range.clone());
-                    // pad rows to the block width so blockwise put keeps
-                    // its rectangle
-                    let mut w: usize = text.chars().map(crate::buffer::char_display_width).sum();
-                    while w < width {
-                        text.push(' ');
-                        w += 1;
-                    }
-                    texts.push(text);
-                }
-                let block_text = texts.join("\n");
+                // rows go into the register VERBATIM (vim 9.1 probe: a
+                // block yank over rows "long"/"abc" stores "long\nabc" —
+                // the short row is NOT padded; the old code padded to the
+                // rectangle width, so `:reg`/`"+` showed trailing spaces
+                // vim doesn't have. Put-side padding is where the rectangle
+                // comes back — put_blockwise pads the cursor column and
+                // `A`/`I` pads are append-side too.)
+                let block_text = block
+                    .rows
+                    .iter()
+                    .map(|range| ctx.buf.slice(range.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 crate::registers::sync_clipboard_host(ctx.host, self.register, &block_text);
                 self.registers.store_yank(
                     self.register,
@@ -2323,6 +2382,10 @@ impl VimState {
                 self.finish_visual_op(ctx);
             }
             Operator::Change => {
+                // block `c` stores the deleted block too (vim 9.1 probe:
+                // `<C-v>jlc` + `p` after the session pastes the deleted
+                // rows — same delete-semantics as the Delete arm)
+                self.store_block_rows(ctx, &block.rows, self.register);
                 self.begin_edit();
                 // block `c` continues into insert: the stash captured at
                 // entry rides to `exit_insert` (see `pending_visual_marks`)
@@ -2422,8 +2485,10 @@ impl VimState {
         // "123456"/"12" gives "123 X456"/"12  X" — the short row pads to the
         // append column, not just to col_lo). The old `range.is_empty()`
         // filter left rows ending between col_lo and col_hi unpadded, and
-        // `A` appended at the row's own end instead.
-        let pads: Vec<(usize, usize)> = if append {
+        // `A` appended at the row's own end instead. A `$` block skips the
+        // pads: each row appends at its OWN line end (the block has no
+        // shared right edge to pad out to).
+        let pads: Vec<(usize, usize)> = if append && !block.dollar {
             block
                 .rows
                 .iter()
@@ -2464,13 +2529,22 @@ impl VimState {
             self.republish_search(ctx);
         }
         let cursor_line = ctx.buf.offset_to_line(self.cursor.offset);
-        // the pads above shifted every row below them: recompute each row's
-        // byte range against the CURRENT buffer instead of trusting the
-        // pre-pad spans in block.rows
-        let last_row_line = block.first_line + block.rows.len() - 1;
-        let ranges: Vec<std::ops::Range<usize>> = (block.first_line..=last_row_line)
-            .map(|line| ops::block_row_range(ctx.buf, line, block.col_lo, block.col_hi))
-            .collect();
+        // `$` blocks carry their rows as whole-line content already; the
+        // column-model recompute below has no meaningful col_lo/col_hi to
+        // offer (col_hi is a placeholder), so the precomputed rows are used
+        // verbatim: `I` inserts at each row's line start, `A` appends at
+        // each row's own line end — vim's `$`-block `I`/`A` (9.1 probes).
+        let ranges: Vec<std::ops::Range<usize>> = if block.dollar {
+            block.rows.clone()
+        } else {
+            // the pads above shifted every row below them: recompute each row's
+            // byte range against the CURRENT buffer instead of trusting the
+            // pre-pad spans in block.rows
+            let last_row_line = block.first_line + block.rows.len() - 1;
+            (block.first_line..=last_row_line)
+                .map(|line| ops::block_row_range(ctx.buf, line, block.col_lo, block.col_hi))
+                .collect()
+        };
         let mut rows = Vec::new();
         let mut typing_offset = None;
         for (i, range) in ranges.iter().enumerate() {
@@ -2580,6 +2654,7 @@ impl VimState {
         // offsets are already stale (pre-edit bytes deleted out from under
         // them, probe: `Vjd` then `:'<,'>d` emptied the whole buffer)
         self.marks.active_visual = None;
+        self.block_dollar = false;
         if !matches!(self.mode, Mode::Insert | Mode::Replace) {
             self.mode = Mode::Normal;
         }
@@ -2726,13 +2801,7 @@ impl VimState {
             {
                 if trigger == *c {
                     let count = self.take_total_count();
-                    let line = ctx.buf.offset_to_line(self.cursor.offset);
-                    let last = (line + count - 1).min(ctx.buf.line_count() - 1);
-                    let span = ops::OpSpan {
-                        start: ctx.buf.line_start(line),
-                        end: ctx.buf.line_range(last).end,
-                        linewise: true,
-                    };
+                    let span = self.linewise_span_at_cursor(ctx, count);
                     self.complete_operator_with_span(ctx, span);
                     return ProcessOutcome::Consumed;
                 }
@@ -3668,13 +3737,7 @@ impl VimState {
             // probe: `3S` on lines 2-4 clears exactly those three)
             NormalCmd::SubstituteLine => {
                 let count = self.take_total_count();
-                let line = ctx.buf.offset_to_line(self.cursor.offset);
-                let last = (line + count - 1).min(ctx.buf.line_count() - 1);
-                let span = ops::OpSpan {
-                    start: ctx.buf.line_start(line),
-                    end: ctx.buf.line_range(last).end,
-                    linewise: true,
-                };
+                let span = self.linewise_span_at_cursor(ctx, count);
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::apply(self, ctx, Operator::Change, &span, self.register);
@@ -3734,13 +3797,7 @@ impl VimState {
             // Y: yank count whole lines (linewise, so `p` opens lines)
             NormalCmd::YankLine => {
                 let count = self.take_total_count();
-                let line = ctx.buf.offset_to_line(self.cursor.offset);
-                let last = (line + count - 1).min(ctx.buf.line_count() - 1);
-                let span = ops::OpSpan {
-                    start: ctx.buf.line_start(line),
-                    end: ctx.buf.line_range(last).end,
-                    linewise: true,
-                };
+                let span = self.linewise_span_at_cursor(ctx, count);
                 ops::yank_span(self, ctx, &span, self.register);
             }
             // r{char}: the replacement char arrives as a char argument
@@ -3840,13 +3897,7 @@ impl VimState {
             // linewise application over count lines
             NormalCmd::LinewiseOp(op) => {
                 let count = self.take_total_count();
-                let line = ctx.buf.offset_to_line(self.cursor.offset);
-                let last = (line + count - 1).min(ctx.buf.line_count() - 1);
-                let span = ops::OpSpan {
-                    start: ctx.buf.line_start(line),
-                    end: ctx.buf.line_range(last).end,
-                    linewise: true,
-                };
+                let span = self.linewise_span_at_cursor(ctx, count);
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::apply(self, ctx, op, &span, self.register);
@@ -4036,6 +4087,7 @@ impl VimState {
             // gv: re-select the last visual range (its kind, too)
             NormalCmd::RestoreVisual => {
                 if let Some((lo, hi, kind)) = self.marks.last_visual {
+                    self.block_dollar = false;
                     // floor the anchor too (defensive: the stored span is
                     // refloored on every edit, but a host text swap between
                     // engines must not resurrect a mid-char offset)
@@ -4115,6 +4167,13 @@ impl VimState {
             return;
         };
         self.recording_blocked = true;
+        // The deleted selection becomes the register content (vim's swap
+        // idiom: `<C-v>jy` + `<C-v>jp` + another `p` pastes the JUST-DELETED
+        // block back — 9.1 probe). The DELETED text goes to the unnamed
+        // mirror / delete targets even when the PASTE came from an explicit
+        // register (`"a` stays untouched — 9.1 probe `viw"ap` leaves "a").
+        // Rows sliced BEFORE the deletions.
+        self.store_block_rows(ctx, &block.rows, None);
         self.begin_edit();
         let cursor_to = block.rows.first().map(|r| r.start).unwrap_or(0);
         match data.kind {
@@ -4122,6 +4181,39 @@ impl VimState {
                 // plain split, no trailing-\n trim: an empty last block row
                 // yields a legitimate trailing `\n` (see put_blockwise)
                 let rows: Vec<&str> = data.text.split('\n').collect();
+                // vim 9.1 probe: register rows beyond the selection land at
+                // the block's left column on the EXISTING lines below the
+                // selection, and only rows past the buffer's last line open
+                // new ones (3-row register on a 2-row block → the third row
+                // merges into the next line; at the buffer tail it becomes a
+                // new padded line). The engine used to drop them.
+                if rows.len() > block.rows.len() {
+                    let below_first = block.first_line + block.rows.len();
+                    let line_count = ctx.buf.line_count();
+                    let extra_count = rows.len() - block.rows.len();
+                    let merged = extra_count.min(line_count.saturating_sub(below_first));
+                    let indent = " ".repeat(block.col_lo);
+                    if extra_count > merged {
+                        let mut extra = String::new();
+                        for row in &rows[block.rows.len() + merged..] {
+                            extra.push('\n');
+                            extra.push_str(&indent);
+                            extra.push_str(row);
+                        }
+                        // before the last line's newline (see put_blockwise)
+                        let at = ctx.buf.line_end(line_count - 1);
+                        self.edit_insert(ctx, at, &extra);
+                    }
+                    for j in (0..merged).rev() {
+                        crate::ops::insert_block_row_at_column(
+                            self,
+                            ctx,
+                            below_first + j,
+                            block.col_lo,
+                            rows[block.rows.len() + j],
+                        );
+                    }
+                }
                 for (i, range) in block.rows.iter().enumerate().rev() {
                     if range.is_empty() {
                         continue;
@@ -4248,10 +4340,12 @@ impl VimState {
                     ctx.host.bell();
                     return;
                 };
-                // the stash doubles as protection: delete_span rewrites the
-                // registers with the deleted selection before the paste
+                // the deleted selection goes to the UNNAMED mirror / delete
+                // targets (vim 9.1 probe: `viw"ap` leaves register `a` with
+                // its previous content and puts the replaced text in `"`).
+                // Passing the paste register here used to overwrite it.
                 self.begin_edit();
-                ops::delete_span(self, ctx, &span, self.register);
+                ops::delete_span(self, ctx, &span, None);
                 {
                     // visual `p` with a count repeats the register; the byte
                     // ceiling keeps `99999999p` from allocating register × count
