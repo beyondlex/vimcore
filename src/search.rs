@@ -247,6 +247,20 @@ pub fn publish_incsearch(vim: &mut VimState, ctx: &mut Ctx, pattern: &str) {
     if !vim.options.incsearch {
         return;
     }
+    if pattern.is_empty() {
+        // the prompt was erased (typing then <BS> to empty): the empty
+        // pattern matches zero-width at EVERY byte, so scanning it would
+        // publish thousands of `i..i` ranges. vim's preview falls back to
+        // the last ACCEPTED search's highlights here — same set
+        // `cancel_cmdline` restores.
+        if vim.options.hlsearch {
+            let matches = vim.search.last_matches.clone();
+            ctx.host.set_search_highlights(&matches, None);
+        } else {
+            ctx.host.set_search_highlights(&[], None);
+        }
+        return;
+    }
     let matches = all_matches(vim, ctx.buf, pattern);
     // the "current" preview is the match vim's incsearch would JUMP to on
     // Enter: the first one at/after the cursor, wrapping to the buffer's
