@@ -101,6 +101,18 @@ impl VimState {
         self.cmdline.buffer.clear();
         self.cmdline.history_pos = None;
         self.mode = Mode::CommandLine { prompt };
+        if prompt == ':' {
+            // The `:` key was optimistically recorded by the pipeline before
+            // it opened the prompt, and the Ex keys that follow never reach
+            // the recording (handle_key's cmdline branch skips them for `:`).
+            // Leaving the bare `:` in would make `.` after a mutating Ex
+            // re-open this prompt out of nowhere; vim's `.` after `:s`
+            // replays the prior NORMAL change instead. Search prompts keep
+            // their recording — a `d/pat<CR>` change replays its full key
+            // run. Macro capture is unaffected (its own copy is pushed
+            // directly in handle_key).
+            self.recording.clear();
+        }
     }
 
     /// Execute the current pattern and jump to the first match.
