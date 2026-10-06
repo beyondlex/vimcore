@@ -103,6 +103,9 @@ impl VimState {
                         } else {
                             Motion::Down
                         };
+                        // the new line owns no typed text yet: its C-w/C-u
+                        // floor re-arms at the first typed byte there
+                        self.insert_typed_start = None;
                         self.goto_motion(ctx, motion, 1);
                         return ProcessOutcome::Consumed;
                     }
@@ -131,6 +134,7 @@ impl VimState {
                             ctx.host.bell();
                             return ProcessOutcome::Consumed;
                         }
+                        self.insert_typed_start = None;
                         self.goto_motion(ctx, Motion::PageUp, 1);
                         return ProcessOutcome::Consumed;
                     }
@@ -139,6 +143,7 @@ impl VimState {
                             ctx.host.bell();
                             return ProcessOutcome::Consumed;
                         }
+                        self.insert_typed_start = None;
                         self.goto_motion(ctx, Motion::PageDown, 1);
                         return ProcessOutcome::Consumed;
                     }
@@ -313,13 +318,23 @@ impl VimState {
 
     /// `<C-w>`: delete the word before the cursor, like typing `b` then
     /// deleting. Word classes follow normal mode (`(`, `bar`, `)` are three
-    /// separate words). A deletion that would cross the line start JOINS the
-    /// line with its predecessor instead — vim deletes exactly the newline
-    /// (9.1 probe: `i<C-w>` at (2,1) of ['aaaa','bbbb'] → ['aaaabbbb'] and
-    /// ['aaaa','  bbbb','cc'] at (3,1) keeps both lines' text). The block-
-    /// session lock: replica offsets assume every row stays a row, so the
-    /// join is refused with a bell (the same rule as the line-start BS and
-    /// `<C-u>` below).
+    /// separate words). A deletion whose word run crosses the line start
+    /// JOINS the line with its predecessor instead — vim deletes exactly
+    /// the newline (`backspace=eol` shape, the common config; a glued word
+    /// from a line-start combining mark reaches here). At the line start
+    /// with nothing typed the stroke is a NO-OP — round 30's typeahead
+    /// probes REVERSED the round-9 claim of a join: vim 9.1 deletes nothing
+    /// when there is no character before the cursor on this line (bs default
+    /// and bs=start probes agree), so the engine no longer joins there.
+    ///
+    /// The deletion never backs over the line's TYPING START
+    /// ([`VimState::insert_typed_start`]) — vim deletes newly entered
+    /// characters only (9.1 probes, round 30: insert mid-word, type `X`,
+    /// `<C-w>` leaves the pre-existing word alone; a second `<C-w>` with the
+    /// cursor back at the anchor is a no-op). With nothing typed on this
+    /// line the floor is the line start (the `backspace=start` shape most
+    /// hosts configure). Replace mode restores overwritten characters across
+    /// the deleted span.
     fn insert_delete_word_before(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
@@ -328,7 +343,9 @@ impl VimState {
         // back to col 1 — the autoindent wipe; the old code fell through to
         // the JOIN branch because prev_word_start crosses the line, and then
         // peeled exactly one byte per press). A JOIN stays a col-1-only
-        // stroke: mid-run presses never merge lines.
+        // stroke: mid-run presses never merge lines. The wipe floors at the
+        // typing start like every other stroke, so pre-existing indent
+        // behind the session's first typed character survives.
         if at > line_start
             && ctx
                 .buf
@@ -336,23 +353,31 @@ impl VimState {
                 .chars()
                 .all(char::is_whitespace)
         {
-            self.begin_edit();
-            self.edit_delete(ctx, line_start..at);
-            self.cursor.offset = line_start;
-            self.republish_search(ctx);
-            ctx.host.changed();
+            // floor the anchor defensively: a host text swap can land it
+            // mid-character without passing through the edit funnels
+            let floor = self
+                .insert_typed_start
+                .map(|t| crate::buffer::floor_to_char_boundary(ctx.buf, t))
+                .unwrap_or(line_start)
+                .max(line_start);
+            if at > floor {
+                self.insert_delete_typed_span(ctx, floor..at);
+                self.cursor.offset = floor;
+            }
             return;
         }
-        let target = word::prev_word_start(ctx.buf, at, false);
+        let floor = self
+            .insert_typed_start
+            .map(|t| crate::buffer::floor_to_char_boundary(ctx.buf, t))
+            .unwrap_or(line_start)
+            .max(line_start);
+        let target = word::prev_word_start(ctx.buf, at, false).max(floor);
         if target >= line_start {
             if target < at {
                 // words/indent on THIS row only — the row survives as a row,
                 // so block sessions are unaffected
-                self.begin_edit();
-                self.edit_delete(ctx, target..at);
+                self.insert_delete_typed_span(ctx, target..at);
                 self.cursor.offset = target;
-                self.republish_search(ctx);
-                ctx.host.changed();
             }
             return;
         }
@@ -368,6 +393,8 @@ impl VimState {
             // a line-start combining mark): `at-1..at` then deleted an
             // arbitrary byte — mid-character on a multi-byte tail (host
             // panic: fuzz round 25) or a real char with no join at all.
+            // Reachable only with the floor at the line start (nothing
+            // typed past it), so no typed-span bookkeeping applies.
             let join_at = line_start - 1;
             self.begin_edit();
             self.edit_delete(ctx, join_at..line_start);
@@ -377,33 +404,80 @@ impl VimState {
         }
     }
 
-    /// `<C-u>`: delete to the line start; at the line start vim JOINS with
-    /// the previous line (removes the newline — 9.1 probe: `i<C-u>` at (2,1)
-    /// of ['aaaa','bbbb'] → ['aaaabbbb']), so the dead end does the same
-    /// edit the line-start BS does. Block sessions refuse the join (the
-    /// replica offsets assume every row stays a row).
+    /// `<C-u>`: delete the newly typed characters on this line — vim's
+    /// "all entered characters before the cursor" rule (round-30 probes:
+    /// pre-existing text before the typing start survives). For a session
+    /// that has not typed on this line the stroke falls back to the line
+    /// start (`backspace=start` shape; P7 probe: cursor col 2 of "hello
+    /// world", `i<C-u>` → "o world"). At the line start with nothing typed
+    /// vim deletes nothing — the round-9 claim of a join was a mis-probe
+    /// (round 30 typeahead re-check: `i<C-u>` at (2,1) of ['aaaa','bbbb']
+    /// → ['aaaa','bbbb'] unchanged) — so the dead end is inert here too.
+    /// Replace mode restores the overwritten characters inside the deleted
+    /// span.
     fn insert_delete_to_line_start(&mut self, ctx: &mut Ctx) {
         let at = self.cursor.offset;
         let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
-        if at > line_start {
-            self.begin_edit();
-            self.edit_delete(ctx, line_start..at);
-            self.cursor.offset = line_start;
-            self.republish_search(ctx);
-            ctx.host.changed();
+        let floor = match self.insert_typed_start {
+            Some(t) if t < at => crate::buffer::floor_to_char_boundary(ctx.buf, t).max(line_start),
+            _ => line_start,
+        };
+        if at > floor {
+            self.insert_delete_typed_span(ctx, floor..at);
+            self.cursor.offset = floor;
+        }
+    }
+
+    /// The shared C-w/C-u deletion stroke. Replace mode RESTORES: characters
+    /// inside `range` that replaced existing text come back as their
+    /// originals (9.1 round-30 probes: `RXX<C-w>` on "one two" → "one two"
+    /// with the cursor at the typing start; `Rab cd<C-u>Z` → "Zbcdefg" —
+    /// C-u restored `abcde` and Z overwrote `a`). Text appended past the
+    /// line end (`None` entries) deletes plainly. Insert mode plain-deletes.
+    fn insert_delete_typed_span(&mut self, ctx: &mut Ctx, range: std::ops::Range<usize>) {
+        if range.start >= range.end {
             return;
         }
-        if self.in_block_insert() {
-            ctx.host.bell();
-            return;
-        }
-        if at > 0 {
+        if self.mode == Mode::Replace {
+            // rebuild the span with the stashed originals substituted back
+            // in — one edit, because restoring multi-byte originals shifts
+            // everything after the first substitution
+            let span = ctx.buf.slice(range.clone());
+            let mut out = String::new();
+            for (i, c) in span.char_indices() {
+                let pos = range.start + i;
+                match self.replace_overwritten.iter().find(|(p, _)| *p == pos) {
+                    Some((_, Some(orig))) => out.push(*orig),
+                    _ => out.push(c),
+                }
+            }
+            let delta = out.len() as isize - (range.end - range.start) as isize;
             self.begin_edit();
-            self.edit_delete(ctx, at - 1..at);
-            self.cursor.offset = at - 1;
-            self.republish_search(ctx);
-            ctx.host.changed();
+            self.edit_replace(ctx, range.clone(), &out);
+            // entries inside the span are consumed (their originals are back
+            // in the buffer); entries past it shift by the length delta
+            self.replace_overwritten
+                .retain(|(p, _)| !range.contains(p));
+            for (p, _) in &mut self.replace_overwritten {
+                if *p >= range.end {
+                    *p = (*p as isize + delta).max(0) as usize;
+                }
+            }
+        } else {
+            let removed = range.end - range.start;
+            let append_end = range.end;
+            self.begin_edit();
+            self.edit_delete(ctx, range);
+            // a block session's replica mirrors the typed text: a deletion
+            // that shaves a suffix off the session's append (the common
+            // C-w/C-u right after typing) must shave the replica too, or the
+            // exit-side delta guard sees a divergence and silently skips
+            // replication. Non-suffix strokes (after an arrow move) leave
+            // the replica alone — the guard skips replication for them.
+            self.block_shave_typed_suffix(append_end, removed);
         }
+        self.republish_search(ctx);
+        ctx.host.changed();
     }
 
     /// Called when insert mode is left implicitly (host navigation etc.).

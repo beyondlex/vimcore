@@ -96,13 +96,15 @@ fn insert_tab_aligns_by_display_column_after_wide_chars() {
     assert_eq!(f.buf.slice(0..f.buf.len()), "中文    x");
 }
 
-// ---- 4. insert <C-w> 行首并线（vim 语义）+ 块会话封锁 ---------------------------
+// ---- 4. insert <C-w>/行首语义（round 30 修正）+ 块会话封锁 ---------------------
 
-/// vim 9.1 探针（['aaaa','bbbb'] 光标 (2,1) `i<C-w>x<Esc>`）：
-/// ['aaaaxbbbb']——行首的 <C-w> 与上一行并线（只删换行），旧行为
-/// 钳在行首不动（'aaaa\nxbbbb'）。
+/// round 30 typeahead 重探推翻了本轮原始结论：vim 9.1 的 `i<C-w>` 在行首
+/// 无输入时是**无操作**（"delete the word before the cursor"——行首之前
+/// 本行没有字符可删；`backspace=eol` 的并线只发生在删除真越过行首时）。
+/// 实证：['aaaa','bbbb'] 光标 (2,1) `i<C-w>x<Esc>` → ['aaaa','xbbbb']
+/// （bs 默认与 bs=start 两探一致）。引擎钳制在打字起点后行为一致。
 #[test]
-fn insert_ctrl_w_at_line_start_joins_previous_line() {
+fn insert_ctrl_w_at_line_start_with_no_typed_text_is_noop() {
     let mut f = Fixture::at("aaaa\nbbbb", 1, 0);
     f.feed(["i"]);
     f.feed_raw(vimcore::key::Key {
@@ -111,7 +113,11 @@ fn insert_ctrl_w_at_line_start_joins_previous_line() {
     });
     f.type_text("x");
     f.feed(["<Esc>"]);
-    assert_eq!(f.buf.slice(0..f.buf.len()), "aaaaxbbbb");
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "aaaa\nxbbbb",
+        "行首无输入的 C-w 不并线（vim 9.1 round 30 重探）"
+    );
 }
 
 /// 行中 <C-w> 不跨行：'aa bb cc' 光标在 'c' 上 <C-w> 删掉 "bb "，
@@ -129,8 +135,9 @@ fn insert_ctrl_w_mid_line_stays_within_line() {
     assert_eq!(f.buf.slice(0..f.buf.len()), "aa xcc");
 }
 
-/// 块插入会话中 <C-w> 不得并线：复制偏移假设每行独立（fuzz round8 的
-/// 行首 BS 同族）。响铃拒绝；行内的缩进/词删除不受影响。
+/// 块插入会话中行首 <C-w>：无输入时不并线也无响铃（round 30 起该形状
+/// 是无操作——既不删已有文本也不跨行）；行中触到并线分支时仍响铃拒绝。
+/// 键入照常复制到两行。
 #[test]
 fn insert_ctrl_w_never_joins_lines_mid_block_session() {
     let mut f = Fixture::at("aaaa\nbbbb\ncccc", 0, 0);
@@ -140,7 +147,8 @@ fn insert_ctrl_w_never_joins_lines_mid_block_session() {
         modifiers: vimcore::key::Modifiers::ctrl(),
         kind: vimcore::key::KeyKind::Char('w'),
     });
-    assert_eq!(f.host.bells, bells_before + 1, "跨行 <C-w> 响铃拒绝");
+    // 行首无输入：C-w 无操作（不删不响铃；旧行为会走并线分支响铃）
+    assert_eq!(f.host.bells, bells_before, "行首无输入的 C-w 安静无操作");
     f.type_text("X");
     f.feed(["<Esc>"]);
     // 行结构保持三行（没有并线），键入仍复制到两行
@@ -287,10 +295,12 @@ fn block_put_with_short_register_leaves_exhausted_rows_empty() {
     assert_eq!(f.buf.slice(0..f.buf.len()), "aaaa\nbbbb\ncc\n");
 }
 
-/// `<C-u>` 在行首与上一行并线（vim 9.1 探针：['aaaa','bbbb'] (2,1)
-/// `i<C-u>x<Esc>` → ['aaaaxbbbb']），旧行为钳在行首不动。
+/// `<C-u>` 行首无输入是**无操作**——round 30 typeahead 重探推翻了本轮
+/// 原始的并线结论：vim 9.1 里行首之前本行没有字符可删（bs 默认与
+/// bs=start 两探一致：['aaaa','bbbb'] (2,1) `i<C-u>x<Esc>` →
+/// ['aaaa','xbbbb']）。引擎的死路分支随之撤掉，钳制在行首不动。
 #[test]
-fn insert_ctrl_u_at_line_start_joins_previous_line() {
+fn insert_ctrl_u_at_line_start_with_no_typed_text_is_noop() {
     let mut f = Fixture::at("aaaa\nbbbb", 1, 0);
     f.feed(["i"]);
     f.feed_raw(vimcore::key::Key {
@@ -299,7 +309,11 @@ fn insert_ctrl_u_at_line_start_joins_previous_line() {
     });
     f.type_text("x");
     f.feed(["<Esc>"]);
-    assert_eq!(f.buf.slice(0..f.buf.len()), "aaaaxbbbb");
+    assert_eq!(
+        f.buf.slice(0..f.buf.len()),
+        "aaaa\nxbbbb",
+        "行首无输入的 C-u 不并线（vim 9.1 round 30 重探）"
+    );
 }
 
 // ---- 12. insert_change_pos 跨行移动后 floor（fuzz round9 抓取） -----------------
