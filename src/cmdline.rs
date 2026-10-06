@@ -710,6 +710,29 @@ impl VimState {
             let current = ctx.buf.offset_to_line(self.cursor.offset);
             (current, current)
         });
+        // `:&` repeats the last substitute WITHOUT the remembered flags
+        // (`:h :&`; 9.1 probe: `:1,1s/a/B/g` then `:2,2&` replaces only the
+        // first match on line 2). `:~` repeats it with the CURRENT search
+        // pattern, also flag-less (`:h :~`; probe: `/b` re-points it, the
+        // `g` is not carried). Both default to the current line like `:s`;
+        // no previous substitute → E33 like the bare `:s`.
+        if line == "&" || line == "~" {
+            return match self.cmdline.last_substitute.clone() {
+                Some(last) => {
+                    let replay = if line == "&" {
+                        Self::substitute_without_flags(&last)
+                    } else {
+                        self.substitute_with_last_pattern(&last)
+                    };
+                    self.ex_substitute(ctx, &replay, range);
+                }
+                None => {
+                    ctx.host
+                        .status_message("E33: No previous substitute regular expression");
+                    ctx.host.bell();
+                }
+            };
+        }
         if self.ex_substitute(ctx, line, range) {
             return;
         }
@@ -881,6 +904,55 @@ impl VimState {
             [pattern, rep] => format!("s{sep}{pattern}{sep}{rep}{sep}"),
             [pattern, rep, ..] => format!("s{sep}{pattern}{sep}{rep}{sep}"),
         }
+    }
+
+    /// `:~` replay shape (`:h :~` — "same substitute string but with last
+    /// used search pattern", and 9.1 probes: remembered flags are NOT
+    /// carried): rebuild `s{sep}{pattern}{sep}{rep}{sep}` from the CURRENT
+    /// search pattern and the stored replacement. A search pattern
+    /// containing the separator gets escaped so the field split survives.
+    /// Without any search yet, the substitute's own pattern stands in (vim
+    /// would E35; after a plain `:s` the two are identical anyway, since
+    /// `:s` mirrors its pattern into the search state).
+    fn substitute_with_last_pattern(&self, cmd: &str) -> String {
+        let no_flags = Self::substitute_without_flags(cmd);
+        let Some(pattern) = self.search.pattern.clone() else {
+            return no_flags;
+        };
+        let after_s = match no_flags.strip_prefix('s') {
+            Some(rest) => rest,
+            None => return no_flags,
+        };
+        let Some(sep) = after_s.chars().next() else {
+            return no_flags;
+        };
+        if sep.is_alphanumeric() {
+            return no_flags;
+        }
+        let fields = Self::split_escaped_fields(&after_s[sep.len_utf8()..], sep);
+        let [_, rep, ..] = fields.as_slice() else {
+            return no_flags;
+        };
+        // escape only UNESCAPED separators — the stored pattern is raw regex
+        // source where `\/` already travels escaped; re-escaping the
+        // backslash would turn `a\/b` into `a\\/b` (a literal backslash)
+        let mut escaped = String::with_capacity(pattern.len());
+        let mut chars = pattern.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                escaped.push(c);
+                if let Some(&n) = chars.peek() {
+                    escaped.push(n);
+                    chars.next();
+                }
+            } else if c == sep {
+                escaped.push('\\');
+                escaped.push(c);
+            } else {
+                escaped.push(c);
+            }
+        }
+        format!("s{sep}{escaped}{sep}{rep}{sep}")
     }
 
     /// Split on unescaped separators (same rule as the substitute parser):

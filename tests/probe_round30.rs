@@ -231,6 +231,71 @@ fn replace_ctrl_w_restores_multibyte() {
     assert_eq!(f.text(), "中文x\n");
 }
 
+// ---------------------------------------------------------------- :& 与 :~ 重放
+
+/// 探针 V1：`:&` 不携带上次 `:s` 的旗标（vim 9.1 实证：
+/// `:1,1s/a/B/g` 后 `:2,2&` → 第 2 行只换首个匹配）。
+#[test]
+fn ex_ampersand_repeats_without_flags() {
+    let f = edit(
+        "xaxax\nxaxax\nxaxax\n",
+        0,
+        0,
+        &[
+            ":", "1", ",", "1", "s", "/", "a", "/", "B", "/", "g", "<CR>",
+            ":", "2", ",", "2", "&", "<CR>",
+        ],
+    );
+    assert_eq!(f.text(), "xBxBx\nxBxax\nxaxax\n");
+}
+
+/// 探针 V2：`:~` 用**当前搜索模式** + 原替换串，同样不带旗标（vim 9.1
+/// 实证：`/x` 重指后 `:3,3~` 把 x 换成 Q——首条 `:s` 的替换串）。
+#[test]
+fn ex_tilde_uses_last_search_pattern() {
+    let f = edit(
+        "axa\nxyx\nxax\n",
+        0,
+        0,
+        &[
+            ":", "1", ",", "1", "s", "/", "a", "/", "Q", "/", "<CR>",
+            "/", "x", "<CR>",
+            ":", "3", ",", "3", "~", "<CR>",
+        ],
+    );
+    assert_eq!(f.text(), "Qxa\nxyx\nQax\n");
+}
+
+/// 探针 V3：无上次替换时 `:&`/`:~` 报 E33 并响铃（与裸 `:s` 同款）。
+#[test]
+fn ex_ampersand_tilde_without_previous_report_e33() {
+    let mut f = Fixture::new("abc\n");
+    f.feed([":", "&", "<CR>"]);
+    assert_eq!(f.text(), "abc\n");
+    assert!(f.host.statuses.iter().any(|s| s.contains("E33")));
+    assert!(f.host.bells > 0);
+    let mut f = Fixture::new("abc\n");
+    f.feed([":", "~", "<CR>"]);
+    assert!(f.host.statuses.iter().any(|s| s.contains("E33")));
+}
+
+/// 探针 V4：搜索模式含分隔符时 `:~` 转义存活（`/a\/b` 后 `:~` 重建的
+/// `s/a\/b/Q/` 不碎裂——模式里的 `/` 必须重新转义）。
+#[test]
+fn ex_tilde_escapes_separator_in_pattern() {
+    let f = edit(
+        "a/b x\n",
+        0,
+        0,
+        &[
+            ":", "s", "/", "x", "/", "Q", "/", "<CR>", // a/b Q（模式 x）
+            "/", "a", "\\", "/", "b", "<CR>", // 搜索模式 "a/b"
+            ":", "~", "<CR>", // s/a\/b/Q/ → "Q Q"
+        ],
+    );
+    assert_eq!(f.text(), "Q Q\n");
+}
+
 // ---------------------------------------------------------------- 多字节低频路径
 
 /// 探针 O：`3r中` —— count × 多字节替换。
