@@ -52,7 +52,7 @@ fn m_digit_mark_is_rejected() {
     let f = edit("abc\n", 0, 0, &["m", "1"]);
     assert_eq!(f.text(), "abc\n");
     // '1 跳转报 E20（未设 mark）
-    let mut f = edit("abc\n", 0, 0, &["m", "1", "'", "1"]);
+    let f = edit("abc\n", 0, 0, &["m", "1", "'", "1"]);
     assert_eq!(f.cursor(), 0, "m1 后 '1 不得有落点");
 }
 
