@@ -78,6 +78,8 @@ struct BlockInsert {
     /// text's length drifted when the session edited the row otherwise, and
     /// replication offsets landed mid-character).
     typing_line_len: usize,
+    /// Text typed on the cursor row so far (mirrors the buffer bytes the
+    /// session appended).
     text: String,
     /// Cursor offset right after the last appended chunk; a backspace
     /// landing here undoes typed text and shrinks `text` to match.
@@ -359,6 +361,18 @@ pub struct VimState {
     /// text alone; the old bare-LIFO popped it and wrote the wrong char).
     pub(crate) replace_overwritten: Vec<(usize, Option<char>)>,
 
+    /// Buffer offset where typing on the CURRENT line of the insert/Replace
+    /// session began (`None` = nothing typed on this line yet). This is vim's
+    /// insert-start anchor for `<C-w>`/`<C-u>`: they delete the newly typed
+    /// characters, never text that predated the session on this line (9.1
+    /// probes, round 30: "abcd" with insert at col 2, type `X`, `<C-w>` →
+    /// "abcd" — the pre-existing `ab` survives; a second `<C-w>` with the
+    /// cursor back at the anchor is a NO-OP, it does not walk off into the
+    /// pre-existing word either). Reset by `<CR>` (each line owns its run of
+    /// typed text), vertical moves (the new line has no typed text yet) and
+    /// session exit; `<BS>` and horizontal moves leave it alone.
+    pub(crate) insert_typed_start: Option<usize>,
+
     /// Pre-edit selection bounds of a visual change (`viwc`, visual `d`/`y`/`~`,
     /// visual-block `I`/`A`/`c`, visual `p`/`r`). vim re-selects the ORIGINAL
     /// selection with `gv` after such a change (9.1 probes: `viwcX<Esc>gv`
@@ -460,6 +474,7 @@ impl VimState {
             keymaps: Keymaps::default(),
             tables: CommandTables::build(),
             replace_overwritten: Vec::new(), // (offset, original) pairs — see field doc
+            insert_typed_start: None,
             pending_visual_marks: None,
             block_dollar: false,
             undo_seq: 0,
@@ -621,6 +636,32 @@ impl VimState {
                 let removed = block.text.len() - start;
                 block.text.truncate(start);
                 block.typed_end = Some(at - removed);
+            }
+        }
+    }
+
+    /// C-w/C-u undo for a block session, the multi-char twin of
+    /// [`Self::block_backspace_undo`]: when the deletion stroke ended at the
+    /// append's end, shave its `removed` bytes off the replica so the
+    /// exit-side delta guard still sees pure typing and replicates. Strokes
+    /// that don't end at the append (after an arrow move) change nothing —
+    /// the guard then skips replication, as for any other navigation.
+    pub(crate) fn block_shave_typed_suffix(&mut self, append_end: usize, removed: usize) {
+        if self.block_typed_end() != Some(append_end) {
+            return;
+        }
+        let Some(block) = &mut self.block_insert else {
+            return;
+        };
+        // the shave must land on the replica's own char grid — a session
+        // that navigated before deleting has text/buffer desynced (or a
+        // multi-byte char straddling the cut); leave it alone and let the
+        // exit-side delta guard skip replication
+        let new_len = block.text.len().checked_sub(removed);
+        if let Some(new_len) = new_len {
+            if block.text.is_char_boundary(new_len) {
+                block.text.truncate(new_len);
+                block.typed_end = Some(append_end - removed);
             }
         }
     }
@@ -1491,6 +1532,12 @@ impl VimState {
                 *c += len;
             }
         }
+        // the C-w/C-u typing anchor rides along like every stored offset
+        if let Some(t) = self.insert_typed_start.as_mut() {
+            if *t > at {
+                *t += len;
+            }
+        }
         self.edit_generation += 1;
         // same standing addressability pass as delete/replace: a pre-existing
         // stale offset must not survive any of the three funnels
@@ -1519,6 +1566,9 @@ impl VimState {
         };
         Self::adjust_positions(&mut self.changes, adjust);
         Self::adjust_positions(&mut self.jumps, adjust);
+        if let Some(t) = self.insert_typed_start.as_mut() {
+            *t = adjust(*t);
+        }
         self.edit_generation += 1;
         // Relative shifts keep offsets on char boundaries of the OLD text,
         // but two shapes can still leave them unaddressable: a deletion
@@ -1551,6 +1601,9 @@ impl VimState {
         }
         for pos in self.jumps.iter_mut() {
             floor(pos);
+        }
+        if let Some(t) = self.insert_typed_start.as_mut() {
+            floor(t);
         }
         if let Some(anchor) = self.visual_anchor.as_mut() {
             floor(anchor);
@@ -1589,6 +1642,9 @@ impl VimState {
         };
         Self::adjust_positions(&mut self.changes, adjust);
         Self::adjust_positions(&mut self.jumps, adjust);
+        if let Some(t) = self.insert_typed_start.as_mut() {
+            *t = adjust(*t);
+        }
         self.edit_generation += 1;
         self.refloor_stored_offsets(ctx);
     }
@@ -1713,6 +1769,9 @@ impl VimState {
         // plain `3i` keeps its count.
         self.insert_repeat = None;
         self.insert_did_ai = false;
+        // a fresh session owns a fresh typing anchor (see the field doc):
+        // C-w/C-u floor at the first typed byte of THIS session's line
+        self.insert_typed_start = None;
         self.mode = if kind == InsertKind::Replace {
             Mode::Replace
         } else {
@@ -1982,6 +2041,7 @@ impl VimState {
         }
         self.insert_session = None;
         self.insert_did_ai = false;
+        self.insert_typed_start = None;
         // the live `'<`/`'>` range is dead once insert mode ends: a session
         // entered from visual (`viwc`, block `I`) leaves offsets pointing at
         // pre-edit bytes, and `parse_range` must fall back to the `'<`/`'>`
@@ -2064,28 +2124,35 @@ impl VimState {
             // Each overwritten char is stashed WITH ITS OFFSET so Backspace
             // can match the position (see the field doc); chars appended
             // past the line end record `None` at their new offsets —
-            // backspacing over them plain-deletes.
+            // backspacing over them plain-deletes. Offsets are recorded in
+            // POST-EDIT coordinates (where the typed char lands), not where
+            // the original sat: a wide original (`中` under `a`) shifts the
+            // text, and pre-edit coordinates made the BS match fail —
+            // `R中a<BS>` used to restore nothing (round 30 probe).
             let mut end = at;
             let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(at));
+            let mut typed_prefix = 0usize;
             let mut overwritten = 0usize;
-            for _ in 0..expanded.chars().count() {
+            for c in expanded.chars() {
                 match ctx.buf.next_char_offset(end) {
                     Some(next) if next <= line_end => {
-                        self.replace_overwritten.push((end, ctx.buf.char_at(end)));
+                        self.replace_overwritten
+                            .push((at + typed_prefix, ctx.buf.char_at(end)));
+                        typed_prefix += c.len_utf8();
                         end = next;
                         overwritten += 1;
                     }
                     _ => break,
                 }
             }
-            // appended chars land from `end` onward, one per char of the
-            // appended tail of `expanded`
+            // appended chars land from the post-edit end of the overwritten
+            // run onward, one per char of the appended tail of `expanded`
             let tail_bytes_start = expanded
                 .char_indices()
                 .nth(overwritten)
                 .map(|(i, _)| i)
                 .unwrap_or(expanded.len());
-            let mut pos = end;
+            let mut pos = at + typed_prefix;
             for c in expanded[tail_bytes_start..].chars() {
                 self.replace_overwritten.push((pos, None));
                 pos += c.len_utf8();
@@ -2095,6 +2162,14 @@ impl VimState {
             self.edit_insert(ctx, at, &expanded);
         }
         self.cursor.offset = at + expanded.len();
+        // advance the typing anchor: a newline re-anchors to the NEXT line's
+        // typing start (each line owns its C-w/C-u floor); plain text moves
+        // it back to the first typed byte on this line
+        if expanded.contains('\n') {
+            self.insert_typed_start = Some(self.cursor.offset);
+        } else if self.insert_typed_start.is_none() {
+            self.insert_typed_start = Some(at);
+        }
         self.block_note_typed_end(self.cursor.offset);
         self.republish_search(ctx);
         ctx.host.changed();

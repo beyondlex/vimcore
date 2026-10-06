@@ -1228,11 +1228,15 @@ impl VimState {
                     addresses[addresses.len() - 2],
                     addresses[addresses.len() - 1],
                 );
-                Ok((
-                    Some((a.min(b), a.max(b))),
-                    addresses.len(),
-                    rest.trim_start(),
-                ))
+                // A REVERSED range (`:5,1d`) is a typo — vim asks
+                // "Backwards range given, OK to swap?" interactively and
+                // refuses in script mode (9.1 probe: `:5,1d` deletes
+                // nothing). The engine used to swap silently, so one
+                // transposed digit wiped the whole buffer. Error + no-op.
+                if a > b {
+                    return Err("E16: Invalid range".to_owned());
+                }
+                Ok((Some((a, b)), addresses.len(), rest.trim_start()))
             }
         }
     }
