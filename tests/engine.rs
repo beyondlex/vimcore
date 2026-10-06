@@ -1010,14 +1010,24 @@ fn dot_repeats_open_line() {
 }
 
 #[test]
-fn dot_repeats_ex_substitute() {
+fn dot_ignores_ex_substitute_and_replays_prior_change() {
     let mut f = Fixture::at("foo\nkeep foo\nmore\n", 0, 0);
-    f.feed([
-        ":", "s", "/", "f", "o", "o", "/", "b", "a", "r", "/", "<CR>",
-    ]);
+    f.feed([":", "s", "/", "f", "o", "o", "/", "b", "a", "r", "/", "<CR>"]);
     assert_eq!(f.text(), "bar\nkeep foo\nmore\n");
+    // vim 9.1（round 30 typeahead 实证）：`.` 只重放普通模式改动——`:s`
+    // 不入重放。这里的最后改动是替换前键入的会话吗？没有——所以 `.` 在
+    // 另一行的普通改动（x）之后才可观测。先做一个普通改动，再 :s，再 `.`：
+    // `.` 必须重放那个普通改动，而不是替换。
+    let mut f = Fixture::at("foo\nkaap\nboog\n", 0, 0);
+    f.feed(["x"]); // last_change = x（"foo"→"oo"）
+    f.feed([":", "2", ",", "2", "s", "/", "a", "/", "A", "/", "<CR>"]);
+    assert_eq!(f.text(), "oo\nkAap\nboog\n");
     f.feed(["j", "."]);
-    assert_eq!(f.text(), "bar\nkeep bar\nmore\n");
+    assert_eq!(
+        f.text(),
+        "oo\nkAap\noog\n",
+        "`.` 重放 x，忽略 :s（vim 语义）"
+    );
 }
 
 #[test]

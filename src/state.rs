@@ -249,7 +249,10 @@ pub struct VimState {
     /// replay re-enters visual mode and rebuilds the selection (block
     /// replication is excluded via `recording_blocked`).
     last_change: Vec<RecordedStep>,
-    recording: Vec<RecordedStep>,
+    /// `.`-replay steps of the change being typed right now. `pub(crate)`:
+    /// `begin_cmdline` drops the stale `:` prefix when an Ex prompt opens —
+    /// Ex lines never join the `.` recording (round 30).
+    pub(crate) recording: Vec<RecordedStep>,
     recording_mutated: bool,
     recording_blocked: bool,
     /// Set while `.` replays: keys flow through the pipeline but recording
@@ -754,10 +757,21 @@ impl VimState {
             return KeyResult::Unknown;
         }
 
-        if matches!(self.mode, Mode::CommandLine { .. }) {
-            // the pipeline loop never runs in cmdline mode — record here so
-            // `.` can replay Ex commands typed into the prompt
-            if self.recording_active() {
+        if let Mode::CommandLine { prompt } = self.mode {
+            // An Ex (`:`) command line never enters the `.` recording — vim's
+            // `.` only repeats normal-mode changes (9.1 round-30 probe: `x`,
+            // `:s/b/X/`, `j.` repeats the `x`, not the substitution; the old
+            // code baked the whole `:s/a/b/<CR>` keystroke run into
+            // `last_change`). Search prompts (`/`, `?`) DO record: a
+            // search-motion change (`d/foo<CR>`) replays its full key run.
+            // Macro capture takes everything either way — a register holds
+            // the keys as typed (`:h q`) — but the two paths must not
+            // DOUBLE-push: `record_key` already writes the macro copy.
+            if prompt == ':' {
+                if let Some((_, keys)) = &mut self.macro_capture {
+                    keys.push(RecordedStep::Key(key.clone()));
+                }
+            } else if self.recording_active() {
                 self.record_key(&key);
             }
             return self.cmdline_key(ctx, key);
