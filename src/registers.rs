@@ -37,6 +37,20 @@ pub const YANK: char = '0';
 pub const LAST_INSERT: char = '.';
 /// `":` — the last Ex command line (audit D3)
 pub const LAST_COMMAND: char = ':';
+/// `"=` — the expression register result (audit C9). The prompt evaluates a
+/// constant arithmetic expression; the decimal result pastes charwise.
+pub const EXPRESSION: char = '=';
+
+/// Registers the `"{reg}` prefix accepts for READING but refuses as a
+/// yank/delete TARGET (audit C7 — `"%dd`/`".dd`/`":dd`/`"/dd` all error
+/// E354 in vim and leave the buffer untouched; the oracle also shows an
+/// intervening motion like `".j` ends the prefix so a LATER `dd` deletes
+/// normally, which the engine gets from `end_command` clearing the
+/// register after every command). `=` has no engine evaluator yet and is
+/// paste-only, so writes refuse too.
+pub fn is_write_valid(name: char) -> bool {
+    !matches!(name, LAST_INSERT | '%' | LAST_COMMAND | '/' | '=')
+}
 
 /// `text.repeat(count)` under a hard byte ceiling. Counts arrive unvalidated
 /// from the keyboard and `99999999p` must clamp the pasted volume instead of
@@ -66,6 +80,7 @@ impl Registers {
             BLACKHOLE => None,
             LAST_INSERT => self.named.get(&LAST_INSERT),
             LAST_COMMAND => self.named.get(&LAST_COMMAND),
+            EXPRESSION => self.named.get(&EXPRESSION),
             // `"A` reads register `a` — the uppercase spelling is the append
             // form, not a separate slot
             c if c.is_ascii_uppercase() => self.named.get(&c.to_ascii_lowercase()),
@@ -157,7 +172,28 @@ impl Registers {
         );
     }
 
+    /// `"=` — store the expression prompt's evaluated result (audit C9).
+    /// Read-only through the write funnels like the other specials.
+    pub fn store_expression(&mut self, text: String) {
+        self.named.insert(
+            EXPRESSION,
+            Register {
+                text,
+                kind: RegisterKind::Charwise,
+            },
+        );
+    }
+
     pub fn store(&mut self, name: char, text: String, kind: RegisterKind) {
+        self.store_ext(name, text, kind, false);
+    }
+
+    /// `unnamed_new_piece`: a DELETE append (`"Add`) points the unnamed
+    /// register at the NEW piece while a YANK append (`"Ayy`) points it at
+    /// the MERGED register — vim is deliberately asymmetric here (9.1
+    /// oracle: `p` after `"Ayy` pastes both lines, after `"Add` only the
+    /// just-deleted text — audit C8).
+    pub fn store_ext(&mut self, name: char, text: String, kind: RegisterKind, unnamed_new_piece: bool) {
         let register = Register {
             text: text.clone(),
             kind,
@@ -170,7 +206,7 @@ impl Registers {
             return;
         }
         if name.is_ascii_uppercase() {
-            self.append_to_named(name, text, kind);
+            self.append_to_named(name, text, kind, unnamed_new_piece);
             return;
         }
         self.named.insert(name, register.clone());
@@ -180,12 +216,22 @@ impl Registers {
     /// Uppercase-register append: concatenate onto the lowercase register.
     /// Either side linewise makes the result linewise (text re-joined on
     /// line boundaries); same-kind appends concatenate byte for byte.
-    fn append_to_named(&mut self, name: char, text: String, kind: RegisterKind) {
+    ///
+    /// The UNNAMED register points at the NEW piece, not the merged result
+    /// (vim: `"Add` then `p` pastes only the just-deleted text — audit C8;
+    /// routing through [`Self::store`] re-pointed `last` at the merge).
+    fn append_to_named(
+        &mut self,
+        name: char,
+        text: String,
+        kind: RegisterKind,
+        unnamed_new_piece: bool,
+    ) {
         let lower = name.to_ascii_lowercase();
         let (merged, merged_kind) = match self.named.get(&lower) {
             Some(existing) => {
                 let mut kind = kind;
-                let mut text = text;
+                let mut text = text.clone();
                 if existing.kind == RegisterKind::Linewise || kind == RegisterKind::Linewise {
                     kind = RegisterKind::Linewise;
                     if !existing.text.ends_with('\n') {
@@ -197,9 +243,23 @@ impl Registers {
                 }
                 (format!("{}{}", existing.text, text), kind)
             }
-            None => (text, kind),
+            None => (text.clone(), kind),
         };
-        self.store(lower, merged, merged_kind);
+        self.named.insert(
+            lower,
+            Register {
+                text: merged.clone(),
+                kind: merged_kind,
+            },
+        );
+        self.last = Some(if unnamed_new_piece {
+            Register { text, kind }
+        } else {
+            Register {
+                text: merged,
+                kind: merged_kind,
+            }
+        });
     }
 
     /// Yank semantics: explicit register, else `"0` + unnamed.
@@ -224,7 +284,7 @@ impl Registers {
     /// multi-line deletes and `"-` for small deletes.
     pub fn store_delete(&mut self, explicit: Option<char>, text: String, kind: RegisterKind) {
         match explicit {
-            Some(name) => self.store(name, text, kind),
+            Some(name) => self.store_ext(name, text, kind, true),
             None => {
                 let multi_line = text.contains('\n');
                 if kind == RegisterKind::Linewise || multi_line {

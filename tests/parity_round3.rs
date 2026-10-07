@@ -88,7 +88,11 @@ fn changelist_positions_track_edits() {
     f.feed(["<Esc>", "g", "g", "O"]);
     f.type_text("new");
     f.feed(["<Esc>", "g", ";"]);
-    assert_eq!(f.line(), 2, "g; follows the shifted change position");
+    // audit E8（oracle 复验）：第一次 g; 落**最近**的变更 = O 打开的
+    // "new" 行（line 0），其位置随插入自行调整
+    assert_eq!(f.line(), 0, "first g; lands on the newest change");
+    f.feed(["g", ";"]);
+    assert_eq!(f.line(), 2, "next g; reaches the older cw change (shifted)");
     assert_eq!(f.text(), "new\na\nB\nc\n");
 }
 

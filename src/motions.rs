@@ -60,7 +60,26 @@ pub enum Motion {
     }, // n / N
     StarSearch {
         forward: bool,
-    }, // * / #
+        /// `g*`/`g#`: the word becomes a SUBSTRING pattern (audit F2 — the
+        /// old keys degraded to whole-word `*`/`#`)
+        substring: bool,
+    }, // * / # / g* / g#
+    /// `gd` / `gD`: jump to the first whole-word declaration of the word
+    /// under the cursor — `gd` searches backward from the current line then
+    /// forward from the cursor; `gD` takes the first match in the file
+    /// (`:h gd`, audit F1)
+    SearchDeclaration {
+        whole_file: bool,
+    },
+    /// `]]`/`[[`/`][`/`[]` (sections: `{`/`}` in COLUMN 1) and `]m`/`[m`/`]M`/
+    /// `[M` (methods: `{`/`}` NOT in column 1) — audit A3; the whole family
+    /// used to be unbound
+    Section {
+        ch: char,
+        backward: bool,
+        /// method form: the brace must NOT sit in column 1
+        method: bool,
+    },
     MarkJump {
         linewise: bool,
     }, // '{char} / `{char} as operator target
@@ -169,6 +188,8 @@ impl Motion {
             Motion::GoToLine { .. }
                 | Motion::SearchNext { .. }
                 | Motion::StarSearch { .. }
+                | Motion::SearchDeclaration { .. }
+                | Motion::Section { .. }
                 | Motion::ParaNext
                 | Motion::ParaPrev
                 | Motion::SentenceNext
@@ -238,7 +259,12 @@ impl Motion {
                     .clamp(0, buf.line_count() as i64 - 1)
                     as usize;
                 let desired = vim.desired_column(buf);
-                let o = crate::buffer::offset_for_display_column(buf, target_line, desired);
+                let o = crate::buffer::offset_for_display_column_with(
+                    buf,
+                    target_line,
+                    desired,
+                    vim.options.tabstop,
+                );
                 let moved = target_line != start_line as usize;
                 if moved {
                     MotionResult::new(o, MotionKind::Linewise)
@@ -524,7 +550,17 @@ impl Motion {
                             ctx.host
                                 .set_search_highlights(&vim.search.last_matches, current);
                         }
-                        MotionResult::new(o, MotionKind::Exclusive)
+                        // a remembered offset (`/pat/e+2`) re-applies on
+                        // EVERY repeat, like vim (`:h search-offset` — the
+                        // field doc promised it; audit F3)
+                        let target = match vim.search.offset.clone() {
+                            Some(off) => {
+                                search::apply_search_offset(vim, buf, &off);
+                                vim.cursor.offset
+                            }
+                            None => o,
+                        };
+                        MotionResult::new(target, MotionKind::Exclusive)
                     }
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
@@ -533,13 +569,50 @@ impl Motion {
             // word on this line → stuck (bell), NOT a jump with the stale
             // pattern from a previous search. `{count}*` skips count-1
             // further matches (9.1: `2*` lands on the second next one).
-            Motion::StarSearch { forward } => {
-                if !search::search_word_under_cursor(vim, buf, ctx.host, forward) {
+            Motion::StarSearch { forward, substring } => {
+                if !search::search_word_under_cursor(vim, buf, ctx.host, forward, !substring) {
                     return MotionResult::stuck(vim.cursor.offset);
                 }
                 match search::jump_to_match(vim, buf, forward, count) {
                     Some(o) => MotionResult::new(o, MotionKind::Exclusive),
                     None => MotionResult::stuck(vim.cursor.offset),
+                }
+            }
+            // gd / gD: jump to the declaration of the word under the cursor.
+            // gd scans from the START of the current line backward, then
+            // forward from the cursor; gD takes the first match in the file
+            // (`:h gd` — audit F1; unbound, the `g` miss used to re-feed the
+            // `d` and arm the delete operator)
+            Motion::SearchDeclaration { whole_file } => {
+                let here = vim.cursor.offset;
+                let Some((start, end)) = search::word_bounds_at(buf, here) else {
+                    return MotionResult::stuck(here);
+                };
+                let literal = buf.slice(start..end);
+                if literal.is_empty() {
+                    return MotionResult::stuck(here);
+                }
+                let pattern = format!(r"\b{}\b", regex::escape(&literal));
+                let matches = search::all_matches(vim, buf, &pattern);
+                if matches.is_empty() {
+                    return MotionResult::stuck(here);
+                }
+                let found = if whole_file {
+                    matches.first().cloned()
+                } else {
+                    let cur_line = buf.offset_to_line(here);
+                    matches
+                        .iter()
+                        .rev()
+                        .find(|m| buf.offset_to_line(m.start) < cur_line)
+                        .cloned()
+                        .or_else(|| {
+                            matches.iter().find(|m| m.start >= here).cloned()
+                        })
+                };
+                match found {
+                    Some(m) => MotionResult::new(m.start, MotionKind::Exclusive),
+                    None => MotionResult::stuck(here),
                 }
             }
             // '{char} / `{char}: the mark name arrives as a char argument
@@ -564,13 +637,77 @@ impl Motion {
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
             }
-            // |: display column `count` (wide chars cover two cells)
+            // ]] / [[ / ][ / []: the next/previous COLUMN-1 brace — sections
+            // land at the line start, linewise for operators (`:h ]]`).
+            // ]m / [m / ]M / [M: methods, the brace NOT in column 1, landed
+            // ON the brace char (audit A3 — the family was unbound)
+            Motion::Section {
+                ch,
+                backward,
+                method,
+            } => {
+                let last = buf.line_count() as i64 - 1;
+                let mut line = buf.offset_to_line(vim.cursor.offset) as i64;
+                let step: i64 = if backward { -1 } else { 1 };
+                let want = count.max(1);
+                let mut seen = 0usize;
+                let mut found: Option<usize> = None;
+                while (line + step) >= 0 && (line + step) <= last {
+                    line += step;
+                    let l = line as usize;
+                    let ls = buf.line_start(l);
+                    let le = buf.line_end(l);
+                    if le == ls {
+                        continue;
+                    }
+                    // a column-1 brace: a section stop (skipped for methods)
+                    if buf.char_at(ls) == Some(ch) {
+                        if !method {
+                            seen += 1;
+                            if seen >= want {
+                                found = Some(ls);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    if method {
+                        // the first brace NOT in column 1 on this line
+                        let mut o = ls;
+                        while o < le {
+                            if buf.char_at(o) == Some(ch) {
+                                seen += 1;
+                                if seen >= want {
+                                    found = Some(o);
+                                }
+                                break;
+                            }
+                            o += buf.char_at(o).map(|c| c.len_utf8()).unwrap_or(1);
+                        }
+                        if found.is_some() {
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(o) if method => MotionResult::new(o, MotionKind::Inclusive),
+                    Some(o) => MotionResult::new(o, MotionKind::Linewise),
+                    None => MotionResult::stuck(vim.cursor.offset),
+                }
+            }
+            // |: display column `count` (wide chars cover two cells, TAB
+            // expands per 'tabstop' — audit A1: `5|` on "ab\tc" parks ON
+            // the tab, the old width-1 model landed past it)
             Motion::Column => {
                 let line = buf.offset_to_line(vim.cursor.offset);
-                // `|` counts display columns (wide chars cover two)
                 let col = count.max(1) - 1;
                 MotionResult::new(
-                    crate::buffer::offset_for_display_column(buf, line, col),
+                    crate::buffer::offset_for_display_column_with(
+                        buf,
+                        line,
+                        col,
+                        vim.options.tabstop,
+                    ),
                     MotionKind::Exclusive,
                 )
             }
@@ -590,12 +727,15 @@ impl Motion {
             Motion::ScrollHalfDown | Motion::ScrollHalfUp | Motion::PageDown | Motion::PageUp => {
                 let (first, last) = ctx.host.viewport();
                 let visible = last.saturating_sub(first).max(1);
-                // half-page for <C-d>/<C-u>, full page for <C-f>/<C-b>
-                let step = if matches!(self, Motion::PageDown | Motion::PageUp) {
+                // half-page for <C-d>/<C-u>, full page for <C-f>/<C-b>;
+                // a typed count scales the scroll (`2<C-f>` = two pages —
+                // audit F9; the old code dropped it)
+                let base = if matches!(self, Motion::PageDown | Motion::PageUp) {
                     visible
                 } else {
                     visible / 2
                 };
+                let step = base.saturating_mul(count.max(1));
                 let dir = if matches!(self, Motion::ScrollHalfDown | Motion::PageDown) {
                     1i64
                 } else {
@@ -607,7 +747,12 @@ impl Motion {
                 // cells, so on CJK/Tab rows it must be mapped back to a byte
                 // offset (a plain `line_start + desired` would land mid-char)
                 let desired = vim.desired_column(buf);
-                let o = crate::buffer::offset_for_display_column(buf, line, desired);
+                let o = crate::buffer::offset_for_display_column_with(
+                    buf,
+                    line,
+                    desired,
+                    vim.options.tabstop,
+                );
                 MotionResult::new(o, MotionKind::Linewise)
             }
             // gn / gN as operator target: the match containing the cursor,

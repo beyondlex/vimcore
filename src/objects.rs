@@ -99,14 +99,16 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
         offset
     };
     let Some(class) = class_of(offset) else {
-        // EMPTY line (cursor sits on the newline): `aw` treats it as one
-        // blank run reaching into the next line's word (9.1: `daw` on
-        // ["foo","","bar"] leaves ["foo"]). INNER word objects FAIL on an
-        // empty line — there is no word to select — and a failed object
-        // cancels the operator with vim's bell (audit L5); the old
+        // EMPTY line (cursor sits on the newline): `aw` spans the line's
+        // newline plus — when the next line has content — that line's first
+        // word (final newline included when the word is line-final; 9.1
+        // oracles: ["foo","","bar"] → "\nbar\n", ["foo","","bar baz"] →
+        // "\nbar", ["foo","","","bar"] → just "\n"). INNER word objects
+        // FAIL on an empty line — there is no word to select — and a failed
+        // object cancels the operator with vim's bell (audit L5); the old
         // empty-selection fallback made `diw`/`yiw` silently no-op.
         if !inner {
-            return Some(blank_run_plus_next_word(buf, big, line_start));
+            return empty_line_aw(buf, big, line_start);
         }
         return None;
     };
@@ -158,39 +160,192 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
     }
 
     // Cursor on whitespace and the object is `aw`: the whitespace run PLUS
-    // the next word (see [`blank_run_plus_next_word`]).
-    Some(blank_run_plus_next_word(buf, big, start))
+    // the next word (see [`blank_run_plus_next_word`]). A failed object (the
+    // run trails into EOF with no word) cancels the operator.
+    blank_run_plus_next_word(buf, big, start)
 }
 
-/// The `aw` object when the cursor is on whitespace (or an empty line): the
-/// whitespace run PLUS the next word — the run extends across newlines
-/// (blank lines belong to it), matching vim (9.1 probes: `yaw` on the gap of
-/// "foo   bar" yanks "   bar"; on a whitespace-only/empty line the object
-/// reaches the next line's word, so `daw` merges that line away).
-fn blank_run_plus_next_word(buf: &dyn VimBuffer, big: bool, run_start: usize) -> ObjectRange {
-    let mut o = run_start;
-    while let Some(c) = buf.char_at(o) {
-        if c.is_whitespace() {
-            o += c.len_utf8();
+/// The class-run end at `offset` (word run for Word/Punct, blank run for
+/// Blank — `word::class_at` with the same size).
+fn class_run_end(buf: &dyn VimBuffer, big: bool, offset: usize) -> usize {
+    let Some(class) = word::class_at(buf, offset, big) else {
+        return offset;
+    };
+    let mut end = offset + buf.char_at(offset).map(|c| c.len_utf8()).unwrap_or(1);
+    while end < buf.len() {
+        if word::class_at(buf, end, big) == Some(class) {
+            end += buf.char_at(end).map(|c| c.len_utf8()).unwrap_or(1);
         } else {
             break;
         }
     }
-    // `o` is the first char of the next word (or EOF); consume its run
-    let mut word_end = o;
-    if let Some(class) = word::class_at(buf, word_end, big) {
-        word_end += buf.char_at(word_end).map(|c| c.len_utf8()).unwrap_or(1);
-        let mut probe = o;
-        while let Some(next) = buf.next_char_offset(probe) {
-            if word::class_at(buf, next, big) == Some(class) {
-                word_end = next + buf.char_at(next).map(|c| c.len_utf8()).unwrap_or(1);
-                probe = next;
-            } else {
-                break;
-            }
+    end
+}
+
+/// `aw` with the cursor ON an EMPTY line (audit B2): the line's newline,
+/// plus the next line's first word when that line has content — its final
+/// newline joins when the word is line-final (oracle: ["foo","","bar"] →
+/// "\nbar\n", ["foo","","bar baz"] → "\nbar"). Consecutive EMPTY lines are
+/// NOT swallowed here (`yaw` on ["foo","","","bar"] from the first empty
+/// line is just "\n"); the deeper swallow belongs to the count-extension
+/// re-probe in `ops::object_span_count`. `None` = the object fails (noeol
+/// tail with no newline to span).
+fn empty_line_aw(buf: &dyn VimBuffer, big: bool, line_start: usize) -> Option<ObjectRange> {
+    let line = buf.offset_to_line(line_start);
+    let line_end = buf.line_end(line);
+    // the empty line needs its terminator to span anything
+    if buf.line_range(line).end <= line_end {
+        return None;
+    }
+    let mut end = line_end + 1;
+    let next_line = buf.offset_to_line(end);
+    let next_end = buf.line_end(next_line);
+    if next_end > end {
+        let w = class_run_end(buf, big, end);
+        // a line-final word carries its newline ("\nbar\n")
+        if w == next_end && buf.line_range(next_line).end > next_end {
+            end = w + 1;
+        } else {
+            end = w;
         }
     }
-    ObjectRange::charwise(run_start, word_end)
+    Some(ObjectRange::charwise(line_start, end))
+}
+
+/// The count-extension re-probe for `aw` when the scan lands ON a line's
+/// terminator (`d2aw` over a line break — audit B1): vim's object spans the
+/// newline, swallows consecutive EMPTY lines, then takes the next word WITH
+/// its trailing blanks (the final newline joins when the word is line-final):
+/// `d2aw` on "ab cd\nef gh" covers " cd\nef "; on "foo\n\nbar" the second
+/// object is "\n\nbar\n" and the buffer empties. `None` when nothing
+/// follows.
+pub(crate) fn newline_word_span(
+    buf: &dyn VimBuffer,
+    big: bool,
+    nl_offset: usize,
+) -> Option<ObjectRange> {
+    let mut end = nl_offset + 1;
+    loop {
+        let l = buf.offset_to_line(end);
+        let le = buf.line_end(l);
+        if le == end && buf.line_range(l).end > le {
+            end += 1; // swallow the empty line's newline
+            continue;
+        }
+        break;
+    }
+    if end >= buf.len() {
+        return Some(ObjectRange::charwise(nl_offset, buf.len()));
+    }
+    let l = buf.offset_to_line(end);
+    let le = buf.line_end(l);
+    let mut w = class_run_end(buf, big, end);
+    while w < le {
+        match buf.char_at(w) {
+            Some(c) if c.is_whitespace() => w += c.len_utf8(),
+            _ => break,
+        }
+    }
+    if w == le && buf.line_range(l).end > le {
+        w += 1; // line-final word carries its newline
+    }
+    Some(ObjectRange::charwise(nl_offset, w))
+}
+
+/// The `aw` object when the cursor is on whitespace (audit B2, vim 9.1
+/// daw/yaw oracle matrix, byte-counted):
+/// * a word later ON THE SAME LINE joins the run (`yaw` on the gap of
+///   "foo   bar" yanks "   bar");
+/// * the run reaching the line end crosses the line's own newline. When a
+///   content line follows DIRECTLY, its word joins (+ trailing blanks; a
+///   line-final word carries its newline — `daw` on "a   \nb" spans
+///   "   \nb\n", leaving "a");
+/// * from a WHITESPACE-ONLY cursor line the span additionally swallows
+///   following EMPTY lines whole and STOPS at the next content char, word
+///   excluded (`daw` on "a   \n\nb" spans "   \n", leaving "a\nb\n"; on
+///   "foo\n   \n\nbar" it spans "   \n\n", leaving "foo\nbar\n");
+/// * nothing but blanks after the span → the object FAILS (`None`):
+///   `daw` on "a   \n" is a no-op with the bell.
+fn blank_run_plus_next_word(
+    buf: &dyn VimBuffer,
+    big: bool,
+    run_start: usize,
+) -> Option<ObjectRange> {
+    let line = buf.offset_to_line(run_start);
+    let line_start = buf.line_start(line);
+    let line_end = buf.line_end(line);
+    let mut o = run_start;
+    while o < line_end {
+        match buf.char_at(o) {
+            Some(c) if c.is_whitespace() => o += c.len_utf8(),
+            _ => break,
+        }
+    }
+    // a word follows on the SAME line: run + word
+    if o < line_end {
+        return Some(ObjectRange::charwise(run_start, class_run_end(buf, big, o)));
+    }
+    // the run reached the line end — nothing more without a terminator
+    if buf.line_range(line).end <= line_end {
+        return None;
+    }
+    let mut end = line_end + 1; // past the newline = the next line's start
+    // a WHITESPACE-ONLY cursor line swallows following EMPTY lines whole
+    let cursor_line_ws_only = buf.slice(line_start..line_end).chars().all(char::is_whitespace);
+    if cursor_line_ws_only {
+        loop {
+            let l = buf.offset_to_line(end);
+            let le = buf.line_end(l);
+            if le == end && buf.line_range(l).end > le {
+                end += 1; // the empty line's newline joins the span
+                continue;
+            }
+            break;
+        }
+    }
+    // nothing but blanks from the span end to EOF → the object FAILS
+    // (`daw` on "a   \n" is a no-op with the bell — audit B2)
+    let mut content_found = false;
+    let mut probe = end;
+    while probe < buf.len() {
+        let l = buf.offset_to_line(probe);
+        let le = buf.line_end(l);
+        if probe < le {
+            content_found = true;
+            break; // content ahead
+        }
+        let range_end = buf.line_range(l).end;
+        if range_end <= le {
+            return None; // noeol tail with no content
+        }
+        probe = range_end;
+    }
+    if !content_found {
+        return None;
+    }
+    // a content line directly at `end` contributes its word (+ trailing
+    // blanks; line-final words carry their newline) — but only when NO
+    // empty line was swallowed in between: vim keeps the word when an
+    // empty line separates ("a   \n\nb" daw leaves "a\nb\n")
+    let swallowed = end > line_end + 1;
+    if end < buf.len() && !swallowed {
+        let l = buf.offset_to_line(end);
+        let le = buf.line_end(l);
+        if le > end {
+            let mut e = class_run_end(buf, big, end);
+            while e < le {
+                match buf.char_at(e) {
+                    Some(c) if c.is_whitespace() => e += c.len_utf8(),
+                    _ => break,
+                }
+            }
+            if e == le && buf.line_range(l).end > le {
+                e += 1;
+            }
+            end = e;
+        }
+    }
+    Some(ObjectRange::charwise(run_start, end))
 }
 
 fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {
@@ -559,7 +714,7 @@ fn tag_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRa
     for (start, end, name, is_open) in tags {
         if is_open {
             stack.push((start, name));
-        } else if let Some(pos) = stack.iter().rposition(|(_, n)| *n == name) {
+        } else if let Some(pos) = stack.iter().rposition(|(_, n)| n.eq_ignore_ascii_case(name)) {
             let (open_start, _) = stack[pos];
             stack.truncate(pos);
             if open_start <= offset && offset < end {

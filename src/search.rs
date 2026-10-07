@@ -44,11 +44,17 @@ impl Default for SearchState {
 
 /// Regex options come from the engine's case options; the builder itself
 /// never fails to construct (only `.build()` can reject a bad pattern).
-/// Parsed `/pat/{offset}` tail: which match end anchors the cursor and how
-/// many lines to shift afterwards.
+/// Parsed `/pat/{offset}` tail: which match end anchors the cursor, a
+/// CHARACTER shift from that anchor and a LINE shift.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchOffset {
     pub anchor: OffsetAnchor,
+    /// Characters to move from the anchor (`/pat/e2`, `/pat/s-2` — the
+    /// count after a letter anchor counts CHARS, audit F5; the bare `e`
+    /// parks ON the last char, encoded as -1 from the exclusive end).
+    pub char_shift: i64,
+    /// Lines to shift from the match line (`/pat/+2`, bare `2` — audit F5;
+    /// the old parser folded the letter counts in here).
     pub line_shift: i64,
 }
 
@@ -56,31 +62,29 @@ pub struct SearchOffset {
 pub enum OffsetAnchor {
     /// `s`/`b`: start of the match
     Start,
-    /// `e`: end of the match (last char)
+    /// `e`: the match's EXCLUSIVE end byte
     End,
 }
 
 /// Parse the offset tail of a search (`:h search-offset`): `e[+-N]`/`s[+-N]`/
-/// `b[+-N]` anchor at the match end/start, a bare `[+-]N`/`N` is a line
-/// shift from the match start. Returns None on a malformed tail.
+/// `b[+-N]` anchor at the match end/start with a CHARACTER shift, a bare
+/// `[+-]N`/`N` is a LINE shift from the match line. Returns None on a
+/// malformed tail.
 pub fn parse_search_offset(spec: &str) -> Option<SearchOffset> {
-    use OffsetAnchor::*;
-    let mut chars = spec.chars();
-    let mut anchor = Start;
+    let mut anchor: Option<OffsetAnchor> = None;
     let mut rest = spec;
-    match chars.next() {
+    match spec.chars().next() {
         Some('e') => {
-            anchor = End;
+            anchor = Some(OffsetAnchor::End);
             rest = &spec[1..];
         }
         Some('s') | Some('b') => {
-            anchor = Start;
+            anchor = Some(OffsetAnchor::Start);
             rest = &spec[1..];
         }
         Some(c) if c.is_ascii_digit() || c == '+' || c == '-' => {}
         _ => return None,
     }
-    // the optional [+/-][N] line shift
     let (sign, digits) = match rest.strip_prefix('-') {
         Some(d) => (-1i64, d),
         None => match rest.strip_prefix('+') {
@@ -88,17 +92,44 @@ pub fn parse_search_offset(spec: &str) -> Option<SearchOffset> {
             None => (1i64, rest),
         },
     };
-    let line_shift = if digits.is_empty() {
-        // a bare sign needs the anchor branch to have consumed a letter
-        // (`/e+` = end + 1 line); a bare empty tail is no shift
-        if rest.is_empty() { 0 } else { sign }
-    } else {
-        match digits.parse::<i64>() {
-            Ok(n) => sign * n,
-            Err(_) => return None,
+    let mut char_shift = 0i64;
+    let mut line_shift = 0i64;
+    match anchor {
+        Some(a) => {
+            char_shift = if digits.is_empty() {
+                if rest.is_empty() {
+                    // bare letter: `e` parks ON the match's last char
+                    // (exclusive end - 1); `b`/`s` at the start
+                    if a == OffsetAnchor::End {
+                        -1
+                    } else {
+                        0
+                    }
+                } else {
+                    // a bare sign counts one char
+                    sign
+                }
+            } else {
+                sign * digits.parse::<i64>().ok()?
+            };
         }
-    };
-    Some(SearchOffset { anchor, line_shift })
+        None => {
+            line_shift = if digits.is_empty() {
+                if rest.is_empty() {
+                    0
+                } else {
+                    sign
+                }
+            } else {
+                sign * digits.parse::<i64>().ok()?
+            };
+        }
+    }
+    Some(SearchOffset {
+        anchor: anchor.unwrap_or(OffsetAnchor::Start),
+        char_shift,
+        line_shift,
+    })
 }
 
 pub fn compile(vim: &VimState, pattern: &str) -> RegexBuilder {
@@ -170,7 +201,15 @@ pub fn clear_highlights(vim: &mut VimState, ctx: &mut Ctx) {
 }
 
 /// `n` / `N`: move to the next match in `forward` direction (already flipped
-/// by the caller for `N`). Also used after `*`.
+/// by the caller for `N`). Also used after `*` and the `/`/`?` prompts.
+///
+/// vim's acceptance rule (9.1 oracle matrix, 2026-10-08): candidates are
+/// scanned in the search direction starting at the match CONTAINING the
+/// cursor; a candidate is accepted only when its offset-applied landing
+/// strictly ADVANCES the cursor (`/foo` from a match start skips to the
+/// next match — landing == origin doesn't count; `/foo/e` accepts the
+/// cursor's own match because the `e` anchor moves it to the match end).
+/// The scan wraps (`wrapscan`), and `count` counts accepted landings.
 pub fn jump_to_match(
     vim: &mut VimState,
     buf: &dyn VimBuffer,
@@ -191,59 +230,110 @@ pub fn jump_to_match(
         return None;
     }
 
-    let cursor = vim.cursor.offset;
-    let start_index = if forward {
-        matches.iter().position(|m| m.start > cursor).unwrap_or(0)
+    let mut origin = vim.cursor.offset;
+    let len = matches.len();
+    // first candidate: the match containing the origin (its end past it),
+    // else the next match in the direction; when NO match lies ahead the
+    // scan WRAPS to the far end ('wrapscan') and that first candidate is
+    // already a wrap step
+    let (start_idx, first_is_wrap) = if forward {
+        match matches.iter().position(|m| m.end > origin) {
+            Some(i) => (i, false),
+            None => (0, true),
+        }
     } else {
-        matches
-            .iter()
-            .rposition(|m| m.start < cursor)
-            .unwrap_or(matches.len() - 1)
+        match matches.iter().rposition(|m| m.start <= origin) {
+            Some(i) => (i, false),
+            None => (len - 1, true),
+        }
     };
-    // `count` steps in the search DIRECTION from the cursor's neighbor
-    // match, wrapping around the list — `2N` is two matches BACKWARD (vim
-    // 9.1: from the last of five matches, 1N→4th, 2N→3rd, 3N→2nd; the old
-    // code walked +count-1 and went FORWARD). The step count is reduced
-    // modulo the list length BEFORE the add: a typed count rides the
-    // prompt's search_count path (the one count that bypasses
-    // take_total_count's cap), and `99999999999999999999/pat<CR>` used to
-    // overflow the u64 arithmetic — debug builds panicked, release builds
-    // silently landed on an arbitrary match. With `steps < len` the sum can
-    // never leave u64 range.
-    let len = matches.len() as u64;
-    let count = count.max(1) as u64;
-    let steps = (count - 1) % len;
-    let index = if forward {
-        (start_index as u64 + steps) as usize % len as usize
-    } else {
-        (start_index as u64 + len - steps) as usize % len as usize
-    };
-    // `index` is already in bounds (both branches take it modulo `len`)
-    // remember the chosen RANGE so search offsets (`/pat/e`) can anchor on
-    // the match end (audit F3)
-    vim.search.last_found_match = Some(matches[index].clone());
-    Some(matches[index].start)
+    let offset = vim.search.offset;
+    // A huge count degenerates into a bounded number of sequential passes:
+    // the acceptance walk is deterministic per pass, so the landing stays
+    // defined (and the arithmetic bounded) however large the typed count is
+    // (the u64-overflow contract of the round-24 probe).
+    let passes = count.max(1).saturating_mul(len.max(1)).min(len * 8 + 8) / len.max(1) + 1;
+    let want = count.max(1);
+    let mut accepted = 0usize;
+    let mut last_accepted: Option<usize> = None;
+    // one full wrap is enough: a second pass re-tests the same candidates
+    for pass in 0..passes {
+        let step_base = pass * len;
+        for step in step_base..step_base + len {
+            let (idx, wrapped_raw) = if forward {
+                let raw = start_idx + step;
+                let i = raw % len;
+                (i, raw >= len)
+            } else {
+                // walk downward with wraparound past index 0
+                let off = step % len;
+                if off <= start_idx {
+                    (start_idx - off, step >= start_idx + 1)
+                } else {
+                    (start_idx + len - off, true)
+                }
+            };
+            let wrapped = wrapped_raw || (step == 0 && first_is_wrap && pass == 0);
+            let m = &matches[idx];
+            // the offset landing decides acceptance; a match whose landing does
+            // not advance (plain search from its own start) is passed over —
+            // EXCEPT once the scan has WRAPPED: vim's 'wrapscan' takes the
+            // origin match itself when the scan comes around (`n` from the last
+            // match lands on the first whatever the direction)
+            vim.search.last_found_match = Some(m.clone());
+            let landing = offset
+                .and_then(|off| offset_target(vim, buf, &off))
+                .unwrap_or(m.start);
+            let advances = if forward { landing > origin } else { landing < origin };
+            if !advances && !wrapped {
+                continue;
+            }
+            accepted += 1;
+            last_accepted = Some(m.start);
+            if accepted >= want {
+                return Some(m.start);
+            }
+            // count repeats are SEQUENTIAL searches: the next acceptance is
+            // measured from the landing just accepted
+            origin = landing;
+        }
+    }
+    last_accepted
 }
 
-/// Apply a search offset to the last-found match: anchor at the match's
-/// start/end and shift lines (`:h search-offset`; audit F3). The column is
-/// kept across the line shift, clamped to each line's end.
-pub fn apply_search_offset(vim: &mut VimState, buf: &dyn VimBuffer, offset: &SearchOffset) {
-    let Some(m) = vim.search.last_found_match.clone() else { return };
+/// Compute where a search offset lands: anchor at the match start/end, add
+/// the CHARACTER shift, then shift LINES from the match line — the line form
+/// lands in COLUMN 1 of the shifted line (vim 9.1 probe, audit F6; the old
+/// code kept the match column and counted letter anchors as whole lines).
+pub fn offset_target(vim: &VimState, buf: &dyn VimBuffer, offset: &SearchOffset) -> Option<usize> {
+    let m = vim.search.last_found_match.clone()?;
     let anchor = match offset.anchor {
         OffsetAnchor::Start => m.start,
-        OffsetAnchor::End => buf
-            .prev_char_offset(m.end)
-            .unwrap_or(m.start),
+        OffsetAnchor::End => m.end,
     };
-    let mut line = buf.offset_to_line(anchor) as i64 + offset.line_shift;
-    let max_line = buf.line_count() as i64 - 1;
-    line = line.clamp(0, max_line);
-    let line = line as usize;
-    let col = crate::buffer::display_column(buf, anchor);
-    let target = crate::buffer::offset_for_display_column(buf, line, col);
-    vim.cursor.offset = target;
-    vim.cursor.desired_col = None;
+    if offset.line_shift != 0 {
+        let line = buf.offset_to_line(m.start) as i64 + offset.line_shift;
+        let line = line.clamp(0, buf.line_count() as i64 - 1) as usize;
+        return Some(buf.line_start(line));
+    }
+    let moved = anchor as i64 + offset.char_shift;
+    if moved < 0 {
+        return Some(0);
+    }
+    let mut target = moved as usize;
+    if target > buf.len() {
+        target = buf.len();
+    }
+    let target = crate::buffer::floor_to_char_boundary(buf, target);
+    Some(crate::buffer::clamp_to_line_end(buf, target))
+}
+
+/// Apply a search offset to the last-found match (audit F3/F5/F6).
+pub fn apply_search_offset(vim: &mut VimState, buf: &dyn VimBuffer, offset: &SearchOffset) {
+    if let Some(target) = offset_target(vim, buf, offset) {
+        vim.cursor.offset = target;
+        vim.cursor.desired_col = None;
+    }
 }
 
 /// `*` / `#`: search for the text at the cursor. Vim's fallback chain
@@ -253,11 +343,16 @@ pub fn apply_search_offset(vim: &mut VimState, buf: &dyn VimBuffer, offset: &Sea
 /// `foo !` fell through to the stale-pattern bell). Returns false when the
 /// line offers nothing (whitespace only) — the caller must not jump with a
 /// stale pattern.
+///
+/// `whole_word` selects between `*` (`\bword\b`) and `g*` (`g#`: the same
+/// word as a SUBSTRING pattern — `:h g*`, audit F2; the old keys degraded
+/// to plain `*`/`#`).
 pub fn search_word_under_cursor(
     vim: &mut VimState,
     buf: &dyn VimBuffer,
     host: &mut dyn crate::host::VimHost,
     forward: bool,
+    whole_word: bool,
 ) -> bool {
     let offset = vim.cursor.offset;
     // not on a word char: scan forward to the next NON-BLANK within this
@@ -284,7 +379,11 @@ pub fn search_word_under_cursor(
             return false;
         }
         let escaped = regex::escape(&literal);
-        let pattern = format!(r"\b{escaped}\b");
+        let pattern = if whole_word {
+            format!(r"\b{escaped}\b")
+        } else {
+            escaped
+        };
         set_pattern_inner(vim, buf, host, pattern, forward);
         return true;
     }
@@ -348,14 +447,25 @@ pub fn publish_incsearch(vim: &mut VimState, ctx: &mut Ctx, pattern: &str) {
     }
     let matches = all_matches(vim, ctx.buf, pattern);
     // the "current" preview is the match vim's incsearch would JUMP to on
-    // Enter: the first one at/after the cursor, wrapping to the buffer's
-    // first — marking the buffer's first match misrendered the preview
-    // whenever the cursor sat below it
-    let current = matches
-        .iter()
-        .find(|m| m.start >= vim.cursor.offset)
-        .cloned()
-        .or_else(|| matches.first().cloned());
+    // Enter: forward prompts take the first match at/after the cursor
+    // (wrapping to the buffer's first); BACKWARD prompts (`?pat`) take the
+    // last match BEFORE the cursor, wrapping to the buffer's last (audit
+    // F7 — the old preview always marked the forward-nearest match)
+    let backward = matches!(vim.mode, crate::mode::Mode::CommandLine { prompt: '?' });
+    let current = if backward {
+        matches
+            .iter()
+            .rev()
+            .find(|m| m.start < vim.cursor.offset)
+            .cloned()
+            .or_else(|| matches.last().cloned())
+    } else {
+        matches
+            .iter()
+            .find(|m| m.start >= vim.cursor.offset)
+            .cloned()
+            .or_else(|| matches.first().cloned())
+    };
     ctx.host.set_search_highlights(&matches, current);
 }
 

@@ -17,7 +17,8 @@ use vimcore::buffer::VimBuffer;
 /// 格区间内）；引擎落到 offset 3（'c'，第 4 列）。
 #[test]
 fn pipe_column_ignores_tabstop() {
-    let f = edit("ab\tc", 0, 0, &["5", "|"]);
+    // oracle 采样时 ts=8；引擎默认 ts=4（NOTES 有意分歧），先钉住
+    let f = edit("ab\tc", 0, 0, &[":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>", "5", "|"]);
     assert_eq!(f.cursor(), 2, "vim 9.1: 5| 停在 TAB（col 3 1-based）");
 }
 
@@ -177,6 +178,9 @@ fn c2w_across_empty_line_reaches_last_word() {
 /// line 2 col 9（'8'）；引擎落在 '2'（col 3）。
 #[test]
 fn j_preserves_virtcol_with_tabstop() {
-    let f = edit("a\tb\n0123456789x\n", 0, 2, &["j"]);
+    // 同上：oracle 的 ts=8 前提先钉住
+    let f = edit("a\tb\n0123456789x\n", 0, 2, &[
+        ":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>", "j",
+    ]);
     assert_eq!(f.cursor(), 12, "vim 9.1: j 保持 virtcol 9 → 第 9 列 '8'");
 }

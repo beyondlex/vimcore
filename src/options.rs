@@ -191,6 +191,30 @@ impl Options {
         true
     }
 
+    /// `:set {bool}&` — reset a boolean option to its default (audit H1;
+    /// the `&` suffix used to fall through to E518 for booleans because only
+    /// the numeric reset existed). False when the name is unknown.
+    pub fn reset_boolean(&mut self, name: &str) -> bool {
+        let Some(canon) = canonical_bool(name) else {
+            return false;
+        };
+        let defaults = Options::default();
+        match canon {
+            "number" => self.number = defaults.number,
+            "relativenumber" => self.relativenumber = defaults.relativenumber,
+            "expandtab" => self.expandtab = defaults.expandtab,
+            "autoindent" => self.autoindent = defaults.autoindent,
+            "ignorecase" => self.ignorecase = defaults.ignorecase,
+            "smartcase" => self.smartcase = defaults.smartcase,
+            "hlsearch" => self.hlsearch = defaults.hlsearch,
+            "incsearch" => self.incsearch = defaults.incsearch,
+            "showmode" => self.showmode = defaults.showmode,
+            "showcmd" => self.showcmd = defaults.showcmd,
+            _ => unreachable!("BOOL_TABLE and this match are out of sync"),
+        }
+        true
+    }
+
     fn value_of(&self, canon: &str) -> usize {
         match canon {
             "tabstop" => self.tabstop,
@@ -201,9 +225,11 @@ impl Options {
         }
     }
 
-    /// `:set name?` feedback in vim's rendering: `ignorecase` /
-    /// `noignorecase` / `tabstop=4`. The `no` spelling queries too
-    /// (`noic?` → `noignorecase`). `None` when the name is unknown.
+    /// `:set name?` feedback in vim's rendering: two-space indent, then
+    /// `ignorecase` / `noignorecase` / `tabstop=4` (9.1: `:set ts?` prints
+    /// `  tabstop=8` — audit H2; the bare unpadded form was engine-shaped).
+    /// The `no` spelling queries too (`noic?` → `noignorecase`). `None` when
+    /// the name is unknown.
     pub fn describe(&self, name: &str) -> Option<String> {
         let (name, negated) = match name.strip_prefix("no") {
             Some(stripped) if canonical_bool(stripped).is_some() => (stripped, true),
@@ -212,16 +238,16 @@ impl Options {
         if let Some(canon) = canonical_bool(name) {
             let on = self.bool_option(name)? != negated;
             return Some(if on {
-                canon.to_owned()
+                format!("  {canon}")
             } else {
-                format!("no{canon}")
+                format!("  no{canon}")
             });
         }
         if negated {
             return None; // `notabstop` is not a thing
         }
         let canon = canonical_value(name)?;
-        Some(format!("{}={}", canon, self.value_of(canon)))
+        Some(format!("  {}={}", canon, self.value_of(canon)))
     }
 
     /// `:set` with no arguments: every option, rendered like [`describe`].

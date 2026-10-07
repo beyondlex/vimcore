@@ -140,7 +140,8 @@ fn register_prefix_routes_substitute_into_named_register() {
 #[test]
 fn double_quote_register_prefix_behaves_like_no_prefix() {
     let f = edit("a\nb\n", 0, 0, &["d", "d", "\"\"", "d", "d", "g", "g", "\"", "1", "p"]);
-    assert_eq!(f.text(), "\nb", "\"\"dd must rotate the numbered ring");
+    // 字节口径随 'fixendofline'（写回补末尾换行）
+    assert_eq!(f.text(), "\nb\n", "\"\"dd must rotate the numbered ring");
 }
 
 /// PROBE: vim 9.1 `:nnoremap j G` 后输入 `gj` → 光标落第 2 行（builtin gj
@@ -377,7 +378,7 @@ fn set_spaced_question_mark_queries() {
     f.feed([":", "s", "e", "t", " ", "t", "s", " ", "?", "<CR>"]);
     assert_eq!(
         f.host.statuses.last().map(String::as_str),
-        Some("tabstop=4"),
+        Some("  tabstop=4"),
         "ts ? 查询不响铃"
     );
     assert_eq!(f.host.bells, 0);
@@ -385,7 +386,7 @@ fn set_spaced_question_mark_queries() {
     f2.feed([":", "s", "e", "t", " ", "t", "s", "<CR>"]);
     assert_eq!(
         f2.host.statuses.last().map(String::as_str),
-        Some("tabstop=4"),
+        Some("  tabstop=4"),
         "裸 ts = 查询"
     );
     // 布尔名 + 空格问号 = 查询而非置位
@@ -394,7 +395,7 @@ fn set_spaced_question_mark_queries() {
     f3.feed([":", "s", "e", "t", " ", "i", "c", " ", "?", "<CR>"]);
     assert_eq!(
         f3.host.statuses.last().map(String::as_str),
-        Some("noignorecase"),
+        Some("  noignorecase"),
         "ic ? 是查询，不置位"
     );
 }

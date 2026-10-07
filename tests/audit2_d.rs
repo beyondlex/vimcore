@@ -107,7 +107,9 @@ fn set_ampersand_resets_boolean_option() {
 /// "E518: Unknown option: foo?"（oracle）；引擎只响铃，零状态消息。
 #[test]
 fn set_unknown_name_query_reports_e518() {
-    let mut f = edit("a\n", 0, 0, &["m"]);
+    // （旧稿开头误喂了一个 `m`，把 `:` 吃进了 mark 等待——引擎其实早已
+    // 正确拒绝，探针自身修掉这枚噪点）
+    let mut f = edit("a\n", 0, 0, &[]);
     f.feed([":", "s", "e", "t", " ", "f", "o", "o", "?", "<CR>"]);
     assert!(
         f.host
@@ -150,7 +152,10 @@ fn left_align_honors_indent_argument() {
 /// 空格；et 下才是全空格）；引擎一律 `" ".repeat` 纯空格。
 #[test]
 fn center_padding_composes_tabs_under_noet() {
-    let mut f = edit("ab\n", 0, 0, &[":", "s", "e", "t", " ", "n", "o", "e", "t", "<CR>"]);
+    // oracle 采样时 vim 是默认 ts=8——引擎默认 ts=4（NOTES 有意分歧），
+    // 先把 ts 钉到 8 再跑，oracle 的字节期望原样成立
+    let mut f = edit("ab\n", 0, 0, &[":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>"]);
+    f.feed([":", "s", "e", "t", " ", "n", "o", "e", "t", "<CR>"]);
     f.feed([":", "c", "e", " ", "4", "0", "<CR>"]);
     assert_eq!(
         f.text(), "\t\t   ab\n",
@@ -165,7 +170,9 @@ fn center_padding_composes_tabs_under_noet() {
 /// 0 报 E488 Trailing characters 且不动缓冲。
 #[test]
 fn retab_zero_uses_current_tabstop() {
-    let mut f = edit("        ab\n", 0, 0, &[":", "s", "e", "t", " ", "n", "o", "e", "t", "<CR>"]);
+    // 同上：oracle 的 ts=8 前提先钉住
+    let mut f = edit("        ab\n", 0, 0, &[":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>"]);
+    f.feed([":", "s", "e", "t", " ", "n", "o", "e", "t", "<CR>"]);
     f.feed([":", "r", "e", "t", "a", "b", "!", " ", "0", "<CR>"]);
     assert_eq!(f.text(), "\tab\n", ":retab! 0 应按默认 ts=8 把 8 空格收成 1 个制表");
     assert!(

@@ -279,7 +279,9 @@ fn misc_edit_commands() {
     assert_eq!(f.text(), "hello");
     let mut f = edit("keep tail", 0, 4, &["Y"]);
     f.feed(["p"]);
-    assert_eq!(f.text(), "keep tail\nkeep tail");
+    // noeol 文件的字节口径：vim 的 'fixendofline' 在写回时补末尾换行
+    // （2026-10-08 od 实证），缓冲文本带终结符
+    assert_eq!(f.text(), "keep tail\nkeep tail\n");
 }
 
 #[test]
@@ -847,7 +849,9 @@ fn visual_marks_shift_and_gv_tracks_the_text() {
     let mut f = Fixture::at("aa\nbbbb\n", 1, 0);
     f.feed(["v", "l", "l", "y"]); // select bbb, sets '< '>
     assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(3));
-    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(6)); // stored as an exclusive end
+    // `'>` 解析到**最后选中字符**（vim 9.1，audit E3 —— 旧的排他端点 6
+    // 会让 `` `> `` 落到选中区之后一格）
+    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(5));
                                                    // open a line above: everything shifts by 2 ("x\n")
     f.feed(["g", "g"]);
     f.feed(["o"]);
@@ -855,7 +859,7 @@ fn visual_marks_shift_and_gv_tracks_the_text() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "aa\nx\nbbbb\n");
     assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(5));
-    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(8)); // stored as an exclusive end
+    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(7)); // 最后选中字符（E3）
                                                    // gv restores the selection over the SHIFTED text
     f.feed(["g", "v"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
@@ -1121,23 +1125,22 @@ fn dot_ignores_visual_canceled_and_non_changes() {
 }
 
 #[test]
-fn dot_does_not_repeat_visual_block_insert() {
-    // block I/A/c replicate per row at insert exit — the typed text step
-    // can't reproduce that, so the block change must not leak into `.`
+fn dot_repeats_visual_block_insert() {
+    // audit D11（vim 9.1 oracle b5）：块插入之后 `.` 重放原键序
+    // [C-v…, I, 文本, Esc]——重放路径重新走 begin_block_insert → exit_insert
+    // 的整条复制机制，光标行与块行各得一个 `#`。（旧行为把整条录制丢掉，
+    // `.` 只能重复更早的变更——与 vim 不符。）
     let mut f = Fixture::at("aa\nbb\ncc\n", 0, 0);
-    f.feed(["x"]); // last change = x
     f.feed(["<C-v>"]);
     f.feed(["j", "j"]);
     f.feed(["I"]);
     f.type_text("#");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "#a\n#bb\n#cc\n");
+    // I 在块列**之前**插入："aa" → "#aa"
+    assert_eq!(f.text(), "#aa\n#bb\n#cc\n");
+    f.feed(["w"]);
     f.feed(["."]);
-    // `.` replays the earlier `x` (deletes one char under the cursor) — the
-    // block insert never became the last change. The cursor stays on the
-    // typing row's inserted `#` (its LOGICAL position, byte-adjusted for the
-    // replica inserts above it), so `x` deletes that `#`.
-    assert_eq!(f.text(), "#a\n#bb\ncc\n");
+    assert_eq!(f.text(), "##aa\n##bb\n##cc\n");
 }
 
 // ---- R replace mode (ROADMAP task 6) -------------------------------------------
@@ -1694,14 +1697,15 @@ fn gi_inserts_at_last_insert_exit() {
     let mut f = Fixture::at("one two\nthree\n", 0, 0);
     f.feed(["A"]);
     f.type_text("!");
-    f.feed(["<Esc>"]); // cursor steps back onto '!' (byte 7) = '^
+    f.feed(["<Esc>"]); // Esc 回退到 '!' 上，但 `^` 记在**后一位**（byte 8）
     f.feed(["g", "g"]); // move away
     f.feed(["g", "i"]);
     assert_eq!(f.vim.mode(), vimcore::Mode::Insert);
-    assert_eq!(f.cursor(), 7);
+    assert_eq!(f.cursor(), 8, "gi 停在最后插入字符的后一位（vim 9.1，audit E9）");
     f.type_text("?");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "one two?!\nthree\n");
+    // gi 停在 '!' 的后一位（E9），输入的 ? 落在其后
+    assert_eq!(f.text(), "one two!?\nthree\n");
 }
 
 #[test]
@@ -1711,17 +1715,19 @@ fn changelist_walks_changes() {
     f.feed(["j", "x"]); // change at line 1
     f.feed(["j", "x"]); // change at line 2
     assert_eq!(f.text(), "aaa\nbbb\nccc\n");
-    // g; walks to older changes
+    // g; 从**最新**变更开始向旧走（vim 9.1，audit E8/E9 —— 旧钉子按
+    // 最旧优先，oracle 已证伪）
+    f.feed(["g", ";"]);
+    assert_eq!(f.line(), 2);
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 1);
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 0);
-    // g, walks back to newer
+    // 穷尽后驻留；g, 反向走回更新的变更
+    f.feed(["g", ";"]);
+    assert_eq!(f.line(), 0);
     f.feed(["g", ","]);
     assert_eq!(f.line(), 1);
-    // at the newest end: bell and stay
-    f.feed(["g", ";", "g", ";", "g", ";"]);
-    assert_eq!(f.line(), 0);
 }
 
 #[test]
