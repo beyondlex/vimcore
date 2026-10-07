@@ -19,6 +19,10 @@ use std::ops::Range;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
     Delete,
+    /// visual `D`: blockwise — from the block column to each row's end;
+    /// charwise/linewise — from the span start to that line's end
+    /// (`:h v_D`; audit G2)
+    DeleteToEnd,
     Change,
     Yank,
     IndentLeft,
@@ -395,7 +399,12 @@ pub fn block_row_range(
             }
             lo..hi
         }
-        None => start..start,
+        // the row ends BEFORE the block column: an EMPTY range anchored at
+        // the LINE END, not the line start — `c`/`I` replica rows must type
+        // at the row's end (vim: block col 2 over rows "abcd"/"ab" changes
+        // "c"→X on row 1 and APPENDS on row 2 → "abX"; the old line-start
+        // anchor typed the replica text at column 0 — audit G3)
+        None => end..end,
     }
 }
 
@@ -427,7 +436,12 @@ pub fn span_from_visual_block(
         });
     }
     let a_col = crate::buffer::display_column(buf, anchor);
-    let c_col = crate::buffer::display_column(buf, cursor);
+    // the CURSOR column is the block's virtual column when one is tracked —
+    // `j`/`k` across short rows clamp the cursor byte, but the block edge
+    // stays at the moved column (audit G1/G3)
+    let c_col = vim
+        .block_cursor_col
+        .unwrap_or_else(|| crate::buffer::display_column(buf, cursor));
     let (col_lo, col_hi) = if a_col <= c_col {
         (a_col, c_col)
     } else {
@@ -486,6 +500,22 @@ pub fn apply(
                 span.end += 1;
             }
             delete_span(vim, ctx, &span, register)
+        }
+        // visual `D`: charwise/linewise — delete the COVERED LINES (vim
+        // `:h v_D` deletes whole lines from any non-block visual kind).
+        // Blockwise is handled in apply_block_operator (per-row col..EOL).
+        Operator::DeleteToEnd => {
+            let first = ctx.buf.offset_to_line(span.start);
+            let last = last_line_of_span(ctx.buf, span);
+            let mut s2 = OpSpan {
+                start: ctx.buf.line_start(first),
+                end: ctx.buf.line_range(last).end,
+                linewise: true,
+            };
+            if merges_following_line_break(ctx.buf, &s2) {
+                s2.end += 1;
+            }
+            delete_span(vim, ctx, &s2, register)
         }
         Operator::Yank => yank_span(vim, ctx, span, register),
         Operator::Change => {
@@ -573,10 +603,114 @@ pub fn apply(
 /// the result is a String, not a char.
 pub fn toggle_case(c: char) -> String {
     if c.is_lowercase() {
-        c.to_uppercase().collect()
+        uppercase_char(c)
     } else {
         c.to_lowercase().collect()
     }
+}
+
+/// `i_CTRL-K {c1}{c2}`: vim's default digraph table (a representative
+/// Latin-1/general subset — `ss` → `ß` is the oracle-verified audit H3
+/// case). Unknown pairs insert nothing, like vim's E-cancels.
+pub(crate) fn digraph(a: char, b: char) -> String {
+    const TABLE: &[(char, char, char)] = &[
+        ('s', 's', 'ß'),
+        ('o', '/', 'ø'),
+        ('O', '/', 'Ø'),
+        ('a', 'e', 'æ'),
+        ('A', 'E', 'Æ'),
+        ('o', 'e', 'œ'),
+        ('O', 'E', 'Œ'),
+        ('a', ':', 'ä'),
+        ('o', ':', 'ö'),
+        ('u', ':', 'ü'),
+        ('A', ':', 'Ä'),
+        ('O', ':', 'Ö'),
+        ('U', ':', 'Ü'),
+        ('e', '"', 'ë'),
+        ('i', '"', 'ï'),
+        ('E', '"', 'Ë'),
+        ('a', '\'', 'á'),
+        ('e', '\'', 'é'),
+        ('i', '\'', 'í'),
+        ('o', '\'', 'ó'),
+        ('u', '\'', 'ú'),
+        ('y', '\'', 'ý'),
+        ('A', '\'', 'Á'),
+        ('E', '\'', 'É'),
+        ('I', '\'', 'Í'),
+        ('O', '\'', 'Ó'),
+        ('U', '\'', 'Ú'),
+        ('Y', '\'', 'Ý'),
+        ('a', '`', 'à'),
+        ('e', '`', 'è'),
+        ('i', '`', 'ì'),
+        ('o', '`', 'ò'),
+        ('u', '`', 'ù'),
+        ('A', '`', 'À'),
+        ('E', '`', 'È'),
+        ('I', '`', 'Ì'),
+        ('O', '`', 'Ò'),
+        ('U', '`', 'Ù'),
+        ('a', '^', 'â'),
+        ('e', '^', 'ê'),
+        ('i', '^', 'î'),
+        ('o', '^', 'ô'),
+        ('u', '^', 'û'),
+        ('A', '^', 'Â'),
+        ('E', '^', 'Ê'),
+        ('I', '^', 'Î'),
+        ('O', '^', 'Ô'),
+        ('U', '^', 'Û'),
+        ('c', ',', 'ç'),
+        ('C', ',', 'Ç'),
+        ('n', '~', 'ñ'),
+        ('N', '~', 'Ñ'),
+        ('a', '*', 'å'),
+        ('A', '*', 'Å'),
+        ('d', '-', 'ð'),
+        ('D', '-', 'Ð'),
+        ('t', 'h', 'þ'),
+        ('T', 'H', 'Þ'),
+        ('y', ':', 'ÿ'),
+        ('c', 'o', '©'),
+        ('r', 'g', '®'),
+        ('D', 'G', '°'),
+        ('+', '-', '±'),
+        ('-', '-', '­'),
+        ('1', '2', '½'),
+        ('1', '4', '¼'),
+        ('3', '4', '¾'),
+        ('<', '<', '«'),
+        ('>', '>', '»'),
+        ('?', 'i', '¿'),
+        ('!', 'I', '¡'),
+        ('P', 'd', '£'),
+        ('E', 'u', '€'),
+        ('Y', 'e', '¥'),
+        ('C', 'u', '¤'),
+        ('x', ' ', '×'),
+        (':', '-', '÷'),
+        ('M', 'y', 'µ'),
+        ('p', 'I', '¶'),
+        ('S', 'E', '§'),
+    ];
+    for (x, y, out) in TABLE {
+        if (*x == a && *y == b) || (*x == b && *y == a) {
+            return (*out).to_string();
+        }
+    }
+    String::new()
+}
+
+/// Uppercase one char the way vim 9.1 does: `ß` maps to the single char
+/// `ẞ` (U+1E9E, oracle probe) — Rust's `to_uppercase` spells it `SS`,
+/// which turned `gUU` on `ß` into `SS` (audit G4).
+pub(crate) fn uppercase_char(c: char) -> String {
+    if c == 'ß' {
+        return '\u{1e9e}'.to_string();
+    }
+    c.to_uppercase().collect()
 }
 
 /// Map every char of `text` through the case operator. Multi-char case
@@ -586,7 +720,7 @@ pub(crate) fn case_mapped_text(op: Operator, text: &str) -> String {
     text.chars()
         .map(|c| match op {
             Operator::Lowercase => c.to_lowercase().collect::<String>(),
-            Operator::Uppercase => c.to_uppercase().collect::<String>(),
+            Operator::Uppercase => uppercase_char(c),
             _ => toggle_case(c),
         })
         .collect()
@@ -624,7 +758,13 @@ pub fn shift_line(vim: &mut VimState, ctx: &mut Ctx, line: usize, right: bool) {
         }
         o += ctx.buf.char_at(o).map_or(1, |c| c.len_utf8());
     }
-    let sw = vim.options.shiftwidth.max(1);
+    // vim: `shiftwidth=0` means "use 'tabstop'" (`:h shiftwidth`) — the old
+    // `.max(1)` silently shifted by a single column instead (audit I2)
+    let sw = if vim.options.shiftwidth == 0 {
+        vim.options.tabstop.max(1)
+    } else {
+        vim.options.shiftwidth.max(1)
+    };
     let target = if right {
         col.saturating_add(sw)
     } else {
@@ -744,7 +884,28 @@ fn flush_paragraph(paragraph: &mut Vec<String>, indent: &str, width: usize, out:
 
 /// `p` / `P`: paste a register. An unset register reports vim's feedback
 /// (bell — vim shows E353: Nothing in register) instead of a silent no-op.
-pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, after: bool) {
+pub fn put(
+    vim: &mut VimState,
+    ctx: &mut Ctx,
+    register: char,
+    count: usize,
+    after: bool,
+) {
+    put_ex(vim, ctx, register, count, after, false)
+}
+
+/// `gp`/`gP` pass `leave_after = true`: the cursor lands just AFTER the new
+/// text instead of on it (`:h gp` — audit G6; the charwise cursor goes one
+/// past the last pasted char, the linewise one to the LAST pasted line's
+/// first non-blank for `gp` / the FIRST for `gP`).
+pub fn put_ex(
+    vim: &mut VimState,
+    ctx: &mut Ctx,
+    register: char,
+    count: usize,
+    after: bool,
+    leave_after: bool,
+) {
     let Some(data) = vim.registers.get_for_paste(register, ctx.host) else {
         ctx.host.bell();
         return;
@@ -768,6 +929,7 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         return;
     }
     let repeated = text.repeat(count);
+    let pasted_line_count = repeated.matches('\n').count().max(1);
 
     if data.kind == RegisterKind::Linewise {
         let line = ctx.buf.offset_to_line(vim.cursor.offset);
@@ -823,7 +985,21 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
             .buf
             .offset_to_line(cursor_at)
             .min(ctx.buf.line_count() - 1);
-        vim.cursor.offset = ctx.buf.first_non_blank(cursor_line);
+        if leave_after {
+            // gp/gP linewise: cursor on the LAST pasted line (`p` pastes
+            // below, `P` above) at its first non-blank — "just after the
+            // new text" for line-wise text
+            let line = if after {
+                cursor_line + pasted_line_count - 1
+            } else {
+                cursor_line
+            };
+            vim.cursor.offset = ctx
+                .buf
+                .first_non_blank(line.min(ctx.buf.line_count() - 1));
+        } else {
+            vim.cursor.offset = ctx.buf.first_non_blank(cursor_line);
+        }
     } else {
         let mut at = vim.cursor.offset;
         if after && !ctx.buf.at_line_end(at) {
@@ -838,8 +1014,17 @@ pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, afte
         // prev_char_offset parks mid-cluster when the paste ends with a
         // combining mark / ZWJ member (the next `x` would split it)
         let end = at + repeated.len();
-        vim.cursor.offset =
-            clamp_cursor(ctx.buf, crate::buffer::prev_grapheme_offset(ctx.buf, end).unwrap_or(at));
+        vim.cursor.offset = if leave_after {
+            // gp/gP charwise: just AFTER the last pasted char — one past
+            // `end`, clamped like every cursor (the line end parks it on
+            // the line's last char, vim's same clamp)
+            clamp_cursor(ctx.buf, end)
+        } else {
+            clamp_cursor(
+                ctx.buf,
+                crate::buffer::prev_grapheme_offset(ctx.buf, end).unwrap_or(at),
+            )
+        };
     }
     vim.cursor.desired_col = None;
 }
@@ -1064,7 +1249,7 @@ pub fn delete_chars(
 }
 
 /// `r{char}`: replace `count` chars with `char` (never crosses the line end).
-pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) {
+pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) -> bool {
     let count = count.max(1);
     let start = vim.cursor.offset;
     let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(start));
@@ -1074,7 +1259,7 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
         if o >= line_end {
             // `3rx` with only two chars left on the line: vim cancels the
             // whole replace instead of partially filling it
-            return;
+            return false;
         }
         let next = advance_graphemes(ctx.buf, o, 1, line_end);
         if next == o {
@@ -1088,7 +1273,7 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
         // nothing to replace, and the cursor-landing arithmetic below would
         // underflow on a multi-byte replacement char (probe: `r中` on the
         // base of a ZWJ-at-line-end cluster used to panic the debug build)
-        return;
+        return false;
     }
     let replacements = if ch == '\n' {
         // N<CR> collapses to ONE break: ":h r" — "5r<CR> replaces five
@@ -1111,6 +1296,7 @@ pub fn replace_chars(vim: &mut VimState, ctx: &mut Ctx, ch: char, count: usize) 
         vim.cursor.offset = clamp_cursor(ctx.buf, start + replacements.len() - ch.len_utf8());
     }
     vim.cursor.desired_col = None;
+    true
 }
 
 /// `r{char}` with `CTRL-E`/`CTRL-Y` as the char (`:h r`): each replaced
@@ -1244,7 +1430,7 @@ pub fn visual_replace(vim: &mut VimState, ctx: &mut Ctx, ch: char) {
 /// silently (`"e"+U+0301` → `"E"`, the accent gone; an emoji family lost its
 /// members — vim 9.1 keeps both), so the tail is sliced out of the consumed
 /// span and re-appended.
-pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) {
+pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) -> bool {
     let count = count.max(1);
     let start = vim.cursor.offset;
     let line_end = ctx.buf.line_end(ctx.buf.offset_to_line(start));
@@ -1266,7 +1452,7 @@ pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) {
         o = next;
     }
     if mapped.is_empty() {
-        return;
+        return false;
     }
     // the replaced range must be the CONSUMED byte span (start..o), not
     // `start + mapped.len()`: a multi-char case mapping (ß → SS) changes the
@@ -1278,4 +1464,5 @@ pub fn toggle_chars(vim: &mut VimState, ctx: &mut Ctx, count: usize) {
     // chars don't park the cursor mid-character
     vim.cursor.offset = clamp_cursor(ctx.buf, start + mapped.len());
     vim.cursor.desired_col = None;
+    true
 }

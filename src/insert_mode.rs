@@ -8,7 +8,7 @@
 use crate::key::{Key, KeyKind};
 use crate::mode::Mode;
 use crate::motions::Motion;
-use crate::state::{Ctx, ProcessOutcome, VimState};
+use crate::state::{Ctx, ProcessOutcome, QuotePending, VimState};
 use crate::word;
 
 impl VimState {
@@ -24,11 +24,94 @@ impl VimState {
             return ProcessOutcome::Consumed;
         }
 
+        // i_CTRL-V / i_CTRL-K pendings must run BEFORE the <Esc> exit:
+        // inside a quote the Esc is the QUOTED byte; inside a digraph it
+        // just cancels the digraph (`:h i_CTRL-K`; audit H1)
+        if self.insert_quote.is_none()
+            && self.insert_digraph_first.is_none()
+            && key == Key::ctrl_char('v')
+        {
+            self.insert_quote = Some(QuotePending::Single);
+            return ProcessOutcome::Consumed;
+        }
+        if self.insert_quote.is_none() && self.insert_digraph_first.is_none()
+            && key == Key::ctrl_char('k')
+        {
+            self.insert_digraph_first = Some('\0');
+            return ProcessOutcome::Consumed;
+        }
+        if let Some(state) = self.insert_quote.take() {
+            // Single + a numeric prefix letter starts the code collector;
+            // the prefix letter itself is CONSUMED (it is not a digit of
+            // the code — re-feeding it emitted a NUL, audit H2)
+            match state {
+                QuotePending::Single => {
+                    if let Some(c) = key.printable_char() {
+                        match c {
+                            'u' => {
+                                self.insert_quote =
+                                    Some(QuotePending::Hex { max_digits: 4, buffer: String::new() });
+                                return ProcessOutcome::Consumed;
+                            }
+                            'U' => {
+                                self.insert_quote =
+                                    Some(QuotePending::Hex { max_digits: 8, buffer: String::new() });
+                                return ProcessOutcome::Consumed;
+                            }
+                            'x' | 'X' => {
+                                self.insert_quote =
+                                    Some(QuotePending::Hex { max_digits: 2, buffer: String::new() });
+                                return ProcessOutcome::Consumed;
+                            }
+                            'o' | 'O' => {
+                                self.insert_quote = Some(QuotePending::Radix {
+                                    base: 8,
+                                    max_digits: 3,
+                                    buffer: String::new(),
+                                });
+                                return ProcessOutcome::Consumed;
+                            }
+                            d if d.is_ascii_digit() => {
+                                self.insert_quote = Some(QuotePending::Radix {
+                                    base: 10,
+                                    max_digits: 3,
+                                    buffer: d.to_string(),
+                                });
+                                return ProcessOutcome::Consumed;
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.insert_quote_step(ctx, state, key);
+                }
+                state => {
+                    self.insert_quote_step(ctx, state, key);
+                }
+            }
+            return ProcessOutcome::Consumed;
+        }
+        if self.insert_digraph_first.is_some() {
+            let Some(c) = key.printable_char() else {
+                // any non-printable cancels the digraph, like vim's <Esc>
+                self.insert_digraph_first = None;
+                return ProcessOutcome::Consumed;
+            };
+            let first = self.insert_digraph_first.take().unwrap();
+            if first == '\0' {
+                self.insert_digraph_first = Some(c);
+                return ProcessOutcome::Consumed;
+            }
+            let text = crate::ops::digraph(first, c);
+            self.insert_text_at_cursor(ctx, &text);
+            return ProcessOutcome::Consumed;
+        }
+
         // exit insert: <Esc>, <C-[>, <C-c>
         if key == Key::escape() || key == Key::ctrl_char('[') || key == Key::ctrl_char('c') {
             self.exit_insert(ctx);
             return ProcessOutcome::Consumed;
         }
+
 
         // <C-h> = Backspace (vim binds them identically in insert). Only the
         // RAW `\x08` byte reached the backspace path before; gpui-style hosts
@@ -173,6 +256,18 @@ impl VimState {
             }
         }
 
+        // <S-Tab> in insert: vim 9.1 leaves the line alone (oracle probe:
+        // `A<S-Tab>` appends nothing) — the old fall-through delivered the
+        // chord as Unknown and somewhere synthesized two spaces (audit K2)
+        if key.modifiers.shift
+            && !key.modifiers.control
+            && !key.modifiers.alt
+            && !key.modifiers.platform
+            && matches!(&key.kind, KeyKind::Named(n) if n == "tab")
+        {
+            return ProcessOutcome::Consumed;
+        }
+
         // printable text: let the host/IME decide *unless* an insert mapping
         // is interested (e.g. `jk` -> Esc)
         if let Some(c) = key.printable_char() {
@@ -181,6 +276,92 @@ impl VimState {
         }
 
         ProcessOutcome::Unknown
+    }
+
+    /// One key inside a pending `i_CTRL-V`: returns `true` when the key
+    /// RESOLVED the quote (the char was inserted), `false` when it was
+    /// consumed as another digit of a numeric code.
+    fn insert_quote_step(&mut self, ctx: &mut Ctx, state: QuotePending, key: Key) -> bool {
+        match state {
+            QuotePending::Single => {
+                let c = self.quote_key_char(key);
+                self.insert_text_at_cursor(ctx, &c);
+                true
+            }
+            QuotePending::Radix {
+                base,
+                max_digits,
+                mut buffer,
+            } => {
+                if let Some(d) = key.printable_char().filter(|c| c.is_digit(base)) {
+                    buffer.push(d);
+                    if buffer.chars().count() < max_digits {
+                        self.insert_quote = Some(QuotePending::Radix {
+                            base,
+                            max_digits,
+                            buffer,
+                        });
+                        return false;
+                    }
+                }
+                let value = u32::from_str_radix(&buffer, base).unwrap_or(0);
+                if let Some(c) = char::from_u32(value) {
+                    let s = c.to_string();
+                    self.insert_text_at_cursor(ctx, &s);
+                }
+                true
+            }
+            QuotePending::Hex {
+                max_digits,
+                mut buffer,
+            } => {
+                if let Some(d) = key.printable_char().filter(|c| c.is_ascii_hexdigit()) {
+                    buffer.push(d);
+                    if buffer.chars().count() < max_digits {
+                        self.insert_quote = Some(QuotePending::Hex { max_digits, buffer });
+                        return false;
+                    }
+                }
+                let value = u32::from_str_radix(&buffer, 16).unwrap_or(0);
+                if let Some(c) = char::from_u32(value) {
+                    let s = c.to_string();
+                    self.insert_text_at_cursor(ctx, &s);
+                }
+                true
+            }
+        }
+    }
+
+    /// The literal char a quoted key produces: control chords map to their
+    /// control byte (C-a → 0x01), Esc/Tab/CR to the raw bytes, named keys
+    /// produce nothing (vim inserts their termcap sequence; the engine has
+    /// no terminal model).
+    fn quote_key_char(&self, key: Key) -> String {
+        if let Some(c) = key.printable_char() {
+            return c.to_string();
+        }
+        if key.modifiers.control && !key.modifiers.alt && !key.modifiers.platform {
+            if let KeyKind::Char(c) = key.kind {
+                let upper = c.to_ascii_uppercase();
+                if upper.is_ascii_alphabetic() {
+                    return char::from_u32(upper as u32 - 'A' as u32 + 1)
+                        .map(|b| b.to_string())
+                        .unwrap_or_default();
+                }
+                if c == '@' {
+                    return '\0'.to_string();
+                }
+            }
+        }
+        match &key.kind {
+            KeyKind::Named(name) => match name.as_str() {
+                "escape" => '\u{1b}'.to_string(),
+                "tab" => '\t'.to_string(),
+                "enter" => '\r'.to_string(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
     }
 
     fn insert_backspace(&mut self, ctx: &mut Ctx) {

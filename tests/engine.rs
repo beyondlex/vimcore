@@ -169,8 +169,13 @@ fn change_cw_ciw_cc() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "say bye now");
 
-    // cc clears the line, keeps autoindent
+    // cc clears the line, keeps autoindent (set explicitly — the engine
+    // default now follows vim's noai, audit I1)
     let mut f = edit("    indented\nnext", 0, 6, &["c", "c"]);
+    f.type_text("new");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "new\nnext");
+    let mut f = edit("    indented\nnext", 0, 6, &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "c", "c"]);
     f.type_text("new");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "    new\nnext");
@@ -354,19 +359,34 @@ fn insert_commands() {
     let f = edit("abc", 0, 0, &["A"]);
     assert_eq!(f.cursor(), 3);
 
-    // o / O with autoindent
+    // o / O with autoindent (set explicitly — the engine default now
+    // follows vim's noai, audit I1)
     let f = edit("  foo\nbar", 0, 2, &["o"]);
+    assert_eq!(f.text(), "  foo\n\nbar");
+    assert_eq!(f.cursor(), 6);
+    let f = edit("  foo", 0, 2, &["O"]);
+    assert_eq!(f.text(), "\n  foo");
+    let f = edit("  foo\nbar", 0, 2, &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "o"]);
     assert_eq!(f.text(), "  foo\n  \nbar");
     assert_eq!(f.cursor(), 8);
-    let f = edit("  foo", 0, 2, &["O"]);
-    assert_eq!(f.text(), "  \n  foo");
 
     // s / S / C
     let mut f = edit("abc", 0, 0, &["s"]);
     f.type_text("X");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "Xbc");
+    // S keeps the indent only under 'autoindent' (set explicitly — the
+    // engine default now follows vim's noai, audit I1)
     let mut f = edit("  abc", 0, 2, &["S"]);
+    f.type_text("z");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "z");
+    let mut f = edit(
+        "  abc",
+        0,
+        2,
+        &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "S"],
+    );
     f.type_text("z");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "  z");
@@ -383,9 +403,15 @@ fn insert_commands() {
     assert_eq!(f.text(), "Xhello");
     assert_eq!(f.cursor(), 0);
 
-    // enter splits with autoindent
+    // enter splits (indent copied only under 'autoindent' — set
+    // explicitly, the engine default now follows vim's noai, audit I1)
     let mut f = Fixture::at("  ab", 0, 3);
     f.feed(["i", "<CR>"]);
+    f.type_text("c");
+    f.feed(["<Esc>"]);
+    assert_eq!(f.text(), "  a\ncb");
+    let mut f = Fixture::at("  ab", 0, 3);
+    f.feed([":", "s", "e", "t", " ", "a", "i", "<CR>", "i", "<CR>"]);
     f.type_text("c");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "  a\n  cb");

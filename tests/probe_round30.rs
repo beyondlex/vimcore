@@ -150,17 +150,20 @@ fn substitute_invalid_regex_no_panic() {
     assert_eq!(f.text(), "abc\n", "替换失败，缓冲不动");
 }
 
-/// 探针 N：替换文本里的 `$1` 是本引擎的正则分组语法（NOTES 分歧 #1，
-/// vim 用 `\1`）。无分组时 `$1y` 展开为空（regex crate 按 $ 后最长名字
-/// 找捕获组，找不到整体丢弃）；字面 `$` 用 `$$` 转义。
+/// 探针 N：替换侧现为 vim 语义（第三十一轮审计 C1 修复后）——`$` 是普通
+/// 字符，后向引用是 `\1`（vim 同款）；`&` 整匹配、`\u` 大写修饰符生效。
 #[test]
-fn substitute_dollar_expansion_dialect() {
+fn substitute_replacement_vim_semantics() {
     let mut f = Fixture::at("abc\n", 0, 0);
     f.feed([":", "%", "s", "/", "a", "b", "c", "/", "X", "$", "1", "y", "/", "<CR>"]);
-    assert_eq!(f.text(), "X\n", "无分组 1：$1y 按整名查找捕获组失败 → 整体为空");
+    assert_eq!(f.text(), "X$1y\n", "字面 $1（$ 不再是本引擎方言的后向引用）");
+    // 注意：引擎的正则方言（NOTES 分歧 #1）分组用裸括号（Rust regex），
+    // `\(` 是字面括号——替换侧的 `\1` 才是 vim 同款。
     let mut f = Fixture::at("abc\n", 0, 0);
-    f.feed([":", "%", "s", "/", "a", "b", "c", "/", "X", "$", "$", "1", "y", "/", "<CR>"]);
-    assert_eq!(f.text(), "X$1y\n", "$$ 转义出字面 $");
+    f.feed([
+        ":", "%", "s", "/", "(", "a", "b", "c", ")", "/", "X", "\\", "1", "y", "/", "<CR>",
+    ]);
+    assert_eq!(f.text(), "Xabcy\n", "\\1 = 第一个捕获组（vim 后向引用语法）");
 }
 
 // ---------------------------------------------------------------- C-w/C-u 输入范围（round 30 修复）

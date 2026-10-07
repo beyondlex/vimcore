@@ -86,7 +86,7 @@ impl Default for Options {
             shiftwidth: 4,
             textwidth: 78,
             expandtab: true,
-            autoindent: true,
+            autoindent: false,
             ignorecase: true,
             smartcase: true,
             hlsearch: true,

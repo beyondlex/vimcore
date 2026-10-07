@@ -59,7 +59,7 @@ fn open_line_esc_strips_autoindent() {
 /// （Esc 只剥当前行）。
 #[test]
 fn open_line_then_down_keeps_indent() {
-    let mut f = edit("    ind\nzz\n", 0, 0, &["o"]);
+    let mut f = edit("    ind\nzz\n", 0, 0, &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "o"]);
     f.feed(["<Down>", "<Esc>"]);
     assert_eq!(f.text(), "    ind\n    \nzz\n", "S2");
 }
@@ -77,7 +77,7 @@ fn open_line_cr_esc_leaves_both_empty() {
 /// 解除了 did_ai。
 #[test]
 fn typed_then_deleted_keeps_indent() {
-    let mut f = edit("    ind\n", 0, 0, &["o"]);
+    let mut f = edit("    ind\n", 0, 0, &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "o"]);
     f.type_text("foo");
     f.feed(["<BS>", "<BS>", "<BS>", "<Esc>"]);
     assert_eq!(f.text(), "    ind\n    \n", "S4");
@@ -86,7 +86,7 @@ fn typed_then_deleted_keeps_indent() {
 /// PROBE S5: `o<BS>` 一笔删掉整段缩进（不是一字符）。
 #[test]
 fn backspace_on_untouched_indent_deletes_it_all() {
-    let mut f = edit("    ind\n", 0, 0, &["o"]);
+    let mut f = edit("    ind\n", 0, 0, &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "o"]);
     f.feed(["<BS>", "<Esc>"]);
     assert_eq!(f.text(), "    ind\n\n", "S5");
 }
@@ -104,7 +104,7 @@ fn open_above_and_cc_strip_too() {
 /// 打字文本的缩进照常保留（R2：`3ofoo<Esc>` 三份都带缩进）。
 #[test]
 fn typed_open_line_keeps_indent_and_replicates_it() {
-    let mut f = edit("    ind\n", 0, 0, &["3", "o"]);
+    let mut f = edit("    ind\n", 0, 0, &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "3", "o"]);
     f.type_text("foo");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "    ind\n    foo\n    foo\n    foo\n", "R2");

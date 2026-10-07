@@ -99,13 +99,16 @@ fn word_range(buf: &dyn VimBuffer, offset: usize, inner: bool, big: bool) -> Opt
         offset
     };
     let Some(class) = class_of(offset) else {
-        // EMPTY line (cursor sits on the newline): `iw`/`ip` keep the line
-        // itself, but `aw` treats it as one blank run reaching into the
-        // next line's word (9.1: `daw` on ["foo","","bar"] leaves ["foo"])
+        // EMPTY line (cursor sits on the newline): `aw` treats it as one
+        // blank run reaching into the next line's word (9.1: `daw` on
+        // ["foo","","bar"] leaves ["foo"]). INNER word objects FAIL on an
+        // empty line — there is no word to select — and a failed object
+        // cancels the operator with vim's bell (audit L5); the old
+        // empty-selection fallback made `diw`/`yiw` silently no-op.
         if !inner {
             return Some(blank_run_plus_next_word(buf, big, line_start));
         }
-        return Some(ObjectRange::charwise(line_start, line_end));
+        return None;
     };
 
     // expand to the run of the same class within this line

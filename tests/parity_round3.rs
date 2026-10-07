@@ -362,8 +362,14 @@ fn count_repeat_insert() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "h!!ello\n");
 
-    // tab-indented o copies keep the indent
-    let mut f = edit("\thello\n", 0, 0, &["2", "o"]);
+    // tab-indented o copies keep the indent (set explicitly — the engine
+    // default now follows vim's noai, audit I1)
+    let mut f = edit(
+        "\thello\n",
+        0,
+        0,
+        &["<Esc>", ":", "s", "e", "t", " ", "a", "i", "<CR>", "2", "o"],
+    );
     f.type_text("x");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "\thello\n\tx\n\tx\n");

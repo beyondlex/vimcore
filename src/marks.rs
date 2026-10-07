@@ -50,6 +50,12 @@ impl Marks {
         v
     }
 
+    /// Delete a mark (`:delmarks`); the specials (`'<'>gv` pair) are NOT
+    /// deletable through this path — only named marks and `^`/`.`.
+    pub fn remove(&mut self, name: char) {
+        self.offsets.remove(&name);
+    }
+
     pub fn set(&mut self, name: char, offset: usize) {
         if name.is_ascii_alphabetic() || matches!(name, '^' | '.') {
             self.offsets.insert(name, offset);
