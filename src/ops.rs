@@ -47,6 +47,8 @@ pub fn span_from_motion(
     buf: &dyn VimBuffer,
     motion: Motion,
     result: MotionResult,
+    count: usize,
+    is_change: bool,
 ) -> OpSpan {
     let start = vim.cursor.offset;
     let start_line = buf.offset_to_line(start);
@@ -95,6 +97,21 @@ pub fn span_from_motion(
                     start: buf.line_start(start_line),
                     end: buf.line_range(target_line - 1).end,
                     linewise: true,
+                };
+            }
+            // The column-1 clamp is vim's SINGLE-`w` rule (`dw` never joins
+            // lines). For CHANGE + a count of 2+ the span keeps going: `cw`
+            // behaves like `ce` (`:h cw`), so `2cw` from 'b' on "ab \n\ncd"
+            // changes "b \n\ncd" — through the END of the landing word
+            // (audit B1). A DELETE keeps the clamp (vim 9.1: `d2w` on
+            // "foo x\nbar" leaves the emptied line behind)
+            if count > 1 && is_change {
+                // next_word_end reports the INCLUSIVE last char
+                let word_end = word::next_word_end(buf, target, big) + 1;
+                return OpSpan {
+                    start,
+                    end: word_end.max(buf.line_end(start_line)),
+                    linewise: false,
                 };
             }
             return OpSpan {
@@ -250,10 +267,29 @@ pub fn object_span_count(
                 range.start = range.start.min(next.start);
                 range.end = range.end.max(next.end);
             }
+            // an outer-word probe sitting ON a line terminator re-selects
+            // nothing (the raw range floors back INTO the line just
+            // covered): vim continues across the break — newline, any
+            // swallowed empty lines, then the next word with its trailing
+            // blanks (`d2aw` on "ab cd\nef gh" covers " cd\nef "; on
+            // "foo\n\nbar" it empties the buffer — audit B1)
+            _ if matches!(object, objects::TextObject::Word { inner: false, .. })
+                && buf.char_at(probe) == Some('\n') =>
+            {
+                match objects::newline_word_span(buf, big_of(object), probe) {
+                    Some(next) if next.end > range.end => range.end = next.end,
+                    _ => break,
+                }
+            }
             _ => break,
         }
     }
     Some(span_from_object(range))
+}
+
+/// The `big` flag of a word-family text object.
+fn big_of(object: objects::TextObject) -> bool {
+    matches!(object, objects::TextObject::Word { big: true, .. })
 }
 
 /// Span for the current visual selection.
@@ -435,10 +471,13 @@ pub fn span_from_visual_block(
             dollar: true,
         });
     }
-    let a_col = crate::buffer::display_column(buf, anchor);
-    // the CURSOR column is the block's virtual column when one is tracked —
-    // `j`/`k` across short rows clamp the cursor byte, but the block edge
-    // stays at the moved column (audit G1/G3)
+    // both block edges are VIRTUAL columns: the cursor edge via
+    // `block_cursor_col` (audit G1/G3), the anchor edge via
+    // `block_anchor_vcol` — after `o`/`O` the anchor byte sits clamped on a
+    // short row and its display column would shrink the rectangle (audit E1)
+    let a_col = vim
+        .block_anchor_vcol
+        .unwrap_or_else(|| crate::buffer::display_column(buf, anchor));
     let c_col = vim
         .block_cursor_col
         .unwrap_or_else(|| crate::buffer::display_column(buf, cursor));
@@ -493,10 +532,31 @@ pub fn apply(
     span: &OpSpan,
     register: Option<char>,
 ) {
+    if veto_readonly_write(vim, ctx, register) {
+        return;
+    }
+    // `'[` / `']`: the first/last character of the last yanked or changed
+    // text (audit E6 — the marks were unbound bells; `` `] `` resolves
+    // through the ordinary mark table once set). Stored BEFORE the op runs
+    // so the edit funnels keep them addressable through the change itself
+    // (a delete folds `']` onto the deletion point, like vim's `dd`).
+    if span.end > span.start || span.linewise {
+        let mark_end = if span.linewise {
+            let e = ctx.buf.line_range(last_line_of_span(ctx.buf, span)).end;
+            ctx.buf.prev_char_offset(e.saturating_sub(1)).unwrap_or(span.start)
+        } else {
+            ctx.buf.prev_char_offset(span.end).unwrap_or(span.end - 1)
+        };
+        vim.marks.set('[', span.start);
+        vim.marks.set(']', mark_end);
+    }
     match op {
         Operator::Delete => {
             let mut span = *span;
-            if merges_following_line_break(ctx.buf, &span) {
+            // object spans keep their exact bounds: vim's `daw` at a line
+            // end leaves the following empty line alone (the join rule is a
+            // MOTION-`dw` behavior — audit B2)
+            if !vim.op_from_object && merges_following_line_break(ctx.buf, &span) {
                 span.end += 1;
             }
             delete_span(vim, ctx, &span, register)
@@ -605,7 +665,7 @@ pub fn toggle_case(c: char) -> String {
     if c.is_lowercase() {
         uppercase_char(c)
     } else {
-        c.to_lowercase().collect()
+        lowercase_char(c)
     }
 }
 
@@ -706,11 +766,35 @@ pub(crate) fn digraph(a: char, b: char) -> String {
 /// Uppercase one char the way vim 9.1 does: `ß` maps to the single char
 /// `ẞ` (U+1E9E, oracle probe) — Rust's `to_uppercase` spells it `SS`,
 /// which turned `gUU` on `ß` into `SS` (audit G4).
+///
+/// vim case-maps through its SIMPLE table: a char without a one-char
+/// uppercase (ligature `ﬁ` → "FI", `ǰ` → "Jˇ") maps to ITSELF, while
+/// Rust's full Unicode mapping expands it (audit C4 — `~` turned `ﬁx`
+/// into `FIx`).
 pub(crate) fn uppercase_char(c: char) -> String {
     if c == 'ß' {
         return '\u{1e9e}'.to_string();
     }
-    c.to_uppercase().collect()
+    let mut up = c.to_uppercase();
+    match (up.next(), up.next()) {
+        (Some(one), None) => one.to_string(),
+        _ => c.to_string(),
+    }
+}
+
+/// Lowercase one char through vim's SIMPLE table: Rust spells `İ`
+/// (U+0130) as `i` + combining dot, vim's table maps it to plain `i`
+/// (oracle probe on `gul` — audit C4); multi-char expansions again leave
+/// the char alone.
+pub(crate) fn lowercase_char(c: char) -> String {
+    if c == '\u{0130}' {
+        return "i".to_owned();
+    }
+    let mut lo = c.to_lowercase();
+    match (lo.next(), lo.next()) {
+        (Some(one), None) => one.to_string(),
+        _ => c.to_string(),
+    }
 }
 
 /// Map every char of `text` through the case operator. Multi-char case
@@ -719,7 +803,7 @@ pub(crate) fn uppercase_char(c: char) -> String {
 pub(crate) fn case_mapped_text(op: Operator, text: &str) -> String {
     text.chars()
         .map(|c| match op {
-            Operator::Lowercase => c.to_lowercase().collect::<String>(),
+            Operator::Lowercase => lowercase_char(c),
             Operator::Uppercase => uppercase_char(c),
             _ => toggle_case(c),
         })
@@ -882,10 +966,24 @@ fn flush_paragraph(paragraph: &mut Vec<String>, indent: &str, width: usize, out:
     out.push('\n');
 }
 
+/// vim refuses to route a yank/delete through the read-only registers:
+/// `"%dd`/`".dd`/`":dd`/`"/dd` all raise E354 and leave the buffer alone
+/// (audit C7 — the prefix itself is legal, the WRITE is not). The veto
+/// lives at the two write funnels so operators and x/X/s share one rule.
+fn veto_readonly_write(vim: &VimState, ctx: &mut Ctx, register: Option<char>) -> bool {
+    if let Some(r) = register {
+        if !crate::registers::is_write_valid(r) {
+            ctx.host.status_message("E354: Invalid register name");
+            ctx.host.bell();
+            return true;
+        }
+    }
+    false
+}
+
 /// `p` / `P`: paste a register. An unset register reports vim's feedback
 /// (bell — vim shows E353: Nothing in register) instead of a silent no-op.
-pub fn put(
-    vim: &mut VimState,
+pub fn put(    vim: &mut VimState,
     ctx: &mut Ctx,
     register: char,
     count: usize,
@@ -914,7 +1012,7 @@ pub fn put_ex(
     // one empty line (e.g. `yy` on the only line of an empty buffer): `p`
     // inserts an empty line rather than nothing (vim 9.1 parity). A charwise
     // register that is empty has nothing to place.
-    let text = if data.text.is_empty() {
+    let mut text = if data.text.is_empty() {
         if data.kind != RegisterKind::Linewise {
             return;
         }
@@ -922,6 +1020,13 @@ pub fn put_ex(
     } else {
         data.text.clone()
     };
+    // A linewise register is newline-terminated by definition. Yanking a
+    // trailing-newline-less tail line (`set noeol` files) stored it bare, and
+    // `text.repeat(count)` then glued the copies HORIZONTALLY (`yy3p` on
+    // noeol "abc" = "abc\nabcabcabc" — audit C2); normalize before repeating.
+    if data.kind == RegisterKind::Linewise && !text.ends_with('\n') {
+        text.push('\n');
+    }
     let count = clamped_repeat_count(text.len(), count.max(1));
 
     if data.kind == RegisterKind::Blockwise {
@@ -949,23 +1054,32 @@ pub fn put_ex(
             (at, text)
         } else if after {
             // last line without trailing newline: open a line for the FIRST
-            // pasted line and keep the register's own structure after that —
-            // only ONE trailing `\n` is consumed (the separator merging into
-            // the newline-less tail). `trim_end_matches` stripped ALL of them,
-            // so `yy` over ["a",""] (register "a\n\n") pasted just "a" and
-            // the empty line vanished (vim keeps ["a",""]).
-            (
-                ctx.buf.len(),
-                format!("\n{}", repeated.strip_suffix('\n').unwrap_or(&repeated)),
-            )
+            // pasted line — and KEEP the register's own final `\n` so the
+            // file stays newline-terminated exactly like vim's internal
+            // buffer (`ddp` on "a\n" = "\na\n", not "\na"; an empty linewise
+            // register on an empty buffer adds the line instead of vanishing
+            // into the separator — audit C1. The old `strip_suffix` consumed
+            // the terminator as if it were the separator and never paid it
+            // back.)
+            (ctx.buf.len(), format!("\n{repeated}"))
         } else {
             // above the current line: the register's lines go in verbatim
             // (linewise text is newline-terminated, so it concatenates
             // cleanly before the current line's first byte) — same one-\n
-            // rule for a malformed register that lost its final newline
+            // rule for a malformed register that lost its final newline.
+            // An noeol EMPTY current line has no terminator of its own, so
+            // the plain prepend makes the register's final `\n` absorb both
+            // roles and a line disappears: `yyP` on the empty buffer must
+            // end at TWO empty lines like vim (audit C1).
+            let stripped = repeated.strip_suffix('\n').unwrap_or(&repeated);
+            let pad = if !has_newline && ctx.buf.line_end(line) == ctx.buf.line_start(line) {
+                "\n"
+            } else {
+                ""
+            };
             (
                 ctx.buf.line_start(line),
-                format!("{}\n", repeated.strip_suffix('\n').unwrap_or(&repeated)),
+                format!("{stripped}\n{pad}"),
             )
         };
         vim.edit_insert(ctx, insert_at, &text);
@@ -986,13 +1100,14 @@ pub fn put_ex(
             .offset_to_line(cursor_at)
             .min(ctx.buf.line_count() - 1);
         if leave_after {
-            // gp/gP linewise: cursor on the LAST pasted line (`p` pastes
-            // below, `P` above) at its first non-blank — "just after the
-            // new text" for line-wise text
+            // gp linewise: cursor on the LAST pasted line; gP linewise: on
+            // the line just AFTER the pasted block (`:h gp` "just after the
+            // new text" — audit C5; gP used to park on the block's first
+            // line)
             let line = if after {
                 cursor_line + pasted_line_count - 1
             } else {
-                cursor_line
+                cursor_line + pasted_line_count
             };
             vim.cursor.offset = ctx
                 .buf
@@ -1220,6 +1335,9 @@ pub fn delete_chars(
     backward: bool,
     register: Option<char>,
 ) {
+    if veto_readonly_write(vim, ctx, register) {
+        return;
+    }
     let start = vim.cursor.offset;
     let line = ctx.buf.offset_to_line(start);
     let line_start = ctx.buf.line_start(line);

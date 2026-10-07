@@ -94,7 +94,7 @@ fn probe_describe_garbage() {
     let o = vimcore::options::Options::default();
     assert_eq!(o.describe("notabstop"), None);
     assert_eq!(o.describe("nosuchopt"), None);
-    assert_eq!(o.describe("nu").as_deref(), Some("nonumber"));
+    assert_eq!(o.describe("nu").as_deref(), Some("  nonumber"));
 }
 
 /// PROBE: register semantics — uppercase append merges linewise; blackhole
@@ -218,8 +218,9 @@ fn linewise_put_keeps_trailing_empty_lines() {
         .registers
         .store_yank(None, "a\n\n".into(), RegisterKind::Linewise);
     f2.feed(["p"]);
-    // ["z","a",""] 的字节文本是 "z\na\n"（末尾空行以换行结尾）
-    assert_eq!(f2.text(), "z\na\n", "p 保留寄存器的空行");
+    // ["z","a",""] 的字节文本随 'fixendofline' 补末尾换行："z\na\n\n"
+    // （vim 9.1 od 实证 noeol 文件 yyp 写回带终结符）
+    assert_eq!(f2.text(), "z\na\n\n", "p 保留寄存器的空行");
 }
 
 // ---- 块会话面 -------------------------------------------------------------

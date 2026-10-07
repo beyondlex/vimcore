@@ -35,6 +35,12 @@ pub struct Marks {
     /// Where the last jump STARTED (`''` / `` `` `` return here; every
     /// `record_jump` re-points it at the jump's origin).
     pub(crate) last_jump: Option<usize>,
+    /// Marks destroyed by edits, per undo group (audit E4 — vim's undo
+    /// restores the marks of deleted text together with the text). Each
+    /// batch carries `(name, pre-edit offset)`; the newest batch is the one
+    /// the next `u` restores. Entries ride the ordinary funnel shifts, so a
+    /// second edit inside the same group keeps them addressable.
+    pub(crate) deleted_marks_log: Vec<Vec<(char, usize)>>,
 }
 
 impl Marks {
@@ -57,9 +63,15 @@ impl Marks {
     }
 
     pub fn set(&mut self, name: char, offset: usize) {
-        if name.is_ascii_alphabetic() || matches!(name, '^' | '.') {
+        if name.is_ascii_alphabetic() || matches!(name, '^' | '.' | '[' | ']') {
             self.offsets.insert(name, offset);
         }
+        // a fresh set outranks any undo-pending resurrection of the same
+        // mark: `dd ma u` must keep the NEW position, not the pre-delete one
+        for batch in self.deleted_marks_log.iter_mut() {
+            batch.retain(|(n, _)| *n != name);
+        }
+        self.deleted_marks_log.retain(|batch| !batch.is_empty());
     }
 
     /// Live bounds of the ACTIVE visual selection (anchor..cursor+1), if any.
@@ -80,9 +92,23 @@ impl Marks {
             '<' => self
                 .last_visual
                 .map(|(a, _, _)| crate::buffer::floor_to_char_boundary(buf, a)),
-            '>' => self
-                .last_visual
-                .map(|(_, b, _)| crate::buffer::floor_to_char_boundary(buf, b)),
+            // `'>` resolves to the LAST SELECTED CHARACTER, not the exclusive
+            // end byte (audit E3 — vim 9.1: `vllly` then `` `> `` parks on the
+            // final 'l'; a linewise selection parks on its last line's last
+            // char, never on the newline). The stored `b` stays exclusive —
+            // `gv` reads it raw — only this read side projects it.
+            '>' => self.last_visual.map(|(a, b, kind)| {
+                let b = crate::buffer::floor_to_char_boundary(buf, b);
+                let b = if matches!(kind, VisualKind::Line)
+                    && b > a
+                    && buf.char_at(b - 1) == Some('\n')
+                {
+                    b - 1
+                } else {
+                    b
+                };
+                buf.prev_char_offset(b).unwrap_or(b)
+            }),
             // `''` (linewise) and `` `` `` (exact) share the jump origin
             '\'' | '`' => self.last_jump,
             '.' => self.last_change.or_else(|| self.get('.')),
@@ -172,6 +198,35 @@ impl Marks {
         if let Some(p) = self.last_jump.as_mut() {
             f(p);
         }
+        // NOTE: `deleted_marks_log` is deliberately NOT walked here — its
+        // entries keep the PRE-EDIT offsets of the deletion that logged them
+        // (the very same walk would collapse them onto the deletion point,
+        // defeating the restore). The undo-side restore floors each position
+        // onto the current text instead.
+    }
+
+    /// Record marks destroyed by the edit now running (called BEFORE the
+    /// buffer change, with the pre-edit offsets — audit E4). The batch joins
+    /// the current undo group; the next `u` restores them.
+    pub(crate) fn log_deleted_marks(&mut self, destroyed: Vec<(char, usize)>) {
+        if !destroyed.is_empty() {
+            self.deleted_marks_log.push(destroyed);
+        }
+    }
+
+    pub(crate) fn debug_log_len(&self) -> usize {
+        self.deleted_marks_log.len()
+    }
+
+    /// The mark batch the next undo restores (newest non-empty batch —
+    /// audit E4).
+    pub(crate) fn take_restorable_marks(&mut self) -> Option<Vec<(char, usize)>> {
+        while let Some(batch) = self.deleted_marks_log.pop() {
+            if !batch.is_empty() {
+                return Some(batch);
+            }
+        }
+        None
     }
 
     /// Floor every stored offset onto the text AFTER a host-driven swap

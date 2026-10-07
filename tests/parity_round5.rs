@@ -65,10 +65,14 @@ fn noop_x_does_not_pollute_the_changelist() {
 /// them may record a change position (or move `'.`).
 #[test]
 fn noop_commands_leave_the_change_mark_alone() {
-    // p with an empty register (bell, no paste)
+    // p with an empty register (bell, no paste)。注意不能用前面的 `x` 造
+    // 空寄存器——`x` 本身会填入寄存器，`p` 随后是真粘贴（2026-10-08 修正：
+    // 旧 setup 的 `j x gg p` 里 p 粘出了 'e'，是真实变更，g; 落 p 行才是
+    // vim 行为）；这里用 blackhole 删除造出真正的空寄存器
     let mut f = Fixture::new("abc\ndef\n");
-    f.feed(["j", "x", "g", "g", "p", "g", ";"]);
+    f.feed(["j", "\"", "_", "x", "g", "g", "p", "g", ";"]);
     assert_eq!(f.line(), 1, "noop p is not a change");
+    assert!(f.host.bells >= 1, "空寄存器 p 响铃");
 
     // ~ on an empty line
     let mut f = Fixture::new("\nfoo\n");

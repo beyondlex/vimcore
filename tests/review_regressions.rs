@@ -2363,13 +2363,15 @@ fn empty_linewise_delete_leaves_registers_alone() {
 #[test]
 fn empty_linewise_yank_stores_an_empty_line() {
     // vim 9.1 探针：空缓冲 yy 后 `:reg` 里 ""/"0 各有一条 linewise 空行，
-    // p 开出一个新行——与 delete 的不写形成刻意对照。
+    // p 开出一个新行——与 delete 的不写形成刻意对照。2026-10-08 字节级
+    // oracle 复核（od -c）：空文件 `yyp` 写回 "\n\n"（lines 1→2）；旧断言
+    // "\n" 在本夹具的行模型里仍是 1 行，与自己的 oracle 结论相矛盾。
     let mut f = Fixture::new("");
     f.feed(["y", "y"]);
     assert_eq!(unnamed(&f), Some(String::new()));
     assert_eq!(f.vim.registers.get('0').map(|r| r.text.clone()), Some(String::new()));
     f.feed(["p"]);
-    assert_eq!(f.text(), "\n", "空缓冲 yy+p 开一个空行（vim lines=1→2）");
+    assert_eq!(f.text(), "\n\n", "空缓冲 yy+p 开一个空行（vim lines=1→2）");
 }
 
 // ---- round 28：:s 旗标校验（E488）与 `e` 旗标 -------------------------------

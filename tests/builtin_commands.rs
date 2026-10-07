@@ -135,8 +135,9 @@ fn gi_inserts_at_last_insert_exit() {
         matches!(vim.mode(), vimcore::mode::Mode::Insert),
         "gi enters insert"
     );
-    // vim `^` semantics: leaving insert backs onto the last typed char
-    assert_eq!(vim.cursor.offset, 5, "gi at last insert exit");
+    // `^`/gi 停在最后插入字符的**后一位**（vim 9.1 oracle，audit E9：
+    // 旧钉子停在 'X' 本身是错的）
+    assert_eq!(vim.cursor.offset, 6, "gi at last insert exit");
 }
 
 #[test]

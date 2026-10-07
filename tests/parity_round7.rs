@@ -153,7 +153,9 @@ fn visual_colon_keeps_prompt_time_range_in_marks() {
     let lt = f.vim.marks.resolve('<', &f.buf).unwrap();
     let gt = f.vim.marks.resolve('>', &f.buf).unwrap();
     assert_eq!(lt, 0, "'< = 提示符时选区起点");
-    assert_eq!(gt, 5, "'> = 提示符时选区末字符之后，不随命令后的光标塌缩");
+    // audit E3：`'>` 解析到选区**末字符**（'o' = offset 4），不再暴露
+    // 排他端字节；gv 的内部存储仍是 0..5
+    assert_eq!(gt, 4, "'> = 提示符时选区末字符，不随命令后的光标塌缩");
     // gv 复选原选区（0..5，cursor 停在末字符 o=4）
     f.feed(["g", "v"]);
     assert_eq!(

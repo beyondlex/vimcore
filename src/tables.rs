@@ -253,8 +253,16 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // search in its own direction, `N` mirrors it (`?` + `n` goes up).
     b.motion_all(&["n"], Motion::SearchNext { forward: true });
     b.motion_all(&["N"], Motion::SearchNext { forward: false });
-    b.motion_all(&["*"], Motion::StarSearch { forward: true });
-    b.motion_all(&["#"], Motion::StarSearch { forward: false });
+    b.motion_all(&["*"], Motion::StarSearch { forward: true, substring: false });
+    b.motion_all(&["#"], Motion::StarSearch { forward: false, substring: false });
+    // g* / g#: the word as a SUBSTRING pattern (`:h g*`, audit F2 — the
+    // old keys degraded to whole-word `*`/`#` plus a stray bell)
+    b.motion_all(&["g", "*"], Motion::StarSearch { forward: true, substring: true });
+    b.motion_all(&["g", "#"], Motion::StarSearch { forward: false, substring: true });
+    // gd / gD: declaration search (audit F1 — unbound, `g`+`d` re-armed
+    // the delete operator through the trie-miss retry)
+    b.motion_all(&["g", "d"], Motion::SearchDeclaration { whole_file: false });
+    b.motion_all(&["g", "D"], Motion::SearchDeclaration { whole_file: true });
     b.motion_all(&["|"], Motion::Column);
     b.motion_all(&["H"], Motion::ScreenTop);
     b.motion_all(&["M"], Motion::ScreenMiddle);
@@ -539,6 +547,16 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
         CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Bottom)),
     );
     b.normal(&["g", "v"], CmdKind::Normal(NormalCmd::RestoreVisual));
+    // ]] / [[ / ][ / [] / ]m / [m / ]M / [M — section & method motions
+    // (`:h ]]`, audit A3; the family was entirely unbound)
+    b.motion_all(&["]", "]"], Motion::Section { ch: '{', backward: false, method: false });
+    b.motion_all(&["[", "["], Motion::Section { ch: '{', backward: true, method: false });
+    b.motion_all(&["]", "["], Motion::Section { ch: '}', backward: false, method: false });
+    b.motion_all(&["[", "]"], Motion::Section { ch: '}', backward: true, method: false });
+    b.motion_all(&["]", "m"], Motion::Section { ch: '{', backward: false, method: true });
+    b.motion_all(&["[", "m"], Motion::Section { ch: '{', backward: true, method: true });
+    b.motion_all(&["]", "M"], Motion::Section { ch: '}', backward: false, method: true });
+    b.motion_all(&["[", "M"], Motion::Section { ch: '}', backward: true, method: true });
     // ga / g8: the char-code / byte-hex info messages (`:h ga`, audit J2/J3)
     b.normal(&["g", "a"], CmdKind::Normal(NormalCmd::CharInfo));
     b.normal(&["g", "8"], CmdKind::Normal(NormalCmd::ByteInfo));
@@ -609,6 +627,11 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     );
     b.visual(&["o"], CmdKind::Visual(VisualCmd::SwapEnds));
     b.visual(&["O"], CmdKind::Visual(VisualCmd::SwapEndsKeepCol));
+    // `@{reg}` in visual mode: the macro's first visual-capable command acts
+    // ON the selection (`:h v_@` — audit D9; the key used to bell and the
+    // selection stayed untouched). The replay stays in Visual until a
+    // replayed key resolves the selection, exactly like vim.
+    b.visual(&["@"], CmdKind::Normal(NormalCmd::PlayMacro));
     b.visual(&["d"], CmdKind::Operator(Operator::Delete));
     b.visual(&["x"], CmdKind::Operator(Operator::Delete));
     // visual `D`: blockwise — block column to each row's end; char/line —

@@ -242,15 +242,32 @@ pub fn char_display_width(c: char) -> usize {
     unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
 }
 
+/// Display width of a char at display column `col`, honoring `'tabstop'`:
+/// a TAB expands to the next multiple of `ts` (audit A1/A2 — the plain
+/// [`char_display_width`] counts a TAB as one cell, which made `|`, `j`/`k`
+/// and the scroll family drift on tabbed lines).
+pub fn char_display_width_at(c: char, col: usize, ts: usize) -> usize {
+    if c == '\t' {
+        ts.max(1) - col % ts.max(1)
+    } else {
+        char_display_width(c)
+    }
+}
+
 /// The display column of `offset` within its line.
 pub fn display_column(buf: &dyn VimBuffer, offset: usize) -> usize {
+    display_column_with(buf, offset, 1)
+}
+
+/// [`display_column`] with TAB expansion per `'tabstop'`.
+pub fn display_column_with(buf: &dyn VimBuffer, offset: usize, ts: usize) -> usize {
     let start = buf.line_start(buf.offset_to_line(offset));
     let mut column = 0;
     let mut o = start;
     while o < offset {
         match buf.char_at(o) {
             Some(c) => {
-                column += char_display_width(c);
+                column += char_display_width_at(c, column, ts);
                 o += c.len_utf8();
             }
             None => break,
@@ -262,6 +279,18 @@ pub fn display_column(buf: &dyn VimBuffer, offset: usize) -> usize {
 /// The byte offset of the char covering display column `col` in `line`
 /// (the line end when `col` is at or past the last char).
 pub fn offset_for_display_column(buf: &dyn VimBuffer, line: usize, col: usize) -> usize {
+    offset_for_display_column_with(buf, line, col, 1)
+}
+
+/// [`offset_for_display_column`] with TAB expansion per `'tabstop'` (audit
+/// A1/A2). A column INSIDE a TAB's expansion lands ON the TAB — vim's
+/// `4|` on "ab\tc" parks on the tab itself, and `x` then deletes it.
+pub fn offset_for_display_column_with(
+    buf: &dyn VimBuffer,
+    line: usize,
+    col: usize,
+    ts: usize,
+) -> usize {
     let start = buf.line_start(line);
     let end = buf.line_end(line);
     let mut covered = 0usize;
@@ -269,7 +298,7 @@ pub fn offset_for_display_column(buf: &dyn VimBuffer, line: usize, col: usize) -
     while o < end {
         match buf.char_at(o) {
             Some(c) => {
-                let w = char_display_width(c);
+                let w = char_display_width_at(c, covered, ts);
                 if covered + w > col {
                     break;
                 }

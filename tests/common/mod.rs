@@ -281,6 +281,17 @@ impl Fixture {
 
     /// Simulate the IME text-input path (what the host does with typed text).
     pub fn type_text(&mut self, s: &str) {
+        // A prompt owns typed characters as KEY events (`:`/`/`/`?`/`=` —
+        // vim's cmdline input is keystrokes, not IME text). The old
+        // fall-through lost the text entirely: insert_text_at_cursor
+        // refuses non-insert modes, so `i<C-r>=1+1<CR>` evaluated an EMPTY
+        // prompt. Feed each char through the pipeline instead.
+        if matches!(self.vim.mode(), vimcore::mode::Mode::CommandLine { .. }) {
+            for c in s.chars() {
+                self.feed([c.to_string()]);
+            }
+            return;
+        }
         self.vim.record_typed_text(s);
         let mut ctx = Ctx {
             buf: &mut self.buf,

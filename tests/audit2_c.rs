@@ -25,6 +25,9 @@ use vimcore::mode::Mode;
 #[test]
 fn ctrl_t_inserts_shiftwidth_indent() {
     let mut f = Fixture::at("abc\n", 0, 0);
+    // oracle 环境（vim -Nu NONE）：noet + sw=8 + ts=8。引擎默认 et+sw=4
+    // 是刻意的现代编辑器集，与 vim 默认不同，探针须先对齐。
+    f.feed([":", "s", "e", "t", " ", "n", "o", "e", "t", " ", "t", "s", "=", "8", " ", "s", "w", "=", "8", "<CR>"]);
     f.feed(["i"]);
     f.type_text("ab");
     f.feed_raw(Key::ctrl_char('t'));
@@ -39,7 +42,10 @@ fn ctrl_t_inserts_shiftwidth_indent() {
 /// （得 "x        abc" / "0        abc"）。
 #[test]
 fn ctrl_d_removes_shiftwidth_indent() {
+    // 同 ctrl_t：oracle 环境 noet + sw=8（引擎默认 et+sw=4）
+    let keys = [":", "s", "e", "t", " ", "n", "o", "e", "t", " ", "t", "s", "=", "8", " ", "s", "w", "=", "8", "<CR>"];
     let mut f = Fixture::at("        abc\n", 0, 0);
+    f.feed(keys);
     f.feed(["i"]);
     f.feed_raw(Key::ctrl_char('d'));
     f.type_text("x");
@@ -47,6 +53,7 @@ fn ctrl_d_removes_shiftwidth_indent() {
     assert_eq!(f.text(), "xabc\n", "vim 9.1: i<C-d> 删一个 shiftwidth");
 
     let mut f = Fixture::at("        abc\n", 0, 0);
+    f.feed(keys);
     f.feed(["i"]);
     f.type_text("0");
     f.feed_raw(Key::ctrl_char('d'));
@@ -149,7 +156,9 @@ fn empty_insert_session_clears_last_insert_register() {
     f.feed_raw(Key::ctrl_char('r'));
     f.feed(["."]);
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "ZZ\nZZ\n", "vim 9.1: 空会话后 i<C-r>. 不粘任何内容");
+    // 缓冲里第一会话的 "hi" 照旧在；断言点是第二行不再粘出陈旧文本
+    // （旧引擎得 "hiZZ\nhiZZ\n"，清账后 = vim）
+    assert_eq!(f.text(), "hiZZ\nZZ\n", "vim 9.1: 空会话后 i<C-r>. 不粘任何内容");
 }
 
 /// **发现 9（P1）**：会话内 `<C-w>`/`<C-u>` 删掉的文本必须从 `".` 里去掉，

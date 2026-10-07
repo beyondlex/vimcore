@@ -176,7 +176,11 @@ fn ex_substitute_records_changelist_on_substituted_line() {
     f.feed([":", "2", "s", "/", "w", "/", "W", "/", "<CR>"]);
     assert_eq!(f.line(), 1);
     f.feed(["g", ";"]);
-    assert_eq!(f.line(), 3, "g; 回到上一次替换行（旧行为留在 line 1）");
+    // audit E8（oracle w4）：第一次 g; 落**最近**的变更 = 第二次替换的
+    // line 1；再按一次才走到更早的 line 3
+    assert_eq!(f.line(), 1, "g; 回到最近一次替换行");
+    f.feed(["g", ";"]);
+    assert_eq!(f.line(), 3, "再走一步到更早的替换行");
 }
 
 /// :d 同族：changelist / `.` mark 记在删除发生的行（存活行），不是命令前
@@ -212,12 +216,21 @@ fn newer_change_at_end_reports_e663() {
 }
 
 #[test]
-fn older_change_at_start_reports_e662() {
+fn older_change_first_press_is_silent() {
+    // audit E8（vim 9.1 oracle w6）：第一次 g; 落最近的变更且**静默**——
+    // fresh 游标停在最新条目上；旧的 E662 首按误报已被 oracle 证伪。
+    // 第二次 g; 才真正到底报 E662。
     let mut f = Fixture::new("one\n");
     f.feed(["i"]);
     f.type_text("x");
     f.feed(["<Esc>"]);
-    f.feed(["g", ";"]); // 只有一条变更，g; 无更早的条目
+    f.feed(["g", ";"]);
+    assert!(
+        f.host.statuses.is_empty() && f.host.bells == 0,
+        "首次 g; 静默成功，实际 {:?}",
+        f.host.statuses
+    );
+    f.feed(["g", ";"]);
     assert!(
         f.host.statuses.iter().any(|s| s.starts_with("E662")),
         "后退方向到底报 E662，实际 {:?}",

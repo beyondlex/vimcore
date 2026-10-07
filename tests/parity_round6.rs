@@ -85,7 +85,9 @@ fn substitute_line_applies_the_count() {
 #[test]
 fn linewise_put_cursor_lands_on_pasted_line_without_trailing_newline() {
     let f = edit("abc", 0, 0, &["y", "y", "p"]);
-    assert_eq!(f.text(), "abc\nabc");
+    // 字节口径随 'fixendofline'：vim 写回 noeol 文件时补末尾换行
+    // （2026-10-08 od 实证 "abc" yy+p → "abc\nabc\n"）
+    assert_eq!(f.text(), "abc\nabc\n");
     assert_eq!(f.line(), 1);
 
     // control: with a trailing newline the behavior was already right
@@ -179,16 +181,16 @@ fn replace_backspace_at_buffer_start_keeps_stack_in_sync() {
 fn set_query_reports_current_value_without_changing_it() {
     let mut f = Fixture::new("text\n");
     ex(&mut f, "set ic?");
-    assert_eq!(f.host.statuses, vec!["ignorecase"]);
+    assert_eq!(f.host.statuses, vec!["  ignorecase"]);
     assert!(f.vim.options_mut().ignorecase, "query leaves the value");
 
     let mut f = Fixture::new("text\n");
     ex(&mut f, "set noic?");
-    assert_eq!(f.host.statuses, vec!["noignorecase"]);
+    assert_eq!(f.host.statuses, vec!["  noignorecase"]);
 
     let mut f = Fixture::new("text\n");
     ex(&mut f, "set ts?");
-    assert_eq!(f.host.statuses, vec!["tabstop=4"]);
+    assert_eq!(f.host.statuses, vec!["  tabstop=4"]);
 
     // unknown names still bell
     let mut f = Fixture::new("text\n");
@@ -201,11 +203,11 @@ fn bare_set_lists_every_option() {
     let mut f = Fixture::new("text\n");
     ex(&mut f, "set");
     assert!(
-        f.host.statuses.contains(&"ignorecase".to_owned()),
+        f.host.statuses.contains(&"  ignorecase".to_owned()),
         "booleans listed"
     );
     assert!(
-        f.host.statuses.contains(&"tabstop=4".to_owned()),
+        f.host.statuses.contains(&"  tabstop=4".to_owned()),
         "numerics listed"
     );
     assert_eq!(f.host.bells, 0, "bare :set is no longer a bell-only no-op");

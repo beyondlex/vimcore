@@ -58,7 +58,10 @@ fn f2_put_below_noel_line_drops_final_newline() {
 #[test]
 fn f3_bracket_p_below_noel_line_glues() {
     let f = edit("ab\ncd", 0, 0, &["y", "y", "j", "]", "p"]);
-    assert_eq!(f.text(), "ab\ncd\nab", "]p 应在末行下开新行粘出 ab");
+    // 字节级 oracle 复核（od -c）：vim 写回的文件是 "ab\ncd\nab\n"——
+    // 'fixendofline'（默认开）让保存时补回末尾换行；粘连 "ab\ncdab" 才
+    // 是本项 bug 的本体，行结构 [ab,cd,ab] 为准
+    assert_eq!(f.text(), "ab\ncd\nab\n", "]p 应在末行下开新行粘出 ab");
 }
 
 /// 4.（P1）linewise 寄存器按 count 重复用 `text.repeat(count)`——从 noeol
@@ -68,7 +71,9 @@ fn f3_bracket_p_below_noel_line_glues() {
 #[test]
 fn f4_linewise_count_repeat_glues_without_separators() {
     let f = edit("abc", 0, 0, &["y", "y", "3", "p"]);
-    assert_eq!(f.text(), "abc\nabc\nabc\nabc", "3p 应粘出三个独立行");
+    // 字节级 oracle 复核（od -c）：vim 写回 "abc\nabc\nabc\nabc\n"
+    // （fixendofline 补末尾换行）；四行独立、无水平粘连为断言本体
+    assert_eq!(f.text(), "abc\nabc\nabc\nabc\n", "3p 应粘出三个独立行");
 }
 
 /// 5.（P2）大小写算子走 Rust 的 full Unicode 映射；vim 9.1 用简单映射，
@@ -105,8 +110,16 @@ fn f6_gp_linewise_cursor_after_block() {
 /// 引擎：把 "foo " 删进寄存器 a，缓冲变 "bar"。
 #[test]
 fn f7_register_prefix_rejected_under_operator() {
-    let f = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
-    assert_eq!(f.text(), "fwoo bar", "d\"aw 不得当作删除执行");
+    // oracle 实证：vim 在算子待定遇 `"` 即响铃取消算子，随后 `a` 进插入、
+    // `w` 落成打字（"fwoo bar"）。本夹具的 feed 不模拟插入态打字（按合同
+    // 交宿主放置），故断言钉 oracle 的可观测本质：缓冲不被删、寄存器 a
+    // 不被写入（"ap 粘不出删除内容）、响铃。
+    let mut f = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
+    assert_eq!(f.text(), "foo bar", "d\"aw 不得当作删除执行");
+    assert!(f.host.bells >= 1, "算子待定遇 \" 应响铃：{:?}", f.host.bells);
+    let mut f2 = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
+    f2.feed(["\"", "a", "p"]);
+    assert_eq!(f2.text(), "foo bar", "寄存器 a 不得被写入（\"ap 粘不出删除内容）");
 }
 
 /// 8.（P2）只读寄存器不得经 `"{reg}` 前缀写入。

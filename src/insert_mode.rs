@@ -17,8 +17,23 @@ impl VimState {
         if self.insert_register_pending {
             self.insert_register_pending = false;
             if let Some(name) = key.printable_char() {
+                if name == crate::registers::EXPRESSION {
+                    // i<C-r>= opens the expression prompt; the result is
+                    // inserted at the cursor and typing continues (audit
+                    // C9 — the old miss typed the expression LITERALLY
+                    // into the buffer)
+                    self.expr_prompt_insert_origin = true;
+                    self.begin_cmdline('=');
+                    return ProcessOutcome::Consumed;
+                }
                 if let Some(data) = self.registers.get_for_paste(name, ctx.host) {
-                    self.insert_text_at_cursor(ctx, &data.text);
+                    // `".` stores REAL BACKSPACES (\x08, audit D7c) — the
+                    // replay must EXECUTE them, not paste the marker byte
+                    if name == crate::registers::LAST_INSERT {
+                        self.insert_replay_text(ctx, &data.text);
+                    } else {
+                        self.insert_text_at_cursor(ctx, &data.text);
+                    }
                 }
             }
             return ProcessOutcome::Consumed;
@@ -252,6 +267,42 @@ impl VimState {
                     self.insert_register_pending = true;
                     return ProcessOutcome::Consumed;
                 }
+                KeyKind::Char('t') => {
+                    self.insert_shift_indent(ctx, 1);
+                    return ProcessOutcome::Consumed;
+                }
+                KeyKind::Char('d') => {
+                    self.insert_shift_indent(ctx, -1);
+                    return ProcessOutcome::Consumed;
+                }
+                KeyKind::Char('y') => {
+                    self.insert_copy_neighbor_char(ctx, true);
+                    return ProcessOutcome::Consumed;
+                }
+                KeyKind::Char('e') => {
+                    self.insert_copy_neighbor_char(ctx, false);
+                    return ProcessOutcome::Consumed;
+                }
+                KeyKind::Char('a') => {
+                    let text = self
+                        .registers
+                        .get_for_paste(crate::registers::LAST_INSERT, ctx.host)
+                        .map(|d| d.text)
+                        .unwrap_or_default();
+                    self.insert_replay_text(ctx, &text);
+                    return ProcessOutcome::Consumed;
+                }
+                // <C-@> = <C-a> + leave insert (`:h i_CTRL-@`, audit D6)
+                KeyKind::Char('@') => {
+                    let text = self
+                        .registers
+                        .get_for_paste(crate::registers::LAST_INSERT, ctx.host)
+                        .map(|d| d.text)
+                        .unwrap_or_default();
+                    self.insert_replay_text(ctx, &text);
+                    self.exit_insert(ctx);
+                    return ProcessOutcome::Consumed;
+                }
                 _ => return ProcessOutcome::Unknown,
             }
         }
@@ -469,6 +520,14 @@ impl VimState {
                 // rows on exit: a backspace that undoes typed text must
                 // shrink it too, or the replicas carry the deleted char
                 self.block_backspace_undo(at);
+                // the deletion is part of the `".` account as a REPLAYABLE
+                // backspace (audit D7c — `iabc<BS><Esc>` leaves "abc<80>kb"
+                // in vim's `".`; the engine stores the raw \x08), and the
+                // count-repeat text loses its last char so `3ifo<BS><Esc>`
+                // repeats the NET text "f" — vim's BS never cancels the
+                // repeat (audit D12; arrow keys still do, via the invariant)
+                self.insert_session_text.push('\u{8}');
+                self.count_insert_backspace();
                 self.republish_search(ctx);
                 ctx.host.changed();
             }
@@ -476,8 +535,10 @@ impl VimState {
             // join with the previous line
             self.begin_edit();
             self.edit_delete(ctx, at - 1..at);
-            self.republish_search(ctx);
             self.cursor.offset = at - 1;
+            self.insert_session_text.push('\u{8}');
+            self.count_insert_backspace();
+            self.republish_search(ctx);
             ctx.host.changed();
         }
     }
@@ -619,6 +680,11 @@ impl VimState {
         if range.start >= range.end {
             return;
         }
+        // the deleted characters come OUT of the pending `".` account too
+        // (audit D7b — vim 9.1: `ifo<C-w><Esc>` leaves `".` empty; the
+        // engine's session text only accumulated). Backspace markers count
+        // as one unit like any char.
+        let removed_units = ctx.buf.slice(range.clone()).chars().count();
         if self.mode == Mode::Replace {
             // rebuild the span with the stashed originals substituted back
             // in — one edit, because restoring multi-byte originals shifts
@@ -647,6 +713,12 @@ impl VimState {
         } else {
             let removed = range.end - range.start;
             let append_end = range.end;
+            // trim the pending `".` account by what actually left the line
+            for _ in 0..removed_units {
+                if self.insert_session_text.pop().is_none() {
+                    break;
+                }
+            }
             self.begin_edit();
             self.edit_delete(ctx, range);
             // a block session's replica mirrors the typed text: a deletion
@@ -659,6 +731,145 @@ impl VimState {
         }
         self.republish_search(ctx);
         ctx.host.changed();
+    }
+
+    /// `<C-t>` / `<C-d>`: add/remove one `'shiftwidth'` of indent at the
+    /// START of the cursor line (`:h i_CTRL-T`; audit D1/D2 — both were
+    /// unbound). The cursor keeps its screen column: text left of it shifts
+    /// by the byte delta. `0<C-d>` (the `0` typed first on this line, not
+    /// yet more text) removes ALL indent and un-types the `0`.
+    fn insert_shift_indent(&mut self, ctx: &mut Ctx, dir: i64) {
+        // `0<C-d>`: the typed "0" comes out of the line first (it is a
+        // command character, not text — vim 9.1 oracle `i0<C-d><Esc>` leaves
+        // "abc" on "        abc", audit D2b)
+        let at = self.cursor.offset;
+        let line = ctx.buf.offset_to_line(at);
+        let typed_zero = self.insert_typed_start.is_some_and(|t| {
+            // a host text swap can leave the typing anchor PAST the cursor
+            // (whole line deleted under the session): only a `0` strictly
+            // before the cursor qualifies, and the slice needs the guard
+            // anyway (fuzz round 7: slice(22..0) panic)
+            t < at && ctx.buf.offset_to_line(t) == line && ctx.buf.slice(t..at) == "0"
+        });
+        if dir < 0 && typed_zero {
+            self.insert_delete_typed_span(ctx, at - 1..at);
+            self.cursor.offset = at - 1;
+        }
+        let at = self.cursor.offset;
+        let line = ctx.buf.offset_to_line(at);
+        let ls = ctx.buf.line_start(line);
+        let old_bytes = self.current_line_indent(ctx);
+        let old_width: usize = ctx
+            .buf
+            .slice(ls..ls + old_bytes)
+            .chars()
+            .map(crate::buffer::char_display_width)
+            .sum();
+        let sw = self.shiftwidth();
+        let new_width = if dir > 0 {
+            old_width + sw
+        } else {
+            old_width.saturating_sub(sw)
+        };
+        let new_indent = self.indent_string_for_width(ctx, new_width);
+        if new_indent == ctx.buf.slice(ls..ls + old_bytes) {
+            return;
+        }
+        self.begin_edit();
+        self.edit_replace(ctx, ls..ls + old_bytes, &new_indent);
+        self.republish_search(ctx);
+        // the cursor follows its character: only text PAST the indent shifts
+        self.cursor.offset = if at > ls + old_bytes {
+            at - old_bytes + new_indent.len()
+        } else {
+            at.min(ls + new_indent.len())
+        };
+        ctx.host.changed();
+    }
+
+    /// The engine's effective `'shiftwidth'` in display columns (`sw=0`
+    /// means "use `'tabstop'`" — round 31 I2).
+    fn shiftwidth(&self) -> usize {
+        if self.options.shiftwidth == 0 {
+            self.options.tabstop.max(1)
+        } else {
+            self.options.shiftwidth
+        }
+    }
+
+    /// Whitespace whose display width is `width` cells, composed per
+    /// `'expandtab'`/`'tabstop'` (TABs to the next tabstop boundary, then
+    /// spaces) — the same shape `:le`/`:ce` padding uses.
+    fn indent_string_for_width(&self, ctx: &Ctx, width: usize) -> String {
+        if self.options.expandtab {
+            return " ".repeat(width);
+        }
+        let _ = ctx;
+        let ts = self.options.tabstop.max(1);
+        let mut out = String::new();
+        let mut col = 0usize;
+        while col + ts - col % ts <= width {
+            out.push('\t');
+            col += ts - col % ts;
+        }
+        out.push_str(&" ".repeat(width - col));
+        out
+    }
+
+    /// `<C-y>` / `<C-e>`: insert the character from the line above/below at
+    /// the cursor's display column (`:h i_CTRL-Y`, audit D3/D4 — unbound).
+    /// A short neighbor line (or no neighbor) is a silent no-op.
+    fn insert_copy_neighbor_char(&mut self, ctx: &mut Ctx, above: bool) {
+        let line = ctx.buf.offset_to_line(self.cursor.offset) as i64;
+        let src = line + if above { -1 } else { 1 };
+        if src < 0 || src >= ctx.buf.line_count() as i64 {
+            return;
+        }
+        let src = src as usize;
+        let col = self.display_column_ts(ctx.buf, self.cursor.offset);
+        let ls = ctx.buf.line_start(src);
+        let end = ctx.buf.line_end(src);
+        // the source column must EXIST: offset_for_display_column clamps
+        // past-the-end onto the last char (`|` semantics), which made C-e
+        // re-copy the neighbor's last char forever
+        let mut width = 0usize;
+        let mut o = ls;
+        while o < end {
+            let Some(c) = ctx.buf.char_at(o) else { break };
+            width += crate::buffer::char_display_width_at(c, width, self.options.tabstop);
+            o += c.len_utf8();
+        }
+        if col >= width {
+            return;
+        }
+        let o = crate::buffer::offset_for_display_column_with(
+            ctx.buf,
+            src,
+            col,
+            self.options.tabstop,
+        );
+        if o >= end {
+            return;
+        }
+        if let Some(c) = ctx.buf.char_at(o) {
+            self.insert_text_at_cursor(ctx, &c.to_string());
+        }
+    }
+
+    /// Insert previously-recorded insert text (`<C-a>`, `<C-@>`, `<C-r>.`):
+    /// the `".` register stores REAL BACKSPACES as `\x08` (audit D7c — vim
+    /// keeps `<80>kb` inside `".` and the replay re-executes them), so the
+    /// replay walks the text and turns each marker into an actual backspace.
+    pub(crate) fn insert_replay_text(&mut self, ctx: &mut Ctx, text: &str) {
+        let segments: Vec<&str> = text.split('\u{8}').collect();
+        for (i, seg) in segments.iter().enumerate() {
+            if !seg.is_empty() {
+                self.insert_text_at_cursor(ctx, seg);
+            }
+            if i + 1 < segments.len() {
+                self.insert_backspace(ctx);
+            }
+        }
     }
 
     /// Called when insert mode is left implicitly (host navigation etc.).
