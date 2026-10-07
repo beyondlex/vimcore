@@ -68,6 +68,19 @@ pub enum NormalCmd {
     /// `&`: repeat the last `:s` on the current line (the stored command
     /// line re-runs through `execute_ex`).
     RepeatSubstitute,
+    /// `g&`: repeat the last :s over the WHOLE file, keeping flags
+    RepeatSubstituteGlobal,
+    /// `gp`: paste after, cursor just past the new text
+    PutAfterGp,
+    /// `gP`: paste before, cursor just past the new text
+    PutBeforeGp,
+    /// `ga`: character code info
+    CharInfo,
+    /// `]p`/`[p`/`]P`/`[P`: linewise paste with the indent adjusted to the
+    /// current line (`:h ]p`, audit M1)
+    PasteIndent { below: bool },
+    /// `g8`: UTF-8 byte info
+    ByteInfo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +94,9 @@ pub enum VisualCmd {
     /// row-end (vim: "same column, but cursor at the other end").
     SwapEndsKeepCol, // O
     PutReplace, // p / P replace selection
+    /// `g C-a`: SEQUENTIAL increment — each selected line's number grows by
+    /// one more than the previous (audit K1)
+    SequentialIncrement,
     Join {
         literal: bool,
     }, // J / gJ
@@ -187,6 +203,7 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.motion_all(&["^"], Motion::FirstNonBlank);
     b.motion_all(&["$"], Motion::LineEnd);
     b.motion_all(&["g", "_"], Motion::LastLineNonBlank);
+    b.motion_all(&["_"], Motion::Underscore);
     b.motion_all(&["w"], Motion::WordStart { big: false });
     b.motion_all(&["W"], Motion::WordStart { big: true });
     b.motion_all(&["b"], Motion::WordBack { big: false });
@@ -440,6 +457,10 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["~"], CmdKind::Normal(NormalCmd::ToggleChar));
     b.normal(&["p"], CmdKind::Normal(NormalCmd::PutAfter));
     b.normal(&["P"], CmdKind::Normal(NormalCmd::PutBefore));
+    // gp/gP: same pastes, cursor left just AFTER the new text (`:h gp`,
+    // audit G6 — the old miss fell back to plain `p`'s cursor)
+    b.normal(&["g", "p"], CmdKind::Normal(NormalCmd::PutAfterGp));
+    b.normal(&["g", "P"], CmdKind::Normal(NormalCmd::PutBeforeGp));
     b.normal(&["J"], CmdKind::Normal(NormalCmd::Join));
     b.normal(&["g", "J"], CmdKind::Normal(NormalCmd::JoinLiteral));
     b.normal(&["u"], CmdKind::Normal(NormalCmd::Undo));
@@ -495,6 +516,11 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["<C-x>"], CmdKind::Normal(NormalCmd::DecrementNumber));
     // &: repeat the last :s on the current line (vim)
     b.normal(&["&"], CmdKind::Normal(NormalCmd::RepeatSubstitute));
+    // `g&`: the whole-file repeat — same flags, every line (audit E10)
+    b.normal(
+        &["g", "&"],
+        CmdKind::Normal(NormalCmd::RepeatSubstituteGlobal),
+    );
     b.normal(&["@"], CmdKind::Normal(NormalCmd::PlayMacro));
     b.normal(&["z", "z"], CmdKind::Normal(NormalCmd::ScrollCenter));
     b.normal(&["z", "t"], CmdKind::Normal(NormalCmd::ScrollTop));
@@ -513,11 +539,35 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
         CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Bottom)),
     );
     b.normal(&["g", "v"], CmdKind::Normal(NormalCmd::RestoreVisual));
+    // ga / g8: the char-code / byte-hex info messages (`:h ga`, audit J2/J3)
+    b.normal(&["g", "a"], CmdKind::Normal(NormalCmd::CharInfo));
+    b.normal(&["g", "8"], CmdKind::Normal(NormalCmd::ByteInfo));
+    // ]p / [p / ]P / [P: indent-adjusting paste (`:h ]p`, audit M1 — the
+    // old keys were unbound and `]p` degraded to a plain `p`, keeping the
+    // register's original indent)
+    b.normal(
+        &["]", "p"],
+        CmdKind::Normal(NormalCmd::PasteIndent { below: true }),
+    );
+    b.normal(
+        &["]", "P"],
+        CmdKind::Normal(NormalCmd::PasteIndent { below: true }),
+    );
+    b.normal(
+        &["[", "p"],
+        CmdKind::Normal(NormalCmd::PasteIndent { below: false }),
+    );
+    b.normal(
+        &["[", "P"],
+        CmdKind::Normal(NormalCmd::PasteIndent { below: false }),
+    );
     b.normal(&["Z", "Z"], CmdKind::Normal(NormalCmd::WriteQuit));
     b.normal(&["Z", "Q"], CmdKind::Normal(NormalCmd::QuitNoSave));
 
     // ---- entering insert ---------------------------------------------------
     b.normal(&["i"], CmdKind::EnterInsert(InsertKind::Insert));
+    // <Insert> in normal mode enters insert, like `i` (vim: `:h <Insert>`)
+    b.normal(&["<Insert>"], CmdKind::EnterInsert(InsertKind::Insert));
     b.normal(&["a"], CmdKind::EnterInsert(InsertKind::Append));
     b.normal(
         &["I"],
@@ -561,6 +611,9 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.visual(&["O"], CmdKind::Visual(VisualCmd::SwapEndsKeepCol));
     b.visual(&["d"], CmdKind::Operator(Operator::Delete));
     b.visual(&["x"], CmdKind::Operator(Operator::Delete));
+    // visual `D`: blockwise — block column to each row's end; char/line —
+    // span start to that line's end (`:h v_D`, audit G2)
+    b.visual(&["D"], CmdKind::Operator(Operator::DeleteToEnd));
     b.visual(&["<Del>"], CmdKind::Operator(Operator::Delete));
     b.visual(&["y"], CmdKind::Operator(Operator::Yank));
     // Y/D/X/C/S are vim's LINEWISE visual commands (see VisualCmd::LinewiseOp;
@@ -580,10 +633,11 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
         &["S"],
         CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Change)),
     );
-    b.visual(
-        &["D"],
-        CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)),
-    );
+    // visual `D`: blockwise — block column to each row's end; linewise —
+    // delete the highlighted lines; charwise — span start to line end
+    // (`:h v_D`; the old LinewiseOp(Delete) hit block mode too and wiped
+    // the whole buffer — audit G2)
+    b.visual(&["D"], CmdKind::Operator(Operator::DeleteToEnd));
     b.visual(
         &["X"],
         CmdKind::Visual(VisualCmd::LinewiseOp(Operator::Delete)),
@@ -601,6 +655,12 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.visual(&["P"], CmdKind::Visual(VisualCmd::PutReplace));
     b.visual(&["r"], CmdKind::Visual(VisualCmd::ReplaceChar));
     b.visual(&["J"], CmdKind::Visual(VisualCmd::Join { literal: false }));
+    // `g C-a`: sequential increment over the selection's lines
+    // (`:h v_g CTRL-A`, audit K1)
+    b.visual(
+        &["g", "<C-a>"],
+        CmdKind::Visual(VisualCmd::SequentialIncrement),
+    );
     b.visual(
         &["g", "J"],
         CmdKind::Visual(VisualCmd::Join { literal: true }),

@@ -13,6 +13,9 @@ use std::ops::Range;
 pub struct SearchState {
     pub pattern: Option<String>,
     pub forward: bool,
+    /// The active search offset (`/pat/e+2`) — reapplied by `n`/`N` like
+    /// vim (`:h search-offset`; audit F3).
+    pub offset: Option<SearchOffset>,
     /// The match under the cursor for `n`/`N` stepping.
     pub last_matches: Vec<Range<usize>>,
     /// The range `gn`/`dgn` last selected, for the operator span.
@@ -31,6 +34,7 @@ impl Default for SearchState {
         SearchState {
             pattern: None,
             forward: true,
+            offset: None,
             last_matches: Vec::new(),
             last_found_match: None,
             matches_generation: None,
@@ -40,6 +44,63 @@ impl Default for SearchState {
 
 /// Regex options come from the engine's case options; the builder itself
 /// never fails to construct (only `.build()` can reject a bad pattern).
+/// Parsed `/pat/{offset}` tail: which match end anchors the cursor and how
+/// many lines to shift afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchOffset {
+    pub anchor: OffsetAnchor,
+    pub line_shift: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetAnchor {
+    /// `s`/`b`: start of the match
+    Start,
+    /// `e`: end of the match (last char)
+    End,
+}
+
+/// Parse the offset tail of a search (`:h search-offset`): `e[+-N]`/`s[+-N]`/
+/// `b[+-N]` anchor at the match end/start, a bare `[+-]N`/`N` is a line
+/// shift from the match start. Returns None on a malformed tail.
+pub fn parse_search_offset(spec: &str) -> Option<SearchOffset> {
+    use OffsetAnchor::*;
+    let mut chars = spec.chars();
+    let mut anchor = Start;
+    let mut rest = spec;
+    match chars.next() {
+        Some('e') => {
+            anchor = End;
+            rest = &spec[1..];
+        }
+        Some('s') | Some('b') => {
+            anchor = Start;
+            rest = &spec[1..];
+        }
+        Some(c) if c.is_ascii_digit() || c == '+' || c == '-' => {}
+        _ => return None,
+    }
+    // the optional [+/-][N] line shift
+    let (sign, digits) = match rest.strip_prefix('-') {
+        Some(d) => (-1i64, d),
+        None => match rest.strip_prefix('+') {
+            Some(d) => (1i64, d),
+            None => (1i64, rest),
+        },
+    };
+    let line_shift = if digits.is_empty() {
+        // a bare sign needs the anchor branch to have consumed a letter
+        // (`/e+` = end + 1 line); a bare empty tail is no shift
+        if rest.is_empty() { 0 } else { sign }
+    } else {
+        match digits.parse::<i64>() {
+            Ok(n) => sign * n,
+            Err(_) => return None,
+        }
+    };
+    Some(SearchOffset { anchor, line_shift })
+}
+
 pub fn compile(vim: &VimState, pattern: &str) -> RegexBuilder {
     let mut builder = RegexBuilder::new(pattern);
     builder
@@ -158,7 +219,31 @@ pub fn jump_to_match(
         (start_index as u64 + len - steps) as usize % len as usize
     };
     // `index` is already in bounds (both branches take it modulo `len`)
+    // remember the chosen RANGE so search offsets (`/pat/e`) can anchor on
+    // the match end (audit F3)
+    vim.search.last_found_match = Some(matches[index].clone());
     Some(matches[index].start)
+}
+
+/// Apply a search offset to the last-found match: anchor at the match's
+/// start/end and shift lines (`:h search-offset`; audit F3). The column is
+/// kept across the line shift, clamped to each line's end.
+pub fn apply_search_offset(vim: &mut VimState, buf: &dyn VimBuffer, offset: &SearchOffset) {
+    let Some(m) = vim.search.last_found_match.clone() else { return };
+    let anchor = match offset.anchor {
+        OffsetAnchor::Start => m.start,
+        OffsetAnchor::End => buf
+            .prev_char_offset(m.end)
+            .unwrap_or(m.start),
+    };
+    let mut line = buf.offset_to_line(anchor) as i64 + offset.line_shift;
+    let max_line = buf.line_count() as i64 - 1;
+    line = line.clamp(0, max_line);
+    let line = line as usize;
+    let col = crate::buffer::display_column(buf, anchor);
+    let target = crate::buffer::offset_for_display_column(buf, line, col);
+    vim.cursor.offset = target;
+    vim.cursor.desired_col = None;
 }
 
 /// `*` / `#`: search for the text at the cursor. Vim's fallback chain

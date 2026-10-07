@@ -33,6 +33,10 @@ pub const BLACKHOLE: char = '_';
 pub const CLIPBOARD: char = '+';
 pub const SMALL_DELETE: char = '-';
 pub const YANK: char = '0';
+/// `".` — the last inserted text (audit D1)
+pub const LAST_INSERT: char = '.';
+/// `":` — the last Ex command line (audit D3)
+pub const LAST_COMMAND: char = ':';
 
 /// `text.repeat(count)` under a hard byte ceiling. Counts arrive unvalidated
 /// from the keyboard and `99999999p` must clamp the pasted volume instead of
@@ -60,6 +64,8 @@ impl Registers {
         match name {
             UNNAMED => self.last.as_ref(),
             BLACKHOLE => None,
+            LAST_INSERT => self.named.get(&LAST_INSERT),
+            LAST_COMMAND => self.named.get(&LAST_COMMAND),
             // `"A` reads register `a` — the uppercase spelling is the append
             // form, not a separate slot
             c if c.is_ascii_uppercase() => self.named.get(&c.to_ascii_lowercase()),
@@ -83,6 +89,14 @@ impl Registers {
     /// the `clipboard=unnamed` behavior through the host).
     pub fn get_for_paste(&self, name: char, host: &dyn VimHost) -> Option<Register> {
         match name {
+            // `"%` is the HOST filename, read live (audit D2)
+            '%' => {
+                let name = host.buffer_name();
+                (!name.is_empty()).then(|| Register {
+                    text: name.to_owned(),
+                    kind: RegisterKind::Charwise,
+                })
+            }
             CLIPBOARD => host
                 .clipboard_read()
                 .filter(|text| !text.is_empty())
@@ -115,6 +129,29 @@ impl Registers {
             '/',
             Register {
                 text: pattern,
+                kind: RegisterKind::Charwise,
+            },
+        );
+    }
+
+    /// `".` — record the text the last insert session typed (audit D1;
+    /// mirrors the search slot: no unnamed write).
+    pub fn store_last_insert(&mut self, text: String) {
+        self.named.insert(
+            LAST_INSERT,
+            Register {
+                text,
+                kind: RegisterKind::Charwise,
+            },
+        );
+    }
+
+    /// `":` — record the last Ex command line (audit D3).
+    pub fn store_last_command(&mut self, cmd: String) {
+        self.named.insert(
+            LAST_COMMAND,
+            Register {
+                text: cmd,
                 kind: RegisterKind::Charwise,
             },
         );

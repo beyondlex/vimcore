@@ -123,9 +123,11 @@ fn question_enter_repeats_search_backward() {
 
 #[test]
 fn toggle_char_expands_and_shrinks_multi_char_case_mapping() {
-    // `~` on ß produces SS in vim; the mapping must expand in place.
+    // `~` on ß produces the single char ẞ (U+1E9E) in vim 9.1 (typeahead
+    // oracle re-probed in the round-31 audit — the old "SS" expectation
+    // was wrong); the mapping must expand in place.
     let f = edit("aßc", 0, 1, &["~"]);
-    assert_eq!(f.text(), "aSSc");
+    assert_eq!(f.text(), "a\u{1e9e}c");
 
     // the byte length can also SHRINK (ẞ -> ß): the replaced range must be
     // the consumed span, or the trailing bytes would be eaten (or the old
@@ -133,9 +135,9 @@ fn toggle_char_expands_and_shrinks_multi_char_case_mapping() {
     let f = edit("ẞx", 0, 0, &["~"]);
     assert_eq!(f.text(), "ßx");
 
-    // gU over ß expands too
+    // gU over ß maps to the single char ẞ (oracle-probed, audit G4)
     let f = edit("aß", 0, 0, &["g", "U", "U"]);
-    assert_eq!(f.text(), "ASS");
+    assert_eq!(f.text(), "A\u{1e9e}");
 }
 
 // ---- dw over trailing blanks keeps the newline ------------------------------------
@@ -548,8 +550,10 @@ fn block_insert_on_short_row_lands_at_line_end_without_padding() {
 
 #[test]
 fn open_line_preserves_tab_indent() {
+    // 'autoindent' set explicitly — the engine default now follows vim's
+    // noai (round-31 audit I1)
     let mut f = Fixture::at("\tfoo\n", 0, 1);
-    f.feed(["o"]);
+    f.feed([":", "s", "e", "t", " ", "a", "i", "<CR>", "o"]);
     f.type_text("bar");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "\tfoo\n\tbar\n");

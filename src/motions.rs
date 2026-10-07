@@ -74,6 +74,8 @@ pub enum Motion {
     PageUp,
     LineDownFirstNonBlank, // enter / +
     LineUpFirstNonBlank,   // -
+    /// `_`: down `count - 1` lines, first non-blank (`:h _`) — audit K4
+    Underscore,
     /// `gn`/`gN` as an operator target (`dgn`): the span is the match
     /// itself, not cursor..target — the operator arm reads
     /// `search.last_found_match`.
@@ -145,7 +147,8 @@ impl Motion {
             | Motion::PageUp
             | Motion::PageDown
             | Motion::LineDownFirstNonBlank
-            | Motion::LineUpFirstNonBlank => MotionKind::Linewise,
+            | Motion::LineUpFirstNonBlank
+            | Motion::Underscore => MotionKind::Linewise,
             Motion::LineEnd
             | Motion::LastLineNonBlank
             | Motion::WordEnd { .. }
@@ -574,9 +577,11 @@ impl Motion {
             // H / M / L: viewport-relative rows
             Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
                 let (first, last) = ctx.host.viewport();
+                // saturating: a buggy host may report an inverted/extreme
+                // viewport; `first + count` must clamp, not panic (audit A1)
                 let line = match self {
-                    Motion::ScreenTop => (first + count - 1).min(last),
-                    Motion::ScreenMiddle => (first + last) / 2,
+                    Motion::ScreenTop => first.saturating_add(count - 1).min(last),
+                    Motion::ScreenMiddle => first.saturating_add(last) / 2,
                     _ => last.saturating_sub(count - 1).max(first),
                 };
                 let line = line.min(buf.line_count() - 1);
@@ -659,6 +664,16 @@ impl Motion {
                     MotionResult::stuck(vim.cursor.offset)
                 } else {
                     MotionResult::new(buf.first_non_blank(cur - count), MotionKind::Linewise)
+                }
+            }
+            // `_`: down count-1 lines, first non-blank (`:h _`) — audit K4
+            Motion::Underscore => {
+                let cur = buf.offset_to_line(vim.cursor.offset);
+                let line = cur + count - 1;
+                if line > buf.line_count() - 1 {
+                    MotionResult::stuck(vim.cursor.offset)
+                } else {
+                    MotionResult::new(buf.first_non_blank(line), MotionKind::Linewise)
                 }
             }
         }
