@@ -362,6 +362,12 @@ pub struct VimState {
     /// D4): a register write newer than the mark re-parses the macro from
     /// the register text; otherwise the lossless macro cache plays.
     macro_sync_gen: HashMap<char, u64>,
+    /// The mark batch an undo restored (audit E4), kept for the matching
+    /// REDO: vim UNSETS those marks when the deletion is redone
+    /// (oracle: `ma dd u <C-r>` → getpos("'a") = 0,0) and restores them
+    /// again on the next undo (getpos = 1,3).
+    pending_restore: Option<Vec<(char, usize)>>,
+    pending_recollapse: Option<Vec<(char, usize)>>,
     /// Byte offset of the group's first edit — the undo cursor hint
     /// (audit D9). Set by the edit funnels; None = fall back to the cursor.
     /// The OFFSET itself (not its line start) so a normal-mode edit keeps
@@ -540,6 +546,8 @@ impl VimState {
             filter_span: None,
             pending_visual_cursor: None,
             macro_sync_gen: HashMap::new(),
+            pending_restore: None,
+            pending_recollapse: None,
             undo_hint_offset: None,
             replay_error: false,
             expr_prompt_insert_origin: false,
@@ -4564,13 +4572,34 @@ impl VimState {
         };
         self.edit_generation += 1;
         self.sanitize_stored_offsets(ctx.buf);
+        if !undo {
+            // the redo re-applies the deletion: the restored marks are
+            // UNSET (vim 9.1 oracle: getpos("'a") = 0,0 after `ma dd u
+            // <C-r>`; the next undo restores them again — audit E4 redo)
+            if let Some(batch) = self.pending_restore.take() {
+                for (name, _) in &batch {
+                    self.marks.remove(*name);
+                }
+                self.pending_restore = Some(batch);
+            }
+        }
         if undo {
             // vim restores the marks of deleted text together with the text
             // (audit E4): put the newest destroyed batch back, keeping only
-            // positions the restored text can address
-            if let Some(batch) = self.marks.take_restorable_marks() {
-                for (name, off) in batch {
-                    let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
+            // positions the restored text can address. The batch is KEPT
+            // for the matching redo (which unsets the marks again — oracle
+            // `ma dd u <C-r>` → getpos("'a") = 0,0; `…u` → 1,3 restored).
+            let batch = match self.pending_restore.take() {
+                Some(b) => b,
+                None => match self.marks.take_restorable_marks() {
+                    Some(b) => b,
+                    None => Vec::new(),
+                },
+            };
+            if !batch.is_empty() {
+                let mut restored = Vec::with_capacity(batch.len());
+                for (name, off) in &batch {
+                    let off = crate::buffer::floor_to_char_boundary(ctx.buf, *off);
                     if off > ctx.buf.len() {
                         continue;
                     }
@@ -4585,8 +4614,11 @@ impl VimState {
                     } else {
                         off
                     };
-                    self.marks.set(name, off);
+                    self.marks.set(*name, off);
+                    restored.push((*name, off));
                 }
+                self.pending_restore = Some(batch);
+                let _ = restored;
             }
         }
         self.cursor.offset =
@@ -6132,6 +6164,11 @@ impl VimState {
     /// Debug-only: the anchor virtual column.
     pub fn debug_anchor_vcol(&self) -> Option<usize> {
         self.block_anchor_vcol
+    }
+
+    /// Debug-only: named mark position.
+    pub fn debug_reg_mark(&self, name: char) -> Option<usize> {
+        self.marks.get(name)
     }
 
     /// Debug-only: register text.
