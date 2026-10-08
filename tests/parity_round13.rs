@@ -103,14 +103,14 @@ fn probe_describe_garbage() {
 fn probe_register_semantics() {
     let mut r = Registers::default();
     r.store_yank(Some('a'), "one\n".into(), RegisterKind::Linewise);
-    r.store_delete(Some('A'), "two\n".into(), RegisterKind::Linewise);
+    r.store_delete(Some('A'), "two\n".into(), RegisterKind::Linewise, false);
     let reg = r.get('a').unwrap();
     assert_eq!(reg.text, "one\ntwo\n", "uppercase append merges, got {:?}", reg);
     assert_eq!(reg.kind, RegisterKind::Linewise);
 
     let mut r2 = Registers::default();
     r2.store_yank(None, "keep\n".into(), RegisterKind::Linewise);
-    r2.store_delete(Some('_'), "gone\n".into(), RegisterKind::Linewise);
+    r2.store_delete(Some('_'), "gone\n".into(), RegisterKind::Linewise, false);
     assert_eq!(r2.get('"').unwrap().text, "keep\n");
 }
 

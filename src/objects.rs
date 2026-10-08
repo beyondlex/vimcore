@@ -66,13 +66,15 @@ pub fn resolve_alias(c: char, inner: bool) -> Option<TextObject> {
     }
 }
 
-pub fn range(buf: &dyn VimBuffer, offset: usize, obj: TextObject) -> Option<ObjectRange> {
+pub fn range(buf: &dyn VimBuffer, offset: usize, obj: TextObject, count: usize) -> Option<ObjectRange> {
     match obj {
         TextObject::Word { inner, big } => word_range(buf, offset, inner, big),
-        TextObject::Sentence { inner } => sentence_range(buf, offset, inner),
+        TextObject::Sentence { inner } => sentence_range(buf, offset, inner, count),
         TextObject::Paragraph { inner } => paragraph_range(buf, offset, inner),
         TextObject::Quote { inner, quote } => quote_range(buf, offset, inner, quote),
-        TextObject::Block { inner, open, close } => block_range(buf, offset, inner, open, close),
+        TextObject::Block { inner, open, close } => {
+            block_range(buf, offset, inner, open, close, count)
+        }
         TextObject::Tag { inner } => tag_range(buf, offset, inner),
     }
 }
@@ -348,37 +350,18 @@ fn blank_run_plus_next_word(
     Some(ObjectRange::charwise(run_start, end))
 }
 
-fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {
-    // one PAST the cursor, at the next char boundary — a raw `offset + 1`
-    // lands mid-character on a multi-byte cursor char, where
-    // `prev_char_offset` is None and `prev_sentence` silently collapsed the
-    // sentence start to 0 (`dis` on "Hi. 你好 ok" deleted "Hi." instead of
-    // the sentence under the cursor)
-    let start = word::prev_sentence(
-        buf,
-        crate::buffer::next_grapheme_offset(buf, offset).unwrap_or(offset),
-    );
-    let next = word::next_sentence(buf, offset);
-    // `is` stops AT the sentence terminator — vim 9.1: `dis` on "Aaa. Bbb."
-    // deletes "Aaa." and keeps the trailing space in the next sentence's
-    // leading whitespace. `next_sentence` already skips that whitespace run
-    // (it returns the NEXT sentence's first char), so the inner end is the
-    // first terminator at/after the sentence start; a sentence without one
-    // runs to end-of-buffer.
-    let term_end = (start..next)
-        .find(|&o| matches!(buf.char_at(o), Some('.' | '!' | '?')))
-        .map(|o| o + buf.char_at(o).map_or(1, |c| c.len_utf8()))
-        .unwrap_or(next);
-    if !inner {
-        // outer (`as`): sentence + TRAILING whitespace, capped at a
-        // paragraph-boundary line (blank lines stay — vim 9.1: `das` on
-        // ["Aaa.","","Bbb."] keeps the empty line) and at the buffer-final
-        // newline (the last line's terminator is not "following white
-        // space": vim 9.1 `das` on "Aaa. Bbb." deletes " Bbb." — the
-        // leading fallback fires, and the buffer stays a proper single
-        // line). When there is NO trailing whitespace, the LEADING run is
-        // taken instead (`:h as`).
-        let mut o = term_end;
+fn sentence_range(
+    buf: &dyn VimBuffer,
+    offset: usize,
+    inner: bool,
+    count: usize,
+) -> Option<ObjectRange> {
+    // trailing-whitespace cap shared by the outer forms: sentence + the
+    // whitespace run after its terminator, capped at a paragraph boundary
+    // and at the buffer-final newline (`:h as`; the caps are 9.1-pinned in
+    // the original audit)
+    let outer_end = |term: usize| -> usize {
+        let mut o = term;
         while let Some(c) = buf.char_at(o) {
             if !c.is_whitespace() {
                 break;
@@ -393,13 +376,108 @@ fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Obj
             }
             o += c.len_utf8();
         }
-        if o > term_end {
-            return Some(ObjectRange::charwise(start, o));
+        o
+    };
+    let find_term = |from: usize, to: usize| -> usize {
+        (from..to)
+            .find(|&o| matches!(buf.char_at(o), Some('.' | '!' | '?')))
+            .map(|o| o + buf.char_at(o).map_or(1, |c| c.len_utf8()))
+            .unwrap_or(to)
+    };
+    // one PAST the cursor, at the next char boundary — a raw `offset + 1`
+    // lands mid-character on a multi-byte cursor char, where
+    // `prev_char_offset` is None and `prev_sentence` silently collapsed the
+    // sentence start to 0 (`dis` on "Hi. 你好 ok" deleted "Hi." instead of
+    // the sentence under the cursor)
+    let mut start = word::prev_sentence(
+        buf,
+        crate::buffer::next_grapheme_offset(buf, offset).unwrap_or(offset),
+    );
+    let next = word::next_sentence(buf, offset);
+    // `is` stops AT the sentence terminator — vim 9.1: `dis` on "Aaa. Bbb."
+    // deletes "Aaa." and keeps the trailing space in the next sentence's
+    // leading whitespace.
+    let mut term_end = find_term(start, next);
+    // audit5 B-11: the cursor sitting on the whitespace AFTER a sentence
+    // (past its terminator, before the next sentence's first char) makes
+    // `as` anchor on the NEXT sentence — that whitespace is the next
+    // sentence's LEADING run in vim's model. The engine used to delete the
+    // previous sentence from there.
+    let mut range_start = start;
+    let mut leading_ws = false;
+    let c_len = |buf: &dyn VimBuffer, o: usize| -> usize {
+        buf.char_at(o).map_or(1, |c| c.len_utf8())
+    };
+    let on_gap = offset >= term_end
+        && buf.char_at(offset).is_some_and(|c| c.is_whitespace());
+    if !inner && on_gap && next < buf.len() {
+        // the gap belongs to the anchored sentence's leading run: the `as`
+        // range starts where the previous sentence's terminator ended
+        range_start = term_end;
+        // the whitespace run rides at the FRONT of the anchored range; the
+        // sentence's own trailing run stays outside (oracle: `das` on the
+        // gap of "? And one more. And no…" deletes " And one more." and
+        // keeps BOTH spaces)
+        leading_ws = true;
+        let mut first = range_start;
+        while matches!(buf.char_at(first), Some(c) if c.is_whitespace()) {
+            first += c_len(buf, first);
         }
-        // the leading fallback stays WITHIN the sentence's own line (vim
-        // 9.1: `das` on the tail of ["Aaa.","","Bbb."] removes the sentence
-        // only — the blank line and its newlines stay put; `das` on the mid-
-        // line tail of "Aaa. Bbb." takes the single leading space)
+        start = first;
+        term_end = find_term(start, word::next_sentence(buf, start));
+    }
+    // COUNT semantics (9.1 oracle matrix on "Aa. Bb. Cc. Dd." +
+    // "A sentence.  A sentence?  A sentence!"): the boundary ALTERNATES
+    // between post-terminator and post-gap positions, one boundary per
+    // count step. `N-is`: N=1 → term0, N=2 → S1.start, N=3 → term1,
+    // N=4 → S2.start … (`3yis` = "A sentence.  A sentence?" — the last
+    // boundary EXCLUDES the gap). `N-as` lands on post-gap positions only:
+    // `N-as` end = S_N.start (`2yas` = "…A sentence?  ").
+    let count = count.max(1);
+    let count_end = if inner {
+        let mut end = term_end;
+        let mut at_term = true;
+        let mut sent = start;
+        for _ in 1..count {
+            if at_term {
+                sent = word::next_sentence(buf, sent);
+                end = sent;
+            } else {
+                end = find_term(sent, word::next_sentence(buf, sent));
+            }
+            at_term = !at_term;
+            if end >= buf.len() {
+                end = buf.len();
+                break;
+            }
+        }
+        end
+    } else {
+        // N-as ends on the N-th sentence's terminator; the trailing
+        // whitespace run is added by outer_end below (1yas = "A sentence.
+        //  " — the gap; B-11's anchored shape stops after "more.")
+        let mut sent = start;
+        for _ in 1..count {
+            sent = word::next_sentence(buf, sent);
+        }
+        let r = find_term(sent, word::next_sentence(buf, sent)).min(buf.len());
+        r
+    };
+    let _ = term_end;
+    if !inner {
+        // outer (`as`): sentence + TRAILING whitespace, capped at a
+        // paragraph-boundary line and the buffer-final newline. When there
+        // is NO trailing whitespace, the LEADING run is taken instead
+        // (`:h as`) — single-sentence shape only (the count shapes are not
+        // pinned for the leading fallback).
+        let o = if leading_ws { count_end } else { outer_end(count_end) };
+        if o > count_end {
+            return Some(ObjectRange::charwise(range_start, o));
+        }
+        if count > 1 {
+            return Some(ObjectRange::charwise(range_start, count_end.max(range_start)));
+        }
+        // the leading fallback stays WITHIN the sentence's own line
         let mut lead = start;
         let line_start = buf.line_start(buf.offset_to_line(start));
         while lead > line_start {
@@ -409,11 +487,9 @@ fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Obj
                 _ => break,
             }
         }
-        return Some(ObjectRange::charwise(lead, term_end.max(lead)));
+        return Some(ObjectRange::charwise(lead.min(range_start), term_end.max(lead.min(range_start))));
     }
-    // inner: `is` excludes LEADING whitespace too (`:h is`) — only reachable
-    // for a first sentence that starts after buffer-start indentation, since
-    // `prev_sentence` already skips the run after a terminator
+    // inner: `is` excludes LEADING whitespace too (`:h is`)
     let mut trimmed = start;
     while let Some(c) = buf.char_at(trimmed) {
         if c.is_whitespace() {
@@ -422,7 +498,20 @@ fn sentence_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<Obj
             break;
         }
     }
+    if count > 1 {
+        return Some(ObjectRange::charwise(trimmed, count_end.max(trimmed)));
+    }
     Some(ObjectRange::charwise(trimmed, term_end.max(trimmed)))
+}
+
+/// First terminator at/after `start` (its end), falling back to the next
+/// sentence's start — the single-sentence inner end.
+fn term_end_of(start: usize, buf: &dyn VimBuffer) -> usize {
+    let next = word::next_sentence(buf, start);
+    (start..next)
+        .find(|&o| matches!(buf.char_at(o), Some('.' | '!' | '?')))
+        .map(|o| o + buf.char_at(o).map_or(1, |c| c.len_utf8()))
+        .unwrap_or(next)
 }
 
 fn paragraph_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {
@@ -571,7 +660,32 @@ fn quote_range(
     let range = if inner {
         ObjectRange::charwise(open + quote.len_utf8(), close)
     } else {
-        ObjectRange::charwise(open, close + quote.len_utf8())
+        let end = close + quote.len_utf8();
+        // `a"` includes surrounding whitespace: the TRAILING run wins; with
+        // none on the same line the LEADING run is taken (audit5 B-8 /
+        // testdir Test_textobj_quote: `ya'` on "some    'special'    s"
+        // yanks "'special'    ", on "…'special'string" it yanks
+        // "    'special'"). The engine used to take the bare string both
+        // ways.
+        let mut trail = end;
+        while matches!(buf.char_at(trail), Some(' ') | Some('\t')) {
+            trail += 1;
+        }
+        if trail > end {
+            ObjectRange::charwise(open, trail)
+        } else {
+            let line_start = buf.line_start(buf.offset_to_line(open));
+            let mut lead = open;
+            while lead > line_start
+                && matches!(
+                    buf.prev_char_offset(lead).and_then(|p| buf.char_at(p)),
+                    Some(' ') | Some('\t')
+                )
+            {
+                lead = buf.prev_char_offset(lead).unwrap();
+            }
+            ObjectRange::charwise(lead, end)
+        }
     };
     // inner may be EMPTY (`ci"` on `""` inserts between the quotes, like
     // vim); only the outer form — which always spans both quotes — is
@@ -589,6 +703,7 @@ fn block_range(
     inner: bool,
     open: char,
     close: char,
+    count: usize,
 ) -> Option<ObjectRange> {
     // an OPEN bracket under the cursor opens the block (vim): scan forward
     // from the NEXT char. A close under the cursor must not count — the
@@ -615,15 +730,54 @@ fn block_range(
                 _ => {}
             }
         }
-        open_pos
+        match open_pos {
+            Some(p) => Some(p),
+            None => {
+                // vim (`:h i(` "when the cursor is not in a block"): search
+                // FORWARD for the first unmatched `open` (audit5 B-4..B-7 —
+                // `0di)` on "foo (bar (baz (quux)))" used to fail outright;
+                // surplus closers in front of it don't count). The COUNT
+                // counts unmatched opens forward — `02di)` enters the
+                // SECOND nesting level (testdir: → "foo (bar ())"), so the
+                // whole count is consumed here; the outer climb in
+                // object_span_count must not re-apply (it doesn't: the
+                // forward-found span's start is past the cursor)
+                let mut surplus = 0i32;
+                let mut o = offset;
+                let mut found = 0usize;
+                loop {
+                    match buf.char_at(o) {
+                        Some(c) if c == close => surplus += 1,
+                        Some(c) if c == open => {
+                            if surplus == 0 {
+                                found += 1;
+                                if found >= count.max(1) {
+                                    break;
+                                }
+                            } else {
+                                surplus -= 1;
+                            }
+                        }
+                        Some(_) => {}
+                        None => return None,
+                    }
+                    o = buf.next_char_offset(o)?;
+                }
+                Some(o)
+            }
+        }
     };
     let open_pos = open_pos?;
 
-    // scan forwards from the cursor for the innermost unmatched `close`
+    // scan forwards for the innermost unmatched `close`. A forward-found
+    // open starts the scan after itself (the cursor sits BEFORE the block,
+    // so scanning from it would double-count the open)
     let mut depth = 0i32;
     let mut close_pos = None;
     let mut o = if opened_here {
         buf.next_char_offset(offset)?
+    } else if open_pos > offset {
+        open_pos + open.len_utf8()
     } else {
         offset
     };
@@ -645,6 +799,19 @@ fn block_range(
         // empty pairs are fine: `ci(` on `()` must be able to insert between
         // the brackets (zero-width inner range)
         let start = open_pos + open.len_utf8();
+        // cross-line inner: vim takes the line AFTER the open through the
+        // line BEFORE the close — both surrounding newlines survive, so the
+        // lines never join (audit5 B-15: `di[` on " \n[\none [two]\nthre\n]"
+        // leaves " \n[\n]"; `di(` on the multi-line call leaves "x = (\n)")
+        let start_line = buf.offset_to_line(start);
+        let end_line = buf.offset_to_line(close_pos);
+        if end_line > start_line + 1 || (end_line == start_line + 1 && close_pos == buf.line_start(end_line)) {
+            let inner_start = buf.line_start(start_line + 1);
+            let inner_end = buf.line_range(end_line - 1).end;
+            if inner_start <= inner_end {
+                return Some(ObjectRange::charwise(inner_start, inner_end));
+            }
+        }
         Some(ObjectRange::charwise(start, close_pos))
     } else {
         Some(ObjectRange::charwise(
@@ -667,7 +834,34 @@ fn tag_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRa
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == b'<' {
-            if let Some(close_rel) = text[i..].find('>') {
+            // scan to the tag's REAL closing `>`: a `>` inside a quoted
+            // attribute value does not close the tag (audit5 B-14 — the
+            // bare `find('>')` truncated `<div attr="attr >> foo ">` at
+            // the first `>`, so `yit` yanked attribute text)
+            let mut j = i + 1;
+            let mut quote: Option<u8> = None;
+            let close_rel = loop {
+                if j >= bytes.len() {
+                    break None;
+                }
+                let b = bytes[j];
+                match quote {
+                    Some(q) => {
+                        if b == q {
+                            quote = None;
+                        }
+                    }
+                    None => {
+                        if b == b'"' || b == b'\'' {
+                            quote = Some(b);
+                        } else if b == b'>' {
+                            break Some(j - i);
+                        }
+                    }
+                }
+                j += 1;
+            };
+            if let Some(close_rel) = close_rel {
                 let inner_text = &text[i + 1..i + close_rel];
                 let (name, is_open) = if let Some(rest) = inner_text.strip_prefix('/') {
                     (
@@ -707,32 +901,34 @@ fn tag_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRa
     // range). The old strict `open_start < offset` skipped the open tag and
     // climbed to the parent — `dit` on `<div><p>x</p></div>` col 5 deleted
     // `<p>x</p>` where vim 9.1 deletes just `x`.
-    let mut stack: Vec<(usize, &str)> = Vec::new();
+    // (open_start, open_end, name) — the open tag's END rides along: the
+    // inner range starts there, and recomputing it with a bare `find('>')`
+    // re-introduced the quoted-`>` truncation (audit5 B-14)
+    let mut stack: Vec<(usize, usize, &str)> = Vec::new();
     // (open_start, close_start, close_end) of the best pair — close_start
     // is the closer's own `<`: `it` must end there, never swallow the tag
-    let mut best: Option<(usize, usize, usize)> = None;
+    let mut best: Option<(usize, usize, usize, usize)> = None;
     for (start, end, name, is_open) in tags {
         if is_open {
-            stack.push((start, name));
-        } else if let Some(pos) = stack.iter().rposition(|(_, n)| n.eq_ignore_ascii_case(name)) {
-            let (open_start, _) = stack[pos];
+            stack.push((start, end, name));
+        } else if let Some(pos) = stack.iter().rposition(|(_, _, n)| n.eq_ignore_ascii_case(name)) {
+            let (open_start, open_end, _) = stack[pos];
             stack.truncate(pos);
             if open_start <= offset && offset < end {
                 let better = match best {
-                    Some((bs, _, _)) => open_start > bs,
+                    Some((bs, _, _, _)) => open_start > bs,
                     None => true,
                 };
                 if better {
-                    best = Some((open_start, start, end));
+                    best = Some((open_start, open_end, start, end));
                 }
             }
         }
     }
-    let (open_start, close_start, close_end) = best?;
+    let (open_start, open_end, close_start, close_end) = best?;
     if inner {
         // empty elements (`<p></p>`) yield a zero-width inner range
-        let after_open = text[open_start..].find('>')? + open_start + 1;
-        Some(ObjectRange::charwise(after_open, close_start))
+        Some(ObjectRange::charwise(open_end, close_start))
     } else {
         Some(ObjectRange::charwise(open_start, close_end))
     }

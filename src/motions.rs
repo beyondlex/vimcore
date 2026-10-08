@@ -76,9 +76,10 @@ pub enum Motion {
         down: bool,
     },
     /// `gd` / `gD`: jump to the first whole-word declaration of the word
-    /// under the cursor — `gd` searches backward from the current line then
-    /// forward from the cursor; `gD` takes the first match in the file
-    /// (`:h gd`, audit F1)
+    /// `gd`/`gD`: jump to the (first whole-word match at/after the anchor
+    /// of the) declaration — `gD` anchors line 1; `gd` runs the `[[`
+    /// function-start search with blank-line backoff first (`:h gd`,
+    /// audit F1 + 2026-10-09 oracle 矩阵)
     SearchDeclaration {
         whole_file: bool,
     },
@@ -401,7 +402,14 @@ impl Motion {
                     }
                     o = next;
                 }
-                MotionResult::new(o, MotionKind::Exclusive)
+                if o == vim.cursor.offset {
+                    // stuck at the buffer start: vim's nv_bcmd beeps
+                    // (WordEndBack's twin — the ge arm got this first,
+                    // audit5 B-2: b/B at the origin were silently "fine")
+                    MotionResult::stuck(o)
+                } else {
+                    MotionResult::new(o, MotionKind::Exclusive)
+                }
             }
             // ge / gE: end of the previous word run
             Motion::WordEndBack { big } => {
@@ -688,19 +696,35 @@ impl Motion {
                 if matches.is_empty() {
                     return MotionResult::stuck(here);
                 }
-                let found = if whole_file {
-                    matches.first().cloned()
+                // `:h gd` 的锚定（2026-10-09 oracle 矩阵 T1-T5）：gD 锚在
+                // 行 1；gd 先向 [[ 找上一个第 1 列的 `{`——找不到就停在行 1
+                // 且**不**做空行回退，找到了才从 `{` 行向上越过非空行（空行
+                // 或行 1 截止）——然后从锚点行起向前搜全词匹配的第一个。
+                // 旧实现「光标前最近一次 / 光标后第一个」是另一套模型：
+                // 无函数结构的常见形状 vim 落行 1 的首个出现，旧实现落
+                // 光标前最近的一次。
+                let anchor = if whole_file {
+                    0
                 } else {
                     let cur_line = buf.offset_to_line(here);
-                    matches
-                        .iter()
+                    match (0..cur_line)
                         .rev()
-                        .find(|m| buf.offset_to_line(m.start) < cur_line)
-                        .cloned()
-                        .or_else(|| {
-                            matches.iter().find(|m| m.start >= here).cloned()
-                        })
+                        .find(|&l| buf.char_at(buf.line_start(l)) == Some('{'))
+                    {
+                        None => 0,
+                        Some(brace_line) => {
+                            let mut anchor = brace_line;
+                            while anchor > 0 && !buf.line_is_blank(anchor - 1) {
+                                anchor -= 1;
+                            }
+                            anchor
+                        }
+                    }
                 };
+                let found = matches
+                    .iter()
+                    .find(|m| buf.offset_to_line(m.start) >= anchor)
+                    .cloned();
                 match found {
                     Some(m) => MotionResult::new(m.start, MotionKind::Exclusive),
                     None => MotionResult::stuck(here),
@@ -722,6 +746,12 @@ impl Motion {
                                 MotionKind::Linewise,
                             )
                         } else {
+                            // `]` lands ON the stored mark with no step-back
+                            // (2026-10-09 oracle: after `0lliXYZ<Esc>` the
+                            // `] jump parks at byte 5 — one PAST 'Z', the
+                            // ins_esc b_op_end value verbatim; nv_brackets
+                            // has no dec here despite `:h ']
+                            // "last character" wording)
                             MotionResult::new(o, MotionKind::Exclusive)
                         }
                     }

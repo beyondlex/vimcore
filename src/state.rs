@@ -253,6 +253,19 @@ pub struct VimState {
     /// search-motion path (same crate, other module) checks whether the
     /// operator survived to the prompt's execute.
     pub(crate) op: Option<Operator>,
+    /// o_v/o_V: the pending `v`/`V` after an operator overrides the next
+    /// motion's kind (v = charwise inclusive, V = linewise — `:h o_v`;
+    /// audit5 B-9: `dvgo` used to bell on the `v`)
+    pub(crate) motion_force: Option<crate::motions::MotionKind>,
+    /// vim op_delete's use_reg_one: the operator's motion was one of the
+    /// special jumps (`%`, `` ` ``/`'`, `/`/`?`/`n`/`N`, `{`/`}`) — even a
+    /// single-line charwise delete then writes the numbered ring
+    /// (audit5 C-1..C-4)
+    pub(crate) use_reg_one: bool,
+    /// u_undoredo's uh_visual swap slot (audit5 C-19): the LAST VISUAL
+    /// selection as of the group's opening; undo/redo swap it with the live
+    /// value so `gv` re-selects the pre-change selection on restored text
+    pending_visual_swap: Option<(usize, usize, crate::mode::VisualKind)>,
     op_count: Option<usize>,
     cmd_seq: Vec<Key>,
     char_arg_cmd: Option<CharArgCmd>,
@@ -508,6 +521,9 @@ impl VimState {
             register: None,
             register_pending: false,
             op: None,
+            motion_force: None,
+            use_reg_one: false,
+            pending_visual_swap: None,
             op_count: None,
             cmd_seq: Vec::new(),
             char_arg_cmd: None,
@@ -1309,6 +1325,8 @@ impl VimState {
         self.register_pending = false;
         self.op = None;
         self.op_count = None;
+        self.motion_force = None;
+        self.use_reg_one = false;
         self.cmd_seq.clear();
         self.char_arg_cmd = None;
         self.char_arg = None;
@@ -1335,6 +1353,9 @@ impl VimState {
                 self.undo_seq += 1;
                 let id = self.undo_seq;
                 self.open_undo = Some(id);
+                // the pre-change selection is what undo must restore for
+                // `gv` (u_undoredo swaps uh_visual — audit5 C-19)
+                self.pending_visual_swap = self.marks.last_visual;
                 id
             }
         }
@@ -2398,6 +2419,7 @@ impl VimState {
         // vim 9.1 在空会话后清空 `".`，`<C-a>`/`<C-r>.` 不再粘出更早会话的
         // 陈旧文本（oracle：`ihi<Esc>i<Esc>` 后 `string(@.)` = ''——audit D7a）
         let text = std::mem::take(&mut self.insert_session_text);
+        let typed_anything = !text.is_empty();
         self.registers.store_last_insert(text);
         // count-repeat insert (`3ifoo<Esc>`): replicate the typed text while
         // the session's undo group is open and BEFORE the exit cursor
@@ -2452,6 +2474,16 @@ impl VimState {
         // engine parked ON the Y, so `gi` re-typed one char early)
         self.marks.last_insert_exit = Some(insert_exit);
         self.marks.set('^', insert_exit);
+        // `'[`/`']` change marks for the session (audit5 C-7/C-16/C-17 —
+        // ins_esc's b_op_start/b_op_end accounting; i/a/o/O/R and the
+        // c-family share this exit): '[ = first inserted char, '] = one
+        // past the last. Empty sessions leave the pair untouched, like vim.
+        if typed_anything {
+            if let Some(start) = self.insert_typed_start {
+                self.marks.set('[', start);
+                self.marks.set(']', insert_exit);
+            }
+        }
         // visual-block I/A/c: replicate the typed text onto the other rows
         // while the session's undo group is still open (one `u` restores
         // all). Rows BELOW the typing row shift by that row's exact byte
@@ -2730,7 +2762,9 @@ impl VimState {
                     Some(current) => self.options.set_boolean(name, !current),
                     None => false,
                 },
-                crate::config::Setting::Value(name, value) => self.options.set_value(name, value),
+                crate::config::Setting::Value(name, value) => {
+                    self.options.set_value(name, value).is_ok()
+                }
                 crate::config::Setting::Reset(name) => self.options.reset_value(name),
             };
             if ok {
@@ -2962,7 +2996,7 @@ impl VimState {
             .collect::<Vec<_>>()
             .join("\n");
         self.registers
-            .store_delete(register, text, crate::registers::RegisterKind::Blockwise);
+            .store_delete(register, text, crate::registers::RegisterKind::Blockwise, false);
     }
 
     fn apply_block_operator(&mut self, ctx: &mut Ctx, op: Operator) {
@@ -3003,6 +3037,7 @@ impl VimState {
                     self.register,
                     text,
                     crate::registers::RegisterKind::Blockwise,
+                    false,
                 );
                 self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &rows);
@@ -3073,7 +3108,7 @@ impl VimState {
                     .join("\n");
                 crate::registers::sync_clipboard_host(ctx.host, self.register, &text);
                 self.registers
-                    .store_delete(self.register, text, crate::registers::RegisterKind::Blockwise);
+                    .store_delete(self.register, text, crate::registers::RegisterKind::Blockwise, false);
                 self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &ranges);
                 self.bump(ctx);
@@ -3595,10 +3630,37 @@ impl VimState {
             {
                 if trigger == *c {
                     let count = self.take_total_count();
+                    // `3cc` with the count running past the last line fails
+                    // the WHOLE command — vim's op_change refuses to enter
+                    // insert on a phantom line (oracle x4: `G3ccX<Esc>` on
+                    // "a\nb" leaves both lines; audit5 B-18). dd/yy keep
+                    // their silent clamp.
+                    if self.op == Some(Operator::Change) {
+                        let line = ctx.buf.offset_to_line(self.cursor.offset);
+                        if line + count.saturating_sub(1) > ctx.buf.line_count() - 1 {
+                            self.note_bell(ctx);
+                            self.reset_pending();
+                            return ProcessOutcome::Consumed;
+                        }
+                    }
                     let span = self.linewise_span_at_cursor(ctx, count);
                     self.complete_operator_with_span(ctx, span);
                     return ProcessOutcome::Consumed;
                 }
+            }
+        }
+
+        // o_v / o_V (`:h o_v`): after an operator, a plain `v`/`V` forces
+        // the next motion charwise-inclusive / linewise (audit5 B-9 — the
+        // key used to trie-miss and cancel `dvgo` entirely)
+        if self.op.is_some() && self.cmd_seq.is_empty() {
+            if key == crate::key::Key::char('v') {
+                self.motion_force = Some(crate::motions::MotionKind::Inclusive);
+                return ProcessOutcome::Consumed;
+            }
+            if key == crate::key::Key::char('V') {
+                self.motion_force = Some(crate::motions::MotionKind::Linewise);
+                return ProcessOutcome::Consumed;
             }
         }
 
@@ -4074,7 +4136,21 @@ impl VimState {
                         .char_at(self.cursor.offset)
                         .is_some_and(|c| !c.is_whitespace());
                 if self.op.is_some() {
-                    let result = motion.target(self, ctx, count);
+                    // op_delete's use_reg_one: special-jump motions shift the
+                    // numbered ring even for small deletes
+                    self.use_reg_one = matches!(
+                        motion,
+                        Motion::MatchBracket
+                            | Motion::ParaNext
+                            | Motion::ParaPrev
+                            | Motion::SearchNext { .. }
+                            | Motion::MarkJump { .. }
+                    );
+                    let mut result = motion.target(self, ctx, count);
+                    // o_v/o_V override the motion's own kind
+                    if let Some(force) = self.motion_force.take() {
+                        result.kind = force;
+                    }
                     if !result.moved {
                         // `dl`/`d<Space>` at the line END still includes the
                         // char under the cursor (`dl` ≡ `x`, `:h x` — audit
@@ -4572,6 +4648,29 @@ impl VimState {
         };
         self.edit_generation += 1;
         self.sanitize_stored_offsets(ctx.buf);
+        // u_undoredo swaps the stored visual selection with the live one —
+        // undo restores the pre-change selection, redo swaps it back
+        // (audit5 C-19: `vlly dd u gvy` yanks "abcd" again)
+        if let Some(saved) = self.pending_visual_swap.take() {
+            self.pending_visual_swap = self.marks.last_visual;
+            // the restored text may be shorter than the recorded selection
+            // (undo past it to an earlier state) — clamp the pair onto the
+            // restored buffer so gv stays addressable
+            let lo = crate::buffer::floor_to_char_boundary(ctx.buf, saved.0.min(ctx.buf.len()));
+            let hi = crate::buffer::floor_to_char_boundary(ctx.buf, saved.1.min(ctx.buf.len()));
+            self.marks.last_visual = Some((lo, hi, saved.2));
+        }
+        // `'[`/`']`: both marks point at the stepped change's FIRST line,
+        // column 0 (audit5 C-6 — oracle `3|x u` → (1,1), `<C-r>` ditto)
+        {
+            let line = ctx.buf.offset_to_line(clamp_cursor(
+                ctx.buf,
+                crate::buffer::floor_to_char_boundary(ctx.buf, offset),
+            ));
+            let ls = ctx.buf.line_start(line);
+            self.marks.set('[', ls);
+            self.marks.set(']', ls);
+        }
         if !undo {
             // the redo re-applies the deletion: the restored marks are
             // UNSET (vim 9.1 oracle: getpos("'a") = 0,0 after `ma dd u
@@ -4694,6 +4793,16 @@ impl VimState {
             // probe: `3S` on lines 2-4 clears exactly those three)
             NormalCmd::SubstituteLine => {
                 let count = self.take_total_count();
+                // a count reaching past the last line fails the WHOLE
+                // command — vim does not enter insert and does not touch
+                // the buffer (oracle x4: `G3ccX<Esc>` on "a\nb" leaves
+                // both lines; audit5 B-18 — the engine clamped and typed
+                // into a shortened change)
+                let line = ctx.buf.offset_to_line(self.cursor.offset);
+                if line + count.saturating_sub(1) > ctx.buf.line_count() - 1 {
+                    self.note_bell(ctx);
+                    return;
+                }
                 let span = self.linewise_span_at_cursor(ctx, count);
                 let gen = self.edit_generation;
                 self.begin_edit();
@@ -5223,7 +5332,6 @@ impl VimState {
                         ctx.buf,
                         crate::buffer::floor_to_char_boundary(ctx.buf, self.jumps[self.jump_pos]),
                     );
-                    eprintln!("DBG C-o cursor={}", self.cursor.offset);
                     self.cursor.desired_col = None;
                     ctx.host
                         .scroll_to_line(ctx.buf.offset_to_line(self.cursor.offset));
@@ -5350,6 +5458,16 @@ impl VimState {
     /// Visual-block `p`/`P`: a blockwise register replaces the block row by
     /// row; any other register's text is replicated onto every row.
     fn block_put_replace(&mut self, ctx: &mut Ctx) {
+        self.block_put_replace_impl(ctx, false);
+    }
+
+    /// audit5 C-14: `P` in block visual deletes the selection into the
+    /// blackhole and keeps the paste source registers untouched.
+    fn block_put_replace_keep(&mut self, ctx: &mut Ctx) {
+        self.block_put_replace_impl(ctx, true);
+    }
+
+    fn block_put_replace_impl(&mut self, ctx: &mut Ctx, keep_registers: bool) {
         let register = self.register.unwrap_or(crate::registers::UNNAMED);
         let Some(block) = ops::span_from_visual_block(self, ctx.buf) else {
             self.note_bell(ctx);
@@ -5373,7 +5491,9 @@ impl VimState {
         // mirror / delete targets even when the PASTE came from an explicit
         // register (`"a` stays untouched — 9.1 probe `viw"ap` leaves "a").
         // Rows sliced BEFORE the deletions.
-        self.store_block_rows(ctx, &block.rows, None);
+        // keep_registers (P): the replaced block goes to the blackhole —
+        // nothing recorded, the paste source survives
+        self.store_block_rows(ctx, &block.rows, if keep_registers { Some('_') } else { None });
         self.begin_edit();
         let cursor_to = block.rows.first().map(|r| r.start).unwrap_or(0);
         match data.kind {
@@ -5559,6 +5679,102 @@ impl VimState {
                 // rectangle on the next span read (audit E2)
                 self.block_cursor_col = Some(a_col);
                 self.block_anchor_vcol = Some(c_col);
+                self.cursor.desired_col = None;
+            }
+            VisualCmd::InsertAtSelection { append } => {
+                // v/V's I/A: one insert at the selection's start row (I) /
+                // one append at the selection end (A), then Normal — the
+                // per-row replication is block-mode only (audit5 C-11/C-12;
+                // oracle VjI-<Esc> → "-aa, VjA-<Esc> → aa,-bb)
+                let Some((anchor, cursor, kind)) = self.visual_selection() else {
+                    return;
+                };
+                let (lo, hi) = (anchor.min(cursor), anchor.max(cursor));
+                // append lands at the LIVE CURSOR end (2026-10-09 oracle:
+                // V+A inserts at the cursor's own position — line-kind
+                // cursor sits at the last line's start, giving "-bb"; v+A
+                // appends after the highlighted char)
+                let pos = if append {
+                    match kind {
+                        // the line-kind visual cursor is clamped ON the last
+                        // char — the oracle's landing (start of that line)
+                        // is the line's own start
+                        crate::mode::VisualKind::Line => {
+                            ctx.buf.line_start(ctx.buf.offset_to_line(self.cursor.offset))
+                        }
+                        _ => crate::buffer::next_grapheme_offset(ctx.buf, hi).unwrap_or(hi),
+                    }
+                } else {
+                    match kind {
+                        crate::mode::VisualKind::Line => {
+                            ctx.buf.first_non_blank(ctx.buf.offset_to_line(lo))
+                        }
+                        _ => lo,
+                    }
+                };
+                self.exit_visual(ctx);
+                self.cursor.offset = pos;
+                self.cursor.desired_col = None;
+                // the position is already exact — plain Insert (an
+                // AppendLineEnd here would re-park the cursor at the line
+                // end and undo the landing above)
+                self.start_insert(ctx, InsertKind::Insert);
+            }
+            VisualCmd::PutReplaceKeep => {
+                // nv_put_opt's keep_registers = (cmdchar == 'P'): the replaced
+                // selection is DELETED (blackhole — nothing recorded), the
+                // paste source survives untouched (audit5 C-13/C-14)
+                if matches!(
+                    self.mode,
+                    Mode::Visual {
+                        kind: crate::mode::VisualKind::Block
+                    }
+                ) {
+                    self.block_put_replace_keep(ctx);
+                    return;
+                }
+                let register = self.register.unwrap_or(crate::registers::UNNAMED);
+                let Some(span) = ops::span_from_visual(self, ctx.buf) else {
+                    return;
+                };
+                let Some(stashed) = self.registers.get_for_paste(register, ctx.host) else {
+                    self.note_bell(ctx);
+                    return;
+                };
+                self.begin_edit();
+                // blackhole delete: no register side effects at all
+                let _ = std::mem::take(&mut self.use_reg_one);
+                let saved_register = self.register;
+                self.register = Some('_');
+                ops::delete_span(self, ctx, &span, Some('_'));
+                self.register = saved_register;
+                {
+                    let data = stashed;
+                    let repeated = crate::registers::clamped_repeat(
+                        &data.text,
+                        self.take_total_count().max(1),
+                    );
+                    if data.kind == crate::registers::RegisterKind::Linewise {
+                        let text = if repeated.ends_with('\n') {
+                            repeated
+                        } else {
+                            format!("{repeated}\n")
+                        };
+                        let at = ctx.buf.line_start(ctx.buf.offset_to_line(span.start));
+                        self.edit_insert(ctx, at, &text);
+                        self.cursor.offset =
+                            ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
+                    } else {
+                        self.edit_insert(ctx, span.start.min(ctx.buf.len()), &repeated);
+                        let end = span.start + repeated.len();
+                        self.cursor.offset =
+                            crate::buffer::prev_grapheme_offset(ctx.buf, end)
+                                .unwrap_or(span.start);
+                    }
+                }
+                self.end_edit();
+                self.bump(ctx);
+                self.reset_pending();
                 self.cursor.desired_col = None;
             }
             VisualCmd::PutReplace => {

@@ -306,25 +306,55 @@ impl Registers {
 
     /// Delete semantics: explicit register, else the numbered ring for
     /// multi-line deletes and `"-` for small deletes.
-    pub fn store_delete(&mut self, explicit: Option<char>, text: String, kind: RegisterKind) {
+    ///
+    /// `use_reg_one` (audit5 C-1..C-4): deletes whose MOTION was a special
+    /// jump (`%`, `` ` ``/`'`, `/`/`?`/`n`/`N`, `{`/`}`) write the numbered
+    /// ring even for a single-line charwise delete (vim op_delete's
+    /// `use_reg_one` → shift_delete_registers). With an explicit named
+    /// register the ring still shifts and `"1` is written, but `"-` is NOT
+    /// (oracle: `"ad%` → @1 + @a, `"-` unset).
+    pub fn store_delete(
+        &mut self,
+        explicit: Option<char>,
+        text: String,
+        kind: RegisterKind,
+        use_reg_one: bool,
+    ) {
         match explicit {
-            Some(name) => self.store_ext(name, text, kind, true),
+            Some(name) => {
+                if use_reg_one {
+                    self.shift_numbered_ring();
+                    self.store('1', text.clone(), kind);
+                    self.store_ext(name, text, kind, true);
+                } else {
+                    self.store_ext(name, text, kind, true);
+                }
+            }
             None => {
                 let multi_line = text.contains('\n');
-                if kind == RegisterKind::Linewise || multi_line {
-                    // shift 1..8 -> 2..9, then record into "1
-                    for i in (2..=9usize).rev() {
-                        let from = char::from(b'0' + (i - 1) as u8);
-                        let to = char::from(b'0' + i as u8);
-                        if let Some(r) = self.named.get(&from) {
-                            let r = r.clone();
-                            self.named.insert(to, r);
-                        }
-                    }
-                    self.store('1', text, kind);
-                } else {
+                let big = kind == RegisterKind::Linewise || multi_line;
+                // the ring shift + `"1` and the small-delete `"-` are TWO
+                // INDEPENDENT writes in op_delete — a use_reg_one small
+                // delete hits BOTH (oracle: `d%` → @1 + @- + @")
+                if big || use_reg_one {
+                    self.shift_numbered_ring();
+                    self.store('1', text.clone(), kind);
+                }
+                if !big {
                     self.store(SMALL_DELETE, text, kind);
                 }
+            }
+        }
+    }
+
+    /// shift 1..8 -> 2..9, then the caller records into "1
+    fn shift_numbered_ring(&mut self) {
+        for i in (2..=9usize).rev() {
+            let from = char::from(b'0' + (i - 1) as u8);
+            let to = char::from(b'0' + i as u8);
+            if let Some(r) = self.named.get(&from) {
+                let r = r.clone();
+                self.named.insert(to, r);
             }
         }
     }
