@@ -103,3 +103,25 @@ fn reg_listing_uses_vim_layout() {
         "命名寄存器 a 同版式"
     );
 }
+
+#[test]
+fn redo_unsets_marks_undo_restores_again() {
+    // 9.1 oracle：`ma dd u` 恢复 mark（行末字符），`<C-r>` 把它**取消**
+    // （getpos("'a") = 0,0），再 `u` 又恢复。旧行为 redo 后 mark 滞留
+    // 在恢复位（列漂移形状）。
+    let mut f = Fixture::at("  foo\nbar\nbaz\n", 0, 2);
+    f.feed(["m", "a", "d", "d", "u"]);
+    assert_eq!(f.text(), "  foo\nbar\nbaz\n");
+    // u 后光标在 undo 提示位（行首）；mark 本身恢复到行末字符
+    assert_eq!(f.vim.marks.resolve('a', &f.buf), Some(4), "E4：mark 恢复");
+    f.feed(["<C-r>"]); // C-r
+    assert_eq!(f.text(), "bar\nbaz\n", "redo 重新删除");
+    f.feed(["`", "a"]);
+    assert!(
+        f.host.statuses.iter().any(|s| s.contains("E20")),
+        "redo 后 mark 'a 未设置（vim 9.1 oracle getpos = 0,0）"
+    );
+    f.feed(["u"]);
+    f.feed(["`", "a"]);
+    assert_eq!(f.cursor(), 4, "再 undo 又恢复（oracle 1,3 = 行末字符）");
+}
