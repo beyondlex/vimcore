@@ -197,8 +197,6 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.motion_all(&[" "], Motion::Right);
     b.motion_all(&["j"], Motion::Down);
     b.motion_all(&["k"], Motion::Up);
-    b.motion_all(&["g", "j"], Motion::Down); // no soft wrap in v1
-    b.motion_all(&["g", "k"], Motion::Up);
     b.motion_all(&["0"], Motion::LineStart);
     b.motion_all(&["^"], Motion::FirstNonBlank);
     b.motion_all(&["$"], Motion::LineEnd);
@@ -263,6 +261,14 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // the delete operator through the trie-miss retry)
     b.motion_all(&["g", "d"], Motion::SearchDeclaration { whole_file: false });
     b.motion_all(&["g", "D"], Motion::SearchDeclaration { whole_file: true });
+    // go: jump to byte [count] (`:h go`, audit B9 — the miss degraded into
+    // a count-carrying `o` that OPENED LINES)
+    b.motion_all(&["g", "o"], Motion::GoToByte);
+    // gm: half a screen row across (audit B5)
+    b.motion_all(&["g", "m"], Motion::ScreenRowMiddle);
+    // gj / gk: screen-line moves (audit B6 — they were aliases of j/k)
+    b.motion_all(&["g", "j"], Motion::ScreenLine { down: true });
+    b.motion_all(&["g", "k"], Motion::ScreenLine { down: false });
     b.motion_all(&["|"], Motion::Column);
     b.motion_all(&["H"], Motion::ScreenTop);
     b.motion_all(&["M"], Motion::ScreenMiddle);
@@ -533,6 +539,12 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["z", "z"], CmdKind::Normal(NormalCmd::ScrollCenter));
     b.normal(&["z", "t"], CmdKind::Normal(NormalCmd::ScrollTop));
     b.normal(&["z", "b"], CmdKind::Normal(NormalCmd::ScrollBottom));
+    // z<CR> / z. / z- — the same three anchors under their other spellings
+    // (`:h z<CR>`; audit B10 — the missing keys degraded: `z.` fell through
+    // to RepeatChange and re-ran the last edit!)
+    b.normal(&["z", "<CR>"], CmdKind::Normal(NormalCmd::ScrollTop));
+    b.normal(&["z", "."], CmdKind::Normal(NormalCmd::ScrollCenter));
+    b.normal(&["z", "-"], CmdKind::Normal(NormalCmd::ScrollBottom));
     // visual 模式同款:滚动 + 保留选区(round11 悬置闭环,vim 行为)
     b.visual(
         &["z", "z"],
@@ -633,6 +645,11 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // replayed key resolves the selection, exactly like vim.
     b.visual(&["@"], CmdKind::Normal(NormalCmd::PlayMacro));
     b.visual(&["d"], CmdKind::Operator(Operator::Delete));
+    // `!` filter and `=` reindent operators (audit B3/B4)
+    b.normal(&["!"], CmdKind::Operator(Operator::Filter));
+    b.visual(&["!"], CmdKind::Operator(Operator::Filter));
+    b.normal(&["="], CmdKind::Operator(Operator::Reindent));
+    b.visual(&["="], CmdKind::Operator(Operator::Reindent));
     b.visual(&["x"], CmdKind::Operator(Operator::Delete));
     // visual `D`: blockwise — block column to each row's end; char/line —
     // span start to that line's end (`:h v_D`, audit G2)

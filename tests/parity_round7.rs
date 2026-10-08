@@ -57,10 +57,11 @@ fn gv_restores_selection_after_visual_change() {
     assert_eq!(f.buf.slice(0..f.buf.len()), "X beta\ngamma\n");
     f.feed(["g", "v"]);
     let sel = f.vim.visual_selection().expect("gv 应恢复选区");
-    assert_eq!(sel.0, 0, "gv 起点 = 原选区起点");
+    // 9.1 oracle 矩阵（audit C12）：gv 的 CHARWISE 复选是**反向**选区
+    // ——锚点在末字符、光标在起点
+    assert_eq!(sel.0, 4, "gv 锚点 = 原选区末字符");
     assert_eq!(sel.2, VisualKind::Char);
-    // vim 探针：'> 保持原偏移（gv 重选原字节范围 0..5）
-    assert_eq!(sel.1, 4, "gv 终点 = 原选区末字符（编辑前范围）");
+    assert_eq!(sel.1, 0, "gv 光标 = 原选区起点");
 }
 
 /// 块插入 `C-v jj I` 后 `gv` 恢复原块。vim 9.1 探针：`'<`/`'>` 落在
@@ -76,6 +77,7 @@ fn gv_restores_block_after_block_insert() {
     let sel = f.vim.visual_selection().expect("gv 应恢复块选区");
     assert_eq!(sel.2, VisualKind::Block);
     assert_eq!(sel.0, 0, "块起点 = 原块首（L0 行首）");
+    // 块 gv 的光标回到块末行行首（光标端随编辑漏斗移到编辑后坐标）
     assert_eq!(sel.1, 6, "块终点 = 原块末（L2 行首，编辑前偏移）");
 }
 
@@ -156,11 +158,12 @@ fn visual_colon_keeps_prompt_time_range_in_marks() {
     // audit E3：`'>` 解析到选区**末字符**（'o' = offset 4），不再暴露
     // 排他端字节；gv 的内部存储仍是 0..5
     assert_eq!(gt, 4, "'> = 提示符时选区末字符，不随命令后的光标塌缩");
-    // gv 复选原选区（0..5，cursor 停在末字符 o=4）
+    // gv 复选原选区（0..5；9.1 oracle 矩阵，audit C12：CHARWISE gv 是
+    // 反向选区——锚点在末字符、光标在起点）
     f.feed(["g", "v"]);
     assert_eq!(
         f.vim.visual_selection().map(|(a, c, _)| (a, c)),
-        Some((0, 4)),
+        Some((4, 0)),
         "gv 应恢复 hello 的选区"
     );
 }

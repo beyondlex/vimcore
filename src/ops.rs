@@ -31,6 +31,17 @@ pub enum Operator {
     Uppercase,
     ToggleCase,
     Format,
+    /// `!{motion}{cmd}` — pipe the lines through a shell command (audit B3;
+    /// the engine spawns `sh -c` itself, exactly like vim does)
+    Filter,
+    /// `={motion}` — reindent by the built-in rules (audit B4; without a
+    /// filetype only the `'lisp'` rule is deterministic, so that is the
+    /// one modeled)
+    Reindent,
+    /// block `C`/`S`: change each highlighted row from the block's left
+    /// column to that row's END — one line per highlighted line survives
+    /// (`:h v_b_C`, audit C10; the LinewiseOp spelling collapsed the rows)
+    BlockChangeToEnd,
 }
 
 /// A concrete span to operate on.
@@ -173,9 +184,20 @@ pub fn span_from_motion(
         // always promotes (crossing up implies the cursor is at the line
         // start, i.e. at/before its first non-blank) — guard anyway.
         if target_line > start_line {
+            // the phantom landing (past the buffer end) is column 1 of the
+            // line AFTER the last one: rule (a)'s "end of the previous line"
+            // is the LAST line's end — the clamp pulled `target_line` onto
+            // that last line, so `target_line - 1` was the CURSOR's own line
+            // and the span crossed the join point (`d}` from mid-line merged
+            // two lines, audit B13)
+            let end_line = if phantom {
+                start_line.max(target_line)
+            } else {
+                target_line - 1
+            };
             return OpSpan {
                 start,
-                end: buf.line_end(target_line - 1),
+                end: buf.line_end(end_line),
                 linewise: false,
             };
         }
@@ -398,8 +420,9 @@ pub fn block_row_range(
     line: usize,
     col_lo: usize,
     col_hi: usize,
+    ts: usize,
 ) -> Range<usize> {
-    use crate::buffer::char_display_width;
+    use crate::buffer::char_display_width_at;
     let start = buf.line_start(line);
     let end = buf.line_end(line);
     let mut o = start;
@@ -408,7 +431,7 @@ pub fn block_row_range(
     let mut hi = start;
     while o < end {
         let Some(c) = buf.char_at(o) else { break };
-        let w = char_display_width(c);
+        let w = char_display_width_at(c, col, ts);
         if col >= col_hi {
             break;
         }
@@ -429,7 +452,7 @@ pub fn block_row_range(
             let mut hi = hi;
             while hi < end {
                 match buf.char_at(hi) {
-                    Some(c) if c == '\u{200D}' || char_display_width(c) == 0 => hi += c.len_utf8(),
+                    Some(c) if c == '\u{200D}' || crate::buffer::char_display_width(c) == 0 => hi += c.len_utf8(),
                     _ => break,
                 }
             }
@@ -474,13 +497,46 @@ pub fn span_from_visual_block(
     // both block edges are VIRTUAL columns: the cursor edge via
     // `block_cursor_col` (audit G1/G3), the anchor edge via
     // `block_anchor_vcol` — after `o`/`O` the anchor byte sits clamped on a
-    // short row and its display column would shrink the rectangle (audit E1)
+    // short row and its display column would shrink the rectangle (audit E1).
+    // Each edge is clamped to ITS OWN ROW's exclusive width at read time:
+    // the curswant survives short rows (audit C2 — vim's j over an empty
+    // line shows a zero-width rectangle there and restores the full width
+    // on the way back)
+    let a_row = buf.offset_to_line(anchor);
+    let c_row = buf.offset_to_line(cursor);
     let a_col = vim
         .block_anchor_vcol
-        .unwrap_or_else(|| crate::buffer::display_column(buf, anchor));
+        .unwrap_or_else(|| crate::buffer::display_column(buf, anchor))
+        .min(crate::buffer::display_column(buf, buf.line_end(a_row)));
     let c_col = vim
         .block_cursor_col
-        .unwrap_or_else(|| crate::buffer::display_column(buf, cursor));
+        .unwrap_or_else(|| crate::buffer::display_column(buf, cursor))
+        .min(crate::buffer::display_column(buf, buf.line_end(c_row)));
+    // An anchor sitting ON a TAB snaps the block's left edge to the tab's
+    // END and measures the width as the cursor/anchor column distance + 1
+    // (audit C15 — 9.1 oracle matrix at ts=4: `\tab` + `<C-v>l` covers
+    // cols 4..6 = "ab" on the tab row, "ef" on the next; `<C-v>` alone
+    // covers just col 4 = 'a'/'e'. The old ts=1 model read cols 0..2 and
+    // shredded the tab.)
+    if buf.char_at(anchor) == Some('\t') {
+        let ts = vim.options.tabstop.max(1);
+        let a_col_raw = vim
+            .block_anchor_vcol
+            .unwrap_or_else(|| crate::buffer::display_column(buf, anchor));
+        let tab_end = (a_col_raw / ts + 1) * ts;
+        let width = c_col.saturating_sub(a_col_raw) + 1;
+        let (col_lo, col_hi) = (tab_end, tab_end + width);
+        let rows = (first_line..=last_line)
+            .map(|line| block_row_range(buf, line, col_lo, col_hi, vim.options.tabstop))
+            .collect();
+        return Some(BlockSpan {
+            col_lo,
+            col_hi,
+            first_line,
+            rows,
+            dollar: false,
+        });
+    }
     let (col_lo, col_hi) = if a_col <= c_col {
         (a_col, c_col)
     } else {
@@ -488,7 +544,7 @@ pub fn span_from_visual_block(
     };
     // the cursor char is part of the block: exclusive end = corner col + 1
     let rows = (first_line..=last_line)
-        .map(|line| block_row_range(buf, line, col_lo, col_hi + 1))
+        .map(|line| block_row_range(buf, line, col_lo, col_hi + 1, vim.options.tabstop))
         .collect();
     Some(BlockSpan {
         col_lo,
@@ -551,6 +607,91 @@ pub fn apply(
         vim.marks.set(']', mark_end);
     }
     match op {
+        // block `C`/`S` resolve in apply_block_operator (visual block mode
+        // dispatches straight there); unreachable from here
+        Operator::BlockChangeToEnd => {}
+        // `!{motion}`: park the span and open the `!` prompt — the command
+        // text arrives on Enter (audit B3)
+        Operator::Filter => {
+            vim.filter_span = Some(*span);
+            vim.begin_cmdline('!');
+        }
+        // `={motion}`: reindent per the built-in rules — with no filetype
+        // the only deterministic rule is `'lisp'` (audit B4); without it
+        // vim has no rule either, so the text is left alone
+        Operator::Reindent => {
+            if !vim.options.lisp {
+                return;
+            }
+            let buf = &*ctx.buf;
+            let first_line = buf.offset_to_line(span.start);
+            let last_line = last_line_of_span(buf, span);
+            // paren stack over every line ABOVE the span: the innermost
+            // unclosed `(` gives the lisp indent column (col + 1)
+            let mut stack: Vec<usize> = Vec::new();
+            for line in 0..first_line {
+                let ls = buf.line_start(line);
+                let le = buf.line_end(line);
+                let mut col = 0usize;
+                let mut o = ls;
+                while o < le {
+                    match buf.char_at(o) {
+                        Some('(') => {
+                            stack.push(col);
+                            col += 1;
+                        }
+                        Some(')') => {
+                            stack.pop();
+                            col += 1;
+                        }
+                        Some(c) => col += crate::buffer::char_display_width(c),
+                        None => break,
+                    }
+                    o += buf.char_at(o).map(|c| c.len_utf8()).unwrap_or(1);
+                }
+            }
+            let mut lines: Vec<String> = Vec::new();
+            for line in first_line..=last_line {
+                let ls = buf.line_start(line);
+                let le = buf.line_end(line);
+                let text = buf.slice(ls..le);
+                let trimmed = text.trim_start();
+                let indent = stack.last().map(|c| c + 1).unwrap_or(0);
+                lines.push(format!("{}{}", " ".repeat(indent), trimmed));
+                // the line's own parens feed the NEXT line's indent
+                let mut col = indent;
+                for c in trimmed.chars() {
+                    match c {
+                        '(' => {
+                            stack.push(col);
+                            col += 1;
+                        }
+                        ')' => {
+                            stack.pop();
+                            col += 1;
+                        }
+                        other => col += crate::buffer::char_display_width(other),
+                    }
+                }
+            }
+            let mut new_text = lines.join("\n");
+            let start = buf.line_start(first_line);
+            let end = buf.line_range(last_line).end;
+            // the replaced range includes the last line's own newline when
+            // the span reaches the buffer end — keep it
+            if buf.char_at(end.saturating_sub(1)) == Some('\n') {
+                new_text.push('\n');
+            }
+            let gen = vim.edit_generation;
+            vim.begin_edit();
+            vim.edit_replace(ctx, start..end, &new_text);
+            vim.end_edit();
+            vim.cursor.offset = crate::buffer::clamp_cursor(ctx.buf, start);
+            vim.cursor.desired_col = None;
+            if vim.edit_generation != gen {
+                vim.bump(ctx);
+            }
+        }
         Operator::Delete => {
             let mut span = *span;
             // object spans keep their exact bounds: vim's `daw` at a line
@@ -1005,7 +1146,7 @@ pub fn put_ex(
     leave_after: bool,
 ) {
     let Some(data) = vim.registers.get_for_paste(register, ctx.host) else {
-        ctx.host.bell();
+        vim.note_bell(ctx);
         return;
     };
     // A linewise register always represents WHOLE lines, so an empty one is

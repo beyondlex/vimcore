@@ -276,7 +276,9 @@ fn bang_on_delete_yank_reports_e477() {
     assert!(last.starts_with("E477"), "got {last:?}");
 
     let f2 = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "y", "!", "<CR>"]);
-    assert_eq!(f2.host.statuses.last().unwrap(), "E477: No ! allowed: 1,2y!");
+    // audit A15：vim 9.1 的 E477 不带原命令行后缀（round14 的"带原行"结论
+    // 是当年 oracle 误读，messages 采样复验）
+    assert_eq!(f2.host.statuses.last().unwrap(), "E477: No ! allowed");
     assert_eq!(
         f2.vim.registers.get('0').map(|r| r.text.as_str()),
         None,

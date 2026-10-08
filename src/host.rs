@@ -66,6 +66,13 @@ pub trait VimHost {
     /// or `None` if there is nothing to undo.
     fn undo(&mut self) -> Option<usize>;
 
+    /// The host's window width in display columns (`'columns'`). Only the
+    /// screen-row motion family (`gm`/`gj`/`gk`) consults it; the default
+    /// is vim's own 80-column fallback for heads without a real terminal.
+    fn columns(&self) -> usize {
+        80
+    }
+
     /// Redo. Same contract as [`VimHost::undo`].
     fn redo(&mut self) -> Option<usize>;
 

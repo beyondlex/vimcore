@@ -23,6 +23,10 @@ pub struct Register {
 /// the register named `"` itself and mirrors every write (vim semantics).
 #[derive(Clone, Debug, Default)]
 pub struct Registers {
+    /// Bumped on EVERY register write (audit D4): the macro player compares
+    /// it against its per-register sync mark to notice `"ayy`-style
+    /// overwrites without losing unserializable recorded keys.
+    pub(crate) write_gen: u64,
     named: HashMap<char, Register>,
     /// Last written register for unnamed access.
     last: Option<Register>,
@@ -172,6 +176,25 @@ impl Registers {
         );
     }
 
+    /// A letter register's raw text, if set (audit D4 — the macro/register
+    /// unification reads it).
+    pub fn named_text(&self, name: char) -> Option<String> {
+        self.named.get(&name).map(|r| r.text.clone())
+    }
+
+    /// Write a letter register directly WITHOUT touching the unnamed/yank
+    /// bookkeeping (the macro recorder's register mirror, audit D4b).
+    pub fn store_named_plain(&mut self, name: char, text: String) {
+        self.write_gen += 1;
+        self.named.insert(
+            name,
+            Register {
+                text,
+                kind: RegisterKind::Charwise,
+            },
+        );
+    }
+
     /// `"=` — store the expression prompt's evaluated result (audit C9).
     /// Read-only through the write funnels like the other specials.
     pub fn store_expression(&mut self, text: String) {
@@ -194,6 +217,7 @@ impl Registers {
     /// oracle: `p` after `"Ayy` pastes both lines, after `"Add` only the
     /// just-deleted text — audit C8).
     pub fn store_ext(&mut self, name: char, text: String, kind: RegisterKind, unnamed_new_piece: bool) {
+        self.write_gen += 1;
         let register = Register {
             text: text.clone(),
             kind,

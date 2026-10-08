@@ -434,6 +434,9 @@ fn substitute_cursor_survives_length_changing_earlier_lines() {
 fn gv_restores_forward_selection() {
     // exit_visual used to re-read the selection AFTER parking the cursor on
     // the selection start, collapsing forward selections to one char
+    // 9.1 oracle 复验（2026-10-08）：gv 把 CHARWISE 复选摆成**反向**选区
+    // ——光标落在起点（v3l<Esc>gv 与反向 vb<Esc>gv 都落 offset 0）、锚点
+    // 在终点；旧钉的 (0,3) 是当时引擎行为，非 vim。
     let f = edit(
         "abcdef\nghijkl\n",
         0,
@@ -442,13 +445,13 @@ fn gv_restores_forward_selection() {
     );
     assert_eq!(f.vim.mode_indicator(), "VISUAL");
     let (a, c, _) = f.vim.visual_selection().unwrap();
-    assert_eq!((a, c), (0, 3), "gv must restore the forward 0..3 selection");
+    assert_eq!((a, c), (3, 0), "gv must restore the forward 0..3 span, cursor at start");
 
     // backward selections kept working before; keep them covered
     let f = edit("abcdef\nghijkl\n", 0, 3, &["v", "b", "<Esc>", "g", "v"]);
     let (a, c, _) = f.vim.visual_selection().unwrap();
     // gv re-anchors at the range start; the SPAN is what must survive
-    assert_eq!((a, c), (0, 3), "backward gv keeps the same span");
+    assert_eq!((a, c), (3, 0), "backward gv keeps the same span, cursor at start");
 }
 
 // ---- <c-a> lowercase modifier spellings ------------------------------------------

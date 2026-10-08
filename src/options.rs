@@ -17,6 +17,7 @@ const BOOL_TABLE: &[(&str, &[&str])] = &[
     ("incsearch", &["is"]),
     ("showmode", &["smd"]),
     ("showcmd", &["sc"]),
+    ("lisp", &[]),
 ];
 
 /// Numeric `name=value` options and their aliases.
@@ -74,6 +75,8 @@ pub struct Options {
     pub incsearch: bool,
     pub showmode: bool,
     pub showcmd: bool,
+    /// `'lisp'` — the built-in indent rule `=` uses without a filetype
+    pub lisp: bool,
 }
 
 impl Default for Options {
@@ -92,6 +95,7 @@ impl Default for Options {
             hlsearch: true,
             incsearch: true,
             showmode: true,
+            lisp: false,
             showcmd: true,
         }
     }
@@ -119,6 +123,7 @@ impl Options {
             "incsearch" => self.incsearch = value,
             "showmode" => self.showmode = value,
             "showcmd" => self.showcmd = value,
+            "lisp" => self.lisp = value,
             _ => unreachable!("BOOL_TABLE and this match are out of sync"),
         }
         true
@@ -137,6 +142,7 @@ impl Options {
             "incsearch" => Some(self.incsearch),
             "showmode" => Some(self.showmode),
             "showcmd" => Some(self.showcmd),
+            "lisp" => Some(self.lisp),
             _ => unreachable!("BOOL_TABLE and this match are out of sync"),
         }
     }
@@ -210,6 +216,7 @@ impl Options {
             "incsearch" => self.incsearch = defaults.incsearch,
             "showmode" => self.showmode = defaults.showmode,
             "showcmd" => self.showcmd = defaults.showcmd,
+            "lisp" => self.lisp = defaults.lisp,
             _ => unreachable!("BOOL_TABLE and this match are out of sync"),
         }
         true

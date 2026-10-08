@@ -860,12 +860,13 @@ fn visual_marks_shift_and_gv_tracks_the_text() {
     assert_eq!(f.text(), "aa\nx\nbbbb\n");
     assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(5));
     assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(7)); // 最后选中字符（E3）
-                                                   // gv restores the selection over the SHIFTED text
+                                                   // gv restores the selection over the SHIFTED text（9.1 oracle 矩阵，
+    // audit C12：CHARWISE gv 是反向选区——锚点在末字符、光标在起点）
     f.feed(["g", "v"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
     assert_eq!(
         f.vim.visual_selection().map(|(a, c, _)| (a, c)),
-        Some((5, 7))
+        Some((7, 5))
     );
 }
 
@@ -1103,9 +1104,11 @@ fn dot_ignores_visual_canceled_and_non_changes() {
     let mut f = Fixture::at("abc def\n", 0, 0);
     f.feed(["x"]); // last change = x
     assert_eq!(f.text(), "bc def\n");
+    // 9.1 oracle 复验（2026-10-08）：Esc 后光标停在可视光标端（audit C11
+    // ——"xvl<Esc>." → "b def"，光标 1,2），`.` 在光标端重放 x
     f.feed(["v", "l", "<Esc>"]);
     f.feed(["."]);
-    assert_eq!(f.text(), "c def\n");
+    assert_eq!(f.text(), "b def\n");
 
     // a canceled operator (d<Esc>) doesn't leak into the next change
     let mut f = Fixture::at("abcd\n", 0, 0);

@@ -14,7 +14,15 @@ pub enum Class {
 }
 
 pub fn char_class(c: char) -> Class {
-    if c.is_whitespace() {
+    // vim's utf_class blanks are ONLY ' ' and '\t': a bare CR (^M inside a
+    // line) is punctuation, and `w` must stop on it (audit B8 — the
+    // `char::is_whitespace` blanket put it in the Blank class and word
+    // motions sailed across)
+    if c == ' ' || c == '\t' {
+        Class::Blank
+    } else if c == '\r' {
+        Class::Punct
+    } else if c.is_whitespace() {
         Class::Blank
     } else if c.is_alphanumeric() || c == '_' {
         Class::Word
@@ -128,9 +136,13 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
     // forward mirror of `prev_word_start`'s `is_cont` arm (round 24 fixed
     // `b` but missed `w`: `a \u{0301}bc` parked mid-cluster).
     loop {
-        // skip spaces/tabs (any whitespace) on this line
+        // skip BLANK-class chars on this line (class_at, not the
+        // is_whitespace blanket — a bare \r is Punct and `w` must stop on
+        // it, audit B8)
         while let Some(c) = buf.char_at(o) {
-            if (c.is_whitespace() && c != '\n') || is_cont(c) {
+            if c != '\n'
+                && (class_at(buf, o, big) == Some(Class::Blank) || is_cont(c))
+            {
                 o += c.len_utf8();
             } else {
                 break;
