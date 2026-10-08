@@ -64,6 +64,17 @@ pub enum Motion {
         /// old keys degraded to whole-word `*`/`#`)
         substring: bool,
     }, // * / # / g* / g#
+    /// `go`: jump to byte [count] (1-based; `:h go`, audit B9)
+    GoToByte,
+    /// `gm`: half a screen row across (`:h gm`, audit B5 — the engine has no
+    /// soft wrap, so this is display column `columns/2` of the current line)
+    ScreenRowMiddle,
+    /// `gj` / `gk`: one SCREEN row down/up (`:h gj`, audit B6). With no
+    /// soft wrap modeled these move within the line by one `'columns'`
+    /// multiple and fall back to j/k at the line's screen edges.
+    ScreenLine {
+        down: bool,
+    },
     /// `gd` / `gD`: jump to the first whole-word declaration of the word
     /// under the cursor — `gd` searches backward from the current line then
     /// forward from the cursor; `gD` takes the first match in the file
@@ -189,6 +200,7 @@ impl Motion {
                 | Motion::SearchNext { .. }
                 | Motion::StarSearch { .. }
                 | Motion::SearchDeclaration { .. }
+                | Motion::GoToByte
                 | Motion::Section { .. }
                 | Motion::ParaNext
                 | Motion::ParaPrev
@@ -578,6 +590,85 @@ impl Motion {
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
             }
+            // go: byte [count] (1-based), floored to a char boundary
+            Motion::GoToByte => {
+                let target = count.max(1).saturating_sub(1).min(buf.len());
+                let target = crate::buffer::floor_to_char_boundary(buf, target);
+                MotionResult::new(target, MotionKind::Exclusive)
+            }
+            // gm: half a screen row across (audit B5)
+            Motion::ScreenRowMiddle => {
+                let columns = ctx.host.columns();
+                let want = columns.max(2) / 2;
+                let line = buf.offset_to_line(vim.cursor.offset);
+                let target = crate::buffer::offset_for_display_column_with(
+                    buf,
+                    line,
+                    want,
+                    vim.options.tabstop,
+                );
+                MotionResult::new(target, MotionKind::Exclusive)
+            }
+            // gj / gk: one screen row down/up. Without a wrap model these
+            // walk `'columns'`-wide display rows WITHIN the line and fall
+            // back to the plain j/k at the edges (audit B6)
+            Motion::ScreenLine { down } => {
+                let columns = ctx.host.columns().max(1);
+                let here = vim.cursor.offset;
+                let line = buf.offset_to_line(here);
+                let col = vim.display_column_ts(buf, here);
+                let row = col / columns;
+                let le = buf.line_end(line);
+                let width = vim.display_column_ts(buf, le);
+                if down {
+                    let want = (row + 1) * columns;
+                    if want <= width {
+                        let target = crate::buffer::offset_for_display_column_with(
+                            buf,
+                            line,
+                            want,
+                            vim.options.tabstop,
+                        );
+                        MotionResult::new(target, MotionKind::Exclusive)
+                    } else {
+                        // past this line's last screen row: plain j fallback
+                        // (computed inline — the buf borrow spans the arm)
+                        let next = line + 1;
+                        if next >= buf.line_count() {
+                            return MotionResult::stuck(here);
+                        }
+                        let target = crate::buffer::offset_for_display_column_with(
+                            buf,
+                            next,
+                            col,
+                            vim.options.tabstop,
+                        );
+                        MotionResult::new(target, MotionKind::Linewise)
+                    }
+                } else {
+                    if row > 0 {
+                        let want = (row - 1) * columns;
+                        let target = crate::buffer::offset_for_display_column_with(
+                            buf,
+                            line,
+                            want,
+                            vim.options.tabstop,
+                        );
+                        MotionResult::new(target, MotionKind::Exclusive)
+                    } else {
+                        if line == 0 {
+                            return MotionResult::stuck(here);
+                        }
+                        let target = crate::buffer::offset_for_display_column_with(
+                            buf,
+                            line - 1,
+                            col,
+                            vim.options.tabstop,
+                        );
+                        MotionResult::new(target, MotionKind::Linewise)
+                    }
+                }
+            }
             // gd / gD: jump to the declaration of the word under the cursor.
             // gd scans from the START of the current line backward, then
             // forward from the cursor; gD takes the first match in the file
@@ -646,52 +737,115 @@ impl Motion {
                 backward,
                 method,
             } => {
-                let last = buf.line_count() as i64 - 1;
-                let mut line = buf.offset_to_line(vim.cursor.offset) as i64;
-                let step: i64 = if backward { -1 } else { 1 };
                 let want = count.max(1);
-                let mut seen = 0usize;
-                let mut found: Option<usize> = None;
-                while (line + step) >= 0 && (line + step) <= last {
-                    line += step;
-                    let l = line as usize;
-                    let ls = buf.line_start(l);
-                    let le = buf.line_end(l);
-                    if le == ls {
-                        continue;
-                    }
-                    // a column-1 brace: a section stop (skipped for methods)
-                    if buf.char_at(ls) == Some(ch) {
-                        if !method {
-                            seen += 1;
-                            if seen >= want {
-                                found = Some(ls);
-                                break;
+                // the METHOD flavors ([m/]m/[M/]M) and the SECTION flavors
+                // (]]/[[/][/[]) follow different models:
+                //
+                // SECTIONS: the next/previous COLUMN-1 brace (`:h ]]`),
+                // linewise-style line starts.
+                //
+                // METHODS (oracle matrix, BUG_AUDIT3 挂账 2 — vim 9.1
+                // probes): `]m`/`[m` land on the first brace (ANY kind, ANY
+                // column) after/before the cursor; `]M`/`[M` land on the
+                // first brace too, UNLESS it is an opener whose
+                // nesting-match exists with braces beyond the match — then
+                // they land on the MATCH (the method's end). `[count]`
+                // iterates the rule. (The C source's nv_bracket_block
+                // PHASE1/PHASE2 + findmatchlimit produce these shapes; the
+                // closed form here is the observable contract.)
+                let open = if ch == '{' { '}' } else { '{' };
+                let mut braces: Vec<usize> = Vec::new();
+                {
+                    let here = vim.cursor.offset;
+                    // one walk over the buffer, keeping braces strictly
+                    // after (forward) / strictly before (backward) the
+                    // cursor, in scan order (backward = reverse)
+                    let mut collected: Vec<usize> = Vec::new();
+                    let mut o = 0usize;
+                    while o < buf.len() {
+                        if let Some(c) = buf.char_at(o) {
+                            if (c == '{' || c == '}')
+                                && ((backward && o < here) || (!backward && o > here))
+                            {
+                                collected.push(o);
                             }
-                        }
-                        continue;
-                    }
-                    if method {
-                        // the first brace NOT in column 1 on this line
-                        let mut o = ls;
-                        while o < le {
-                            if buf.char_at(o) == Some(ch) {
-                                seen += 1;
-                                if seen >= want {
-                                    found = Some(o);
-                                }
-                                break;
-                            }
-                            o += buf.char_at(o).map(|c| c.len_utf8()).unwrap_or(1);
-                        }
-                        if found.is_some() {
+                            o += c.len_utf8();
+                        } else {
                             break;
+                        }
+                    }
+                    if backward {
+                        collected.reverse();
+                    }
+                    braces = collected;
+                }
+                let mut found: Option<usize> = None;
+                if !method {
+                    // sections: column-1 braces only, in line order
+                    let ls_only: Vec<usize> = braces
+                        .iter()
+                        .copied()
+                        .filter(|o| {
+                            buf.char_at(*o) == Some(ch)
+                                && buf.line_start(buf.offset_to_line(*o)) == *o
+                        })
+                        .collect();
+                    found = ls_only.get(want - 1).copied();
+                } else if ch == open {
+                    // ]m / [m: the [count]-th brace, any kind
+                    found = braces.get(want - 1).copied();
+                } else {
+                    // ]M / [M: first brace; an opener whose match exists
+                    // with braces beyond the match lands the MATCH
+                    let mut idx = 0usize;
+                    for _ in 0..want {
+                        let Some(b1) = braces.get(idx).copied() else {
+                            break;
+                        };
+                        if buf.char_at(b1) == Some(ch) {
+                            // the flavor's own kind: land it
+                            found = Some(b1);
+                            idx += 1;
+                        } else {
+                            // the other kind: nesting-match from b1
+                            let mut depth = 1usize;
+                            let mut m: Option<usize> = None;
+                            for (j, o) in braces.iter().enumerate().skip(idx + 1) {
+                                let c = buf.char_at(*o);
+                                let is_open = c == Some(open);
+                                depth = if is_open { depth + 1 } else { depth - 1 };
+                                if depth == 0 {
+                                    m = Some(*o);
+                                    idx = j + 1;
+                                    break;
+                                }
+                            }
+                            match m {
+                                Some(m_pos) if braces[idx..].iter().any(|o| *o > m_pos) => {
+                                    // the method closes AND more braces
+                                    // follow: land the method's end
+                                    found = Some(m_pos);
+                                }
+                                _ => {
+                                    // unterminated method (or nothing past
+                                    // its end): land the opener/closer b1
+                                    found = Some(b1);
+                                    idx += 1;
+                                }
+                            }
+                        }
+                        if found.is_some() && want > 1 && false {
+                            // counts iterate via the idx cursor above
                         }
                     }
                 }
                 match found {
-                    Some(o) if method => MotionResult::new(o, MotionKind::Inclusive),
-                    Some(o) => MotionResult::new(o, MotionKind::Linewise),
+                    // both section flavors are EXCLUSIVE motions (`:h ]]`,
+                    // `:h ]m` — audit B11/B14; the column-1 rule (a) then
+                    // promotes operator spans exactly like vim). The old
+                    // Linewise/Inclusive kinds made `d]]` wipe whole lines
+                    // and `d]m` swallow the brace.
+                    Some(o) => MotionResult::new(o, MotionKind::Exclusive),
                     None => MotionResult::stuck(vim.cursor.offset),
                 }
             }

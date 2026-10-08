@@ -344,6 +344,14 @@ impl VimState {
                 max_digits,
                 mut buffer,
             } => {
+                // an incomplete numeric quote CANCELS on Esc and the Esc
+                // still exits insert mode (audit D6 — the old code parsed
+                // the partial digits, inserting a NUL for `0`, and ate the
+                // Esc)
+                if key == Key::escape() || key == Key::ctrl_char('[') {
+                    self.exit_insert(ctx);
+                    return true;
+                }
                 if let Some(d) = key.printable_char().filter(|c| c.is_digit(base)) {
                     buffer.push(d);
                     if buffer.chars().count() < max_digits {
@@ -366,6 +374,11 @@ impl VimState {
                 max_digits,
                 mut buffer,
             } => {
+                // incomplete hex quote: Esc cancels and exits (audit D6)
+                if key == Key::escape() || key == Key::ctrl_char('[') {
+                    self.exit_insert(ctx);
+                    return true;
+                }
                 if let Some(d) = key.printable_char().filter(|c| c.is_ascii_hexdigit()) {
                     buffer.push(d);
                     if buffer.chars().count() < max_digits {
@@ -465,6 +478,10 @@ impl VimState {
                         }
                         self.republish_search(ctx);
                         self.cursor.offset = prev;
+                        // the repeat's net text loses its last char, so
+                        // `3Rab<BS>` repeats "a" three times (audit D5 —
+                        // vim's BS never cancels a count repeat)
+                        self.count_insert_backspace();
                         ctx.host.changed();
                     }
                     // position mismatch (or empty stack): vim leaves
@@ -778,12 +795,19 @@ impl VimState {
         self.begin_edit();
         self.edit_replace(ctx, ls..ls + old_bytes, &new_indent);
         self.republish_search(ctx);
-        // the cursor follows its character: only text PAST the indent shifts
-        self.cursor.offset = if at > ls + old_bytes {
+        // the cursor follows its character: text PAST the indent shifts, and
+        // a typing point AT the indent end rides the new indent (`3i<C-t>x`:
+        // x must land AFTER the added shiftwidth — oracle K1, audit D10)
+        self.cursor.offset = if at >= ls + old_bytes {
+            // the typing point rides the new indent (`3i<C-t>x`: x lands
+            // AFTER the added shiftwidth — oracle K1, audit D10)
             at - old_bytes + new_indent.len()
         } else {
             at.min(ls + new_indent.len())
         };
+        // the indent bytes are part of what the session landed: the count-
+        // repeat's cursor invariant must cover them
+        self.count_insert_indent(&new_indent);
         ctx.host.changed();
     }
 

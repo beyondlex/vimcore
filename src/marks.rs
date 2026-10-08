@@ -25,6 +25,10 @@ pub struct Marks {
     /// (vim's line/col marks survive the op and, after undo, the original
     /// text re-projects onto them; 9.1 probes).
     pub last_visual: Option<(usize, usize, VisualKind)>,
+    /// The live CURSOR end of the stored selection (audit C12/C13): `gv`
+    /// puts the cursor back on whichever end was live, and a linewise
+    /// selection keeps its cursor COLUMN. Rides the ordinary funnel shifts.
+    pub last_visual_cursor: Option<usize>,
     /// Live `(anchor, cursor_end)` of the current visual selection, kept in
     /// sync by the engine (used for `'<`/`'>` inside visual mode).
     pub(crate) active_visual: Option<(usize, usize)>,
@@ -180,6 +184,9 @@ impl Marks {
         if let Some((a, b, _)) = self.last_visual.as_mut() {
             f(a);
             f(b);
+        }
+        if let Some(p) = self.last_visual_cursor.as_mut() {
+            f(p);
         }
         // the live selection rides along: edits DO happen while it is
         // active (an Ex command run from the visual `:` prompt), and an
