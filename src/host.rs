@@ -57,6 +57,12 @@ pub trait VimHost {
 
     /// Begin an undo group. The engine assigns a fresh monotonically
     /// increasing id per logical undo unit; edits sharing an id (an insert
+    ///
+    /// CONTRACT (audit5 C-15): a group whose id differs from the currently
+    /// open one is a FRESH change — implementations must clear their redo
+    /// stack at this point (vim's undo is a tree: a new change after an
+    /// undo invalidates `<C-r>`). The engine announces a group only through
+    /// the edit funnels, never around its own undo/redo swaps.
     /// session) belong to the same group and the host must merge them.
     /// `cursor_offset` is the engine cursor *before* the group's first edit —
     /// the natural place to restore the cursor to on undo.

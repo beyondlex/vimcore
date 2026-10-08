@@ -93,7 +93,14 @@ pub enum VisualCmd {
     /// `O` (block mode only): cursor to the same column on the block's other
     /// row-end (vim: "same column, but cursor at the other end").
     SwapEndsKeepCol, // O
-    PutReplace, // p / P replace selection
+    PutReplace, // p replace selection (swap registers)
+    PutReplaceKeep, // P replace selection (nv_put_opt keep_registers: the
+                    // replaced text goes to the blackhole, the paste source
+                    // survives — audit5 C-13/C-14)
+    /// v/V's `I`/`A`: insert once at the selection's start row / append once
+    /// at its end (audit5 C-11/C-12 — the per-row replication is block-mode
+    /// only)
+    InsertAtSelection { append: bool },
     /// `g C-a`: SEQUENTIAL increment — each selected line's number grows by
     /// one more than the previous (audit K1)
     SequentialIncrement,
@@ -604,6 +611,16 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
         CmdKind::EnterInsert(InsertKind::InsertFirstNonBlank),
     );
     b.normal(&["A"], CmdKind::EnterInsert(InsertKind::AppendLineEnd));
+    // v/V's I/A insert ONCE at the selection's start/end and exit (audit5
+    // C-11/C-12 — the visual trie missed both, belled and kept the selection)
+    b.visual(
+        &["I"],
+        CmdKind::Visual(VisualCmd::InsertAtSelection { append: false }),
+    );
+    b.visual(
+        &["A"],
+        CmdKind::Visual(VisualCmd::InsertAtSelection { append: true }),
+    );
     b.normal(
         &["o"],
         CmdKind::EnterInsert(InsertKind::OpenLine { below: true }),
@@ -692,7 +709,7 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.visual(&["g", "~"], CmdKind::Operator(Operator::ToggleCase));
     b.visual(&["g", "q"], CmdKind::Operator(Operator::Format));
     b.visual(&["p"], CmdKind::Visual(VisualCmd::PutReplace));
-    b.visual(&["P"], CmdKind::Visual(VisualCmd::PutReplace));
+    b.visual(&["P"], CmdKind::Visual(VisualCmd::PutReplaceKeep));
     b.visual(&["r"], CmdKind::Visual(VisualCmd::ReplaceChar));
     b.visual(&["J"], CmdKind::Visual(VisualCmd::Join { literal: false }));
     // `g C-a`: sequential increment over the selection's lines

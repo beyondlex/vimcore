@@ -641,6 +641,7 @@ fn fuzz_random_key_sequences_hold_invariants() {
     .to_vec();
     let mut state: u64 = 0x5EED_2026;
     for round in 0..500 {
+
         let initial = match round % 7 {
             0 => "",
             1 => "a",
@@ -1152,11 +1153,14 @@ fn r_ctrl_e_y_copies_from_neighbor_line() {
     // 计数：3r<C-E> 复制 3 个字符
     let f = edit("abc\nXYZW\n", 0, 0, &["3", "r", "<C-e>"]);
     assert_eq!(f.text(), "XYZ\nXYZW\n");
-    // 下方行太短 → 整条取消 + 响铃
+    // 邻行取不到字符的位是【跳过】不是整条取消（2026-10-09 oracle 复验
+    // 翻转旧钉：`abc`+`XY` 上 3r<C-E> → `XYc`，keys 通道 writefile 实
+    // 证；normal.c nv_replace 的 NUL 臂只 ++col，无 E 报文。旧断言
+    // 「整条取消 + 响铃」为当初采样误读）。同族：`abcdef`+`abX` 上
+    // `0ll2r<C-E>` → `abXdef`，光标落最后处理位。
     let mut f = Fixture::at("abc\nXY\n", 0, 0);
     f.feed(["3", "r", "<C-e>"]);
-    assert_eq!(f.text(), "abc\nXY\n");
-    assert!(f.host.bells > 0);
+    assert_eq!(f.text(), "XYc\nXY\n");
 }
 
 /// 未设 mark 的 `'z` / `` `z `` 走 vim 的消息通道（E20），不再只有哑铃。
@@ -1269,6 +1273,7 @@ fn word_object_probe_floors_to_char_boundary_at_line_end() {
             inner: true,
             big: false,
         },
+        1,
     );
     assert_eq!(r.map(|x| (x.start, x.end)), Some((7, 10)));
 }
@@ -1794,15 +1799,19 @@ fn sort_unknown_flag_reports_e475_and_skips() {
 
 #[test]
 fn sort_numeric_flag_orders_by_first_number() {
-    // `n` 旗标：按行内第一个十进制数排序（vim :h :sort）；无数值的行视为
-    // 0；等值行保持原序（stable），`u` 按 sort 键去重。
+    // `n` 旗标：按行内第一个十进制数排序；【无数值的行整段排在数字行
+    // 之前】（2026-10-09 oracle 复验翻转旧钉：`abc/5/-3/7/x` 上 :sort n
+    // → `abc x -3 5 7`，非数字段前置；test_sort.vim Test_sort_large_num
+    // 同文 "Non-numeric lines are ordered before numerical lines"。旧断
+    // 言「无数字行视为 0 混进数字段」为当初误读）。等值行保持原序
+    // （stable），`u` 按 sort 键去重。
     let mut f = Fixture::new("10 apples\n2 bananas\nno number\n-3 x");
     f.feed([":"]);
     for c in "%sort n".chars() {
         f.feed_raw(vimcore::key::Key::char(c));
     }
     f.feed_raw(Key::enter());
-    assert_eq!(f.text(), "-3 x\nno number\n2 bananas\n10 apples");
+    assert_eq!(f.text(), "no number\n-3 x\n2 bananas\n10 apples");
     // nu：数值去重
     let mut g = Fixture::new("2 a\n10 b\n2 c\nzzz");
     g.feed([":"]);

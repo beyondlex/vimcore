@@ -152,15 +152,29 @@ impl Options {
     /// `>>`), and a typo like `:set sw=99999999999` must not hand the host a
     /// gigabyte allocation. 1e6 columns is far past any real use; vim caps
     /// these options at 2^31-1 instead (documented divergence).
-    pub fn set_value(&mut self, name: &str, value: &str) -> bool {
+    ///
+    /// Errors carry vim's message: `ts=0` is E487 "Argument must be
+    /// positive" (audit5 A-13 — the engine silently accepted tabstop=0 and
+    /// every column computation then leaned on `.max(1)`), and a tabstop
+    /// past the cap is E474 "Invalid argument" instead of a silent clamp to
+    /// another value (audit5 A-14). `sw=0`/`tw=0` stay legal like vim.
+    pub fn set_value(&mut self, name: &str, value: &str) -> Result<(), String> {
         const MAX_OPTION_VALUE: usize = 1_000_000;
         let Some(canon) = canonical_value(name) else {
-            return false;
+            return Err(format!("E518: Unknown option: {name}"));
         };
         // every numeric option is a usize today, so one parse serves all
         let Ok(v) = value.parse::<usize>() else {
-            return false;
+            return Err(format!("E521: Number required after =: {name}={value}"));
         };
+        if canon == "tabstop" {
+            if v == 0 {
+                return Err(format!("E487: Argument must be positive: ts={value}"));
+            }
+            if v > MAX_OPTION_VALUE {
+                return Err(format!("E474: Invalid argument: ts={value}"));
+            }
+        }
         let v = v.min(MAX_OPTION_VALUE);
         match canon {
             "tabstop" => self.tabstop = v,
@@ -169,7 +183,7 @@ impl Options {
             "scrolloff" => self.scrolloff = v,
             _ => unreachable!("VALUE_TABLE and this match are out of sync"),
         }
-        true
+        Ok(())
     }
 
     /// True when `name` (canonical or alias) names a numeric option —

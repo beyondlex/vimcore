@@ -202,12 +202,56 @@ pub fn span_from_motion(
             };
         }
     }
+    if result.kind == MotionKind::Exclusive
+        // nv_cursormark/nv_mark set vim's end_adjusted: rule (a) does NOT
+        // apply to `` ` ``/`'` motions — `d`a` keeps its raw exclusive span
+        // and JOINS the lines (oracle one two/three four; audit5 B-20's
+        // upward extension below must respect the same exclusion)
+        && !matches!(motion, Motion::MarkJump { .. })
+        && target_line < start_line
+        && start == buf.line_start(start_line)
+    {
+        // UPWARD exclusive whose span END (the cursor side) sits in column
+        // 1: vim's rule (a) moves the end to the END of the previous line —
+        // the newline survives and the lines never join (audit5 B-20:
+        // `2Gdb` on "one two\nfoo" deletes "two" leaving "one \nfoo"; the
+        // old comment claimed upward always promotes, which was only true
+        // for the COLUMN-1 LANDING shape above). An EMPTY adjacent line
+        // contributes its own start only: line_end of "" is its newline
+        // position and stays outside the span (audit5 B-3: `3Gy2b` yanks
+        // "two\n", not "two\n\n")
+        return OpSpan {
+            start: target,
+            end: buf.line_end(start_line - 1),
+            linewise: false,
+        };
+    }
 
     let (lo, hi) = if target >= start {
         (start, target)
     } else {
         (target, start)
     };
+    // vim's exclusive rule 3 (`:h exclusive`): an INCLUSIVE motion whose
+    // start is at or before the first non-blank moves its start to the
+    // first non-blank (audit5 B-12: `dg_` on "  ab  cd  " deletes only
+    // "ab  cd" — the leading blanks survive with the trailing ones). Only
+    // the downward/cursor-side shape adjusts here; the upward cursor side
+    // is the span's hi and has no pinned oracle shape.
+    let mut lo = lo;
+    if result.kind == MotionKind::Inclusive
+        && target >= start
+        && start <= buf.first_non_blank(start_line)
+    {
+        // guards: an all-whitespace line has no content start (the fnb
+        // probe clamps onto the LAST char — parity T6: dg_ on "   " deletes
+        // 1..3 chars from the cursor), and a zero-width span has nothing to
+        // move
+        let fnb = buf.first_non_blank(start_line);
+        if fnb < buf.line_end(start_line) && lo < hi {
+            lo = lo.max(fnb);
+        }
+    }
     let end = match result.kind {
         MotionKind::Inclusive => {
             // an inclusive span must never swallow the newline itself —
@@ -265,7 +309,7 @@ pub fn object_span_count(
     object: objects::TextObject,
     count: usize,
 ) -> Option<OpSpan> {
-    let mut range = objects::range(buf, vim.cursor.offset, object)?;
+    let mut range = objects::range(buf, vim.cursor.offset, object, count)?;
     // a count repeats the object by RE-SCANNING from the span's end (vim
     // 9.1: `v2aw` covers "foo bar ", `v2i"` both quoted strings, `v2i(`
     // climbs to the enclosing block, `v2ap` the next paragraph — all fall
@@ -273,7 +317,29 @@ pub fn object_span_count(
     // counting: `2iw` = "foo " (word + its trailing blank run), `3iw` =
     // "foo bar" on "foo bar baz". The old engine dropped the count
     // entirely, so `d2aw` behaved as `daw`.
-    for _ in 1..count.max(1) {
+    // Block: a forward-found block consumed the count (the count-th
+    // unmatched opener). Sentence: the count steps sentences inside
+    // sentence_range — either way the climb below must not re-apply.
+    let count_consumed = match &object {
+        // a block found by the FORWARD search consumed the count (the
+        // count-th unmatched opener); a block the cursor is INSIDE —
+        // including ON its open bracket — must still climb
+        objects::TextObject::Block { open, .. } => {
+            range.start > vim.cursor.offset
+                && buf.char_at(vim.cursor.offset) != Some(*open)
+        }
+        objects::TextObject::Sentence { .. } => true,
+        _ => false,
+    };
+    // count-beyond detection (audit5 B-13/B-16: `3yap` without a third
+    // paragraph and `y3aw` without a third word both BEEP and select
+    // nothing — testdir assert_beeps). `done` counts SELECTED OBJECTS; the
+    // word-family's line-break bridge (below) extends one object across
+    // the newline and must not count as an extra one. A forward-found
+    // block consumed the whole count inside block_range (the count-th
+    // unmatched opener) — count it as satisfied.
+    let mut done = if count_consumed { count.max(1) } else { 1usize };
+    for _ in 1..if count_consumed { 1 } else { count.max(1) } {
         let mut probe = range.end.min(buf.len());
         // an INNER block's end sits just past its closer; re-probing there
         // re-selects the same block (zero progress). Step over the closer so
@@ -284,27 +350,41 @@ pub fn object_span_count(
                 probe += close.len_utf8();
             }
         }
-        match objects::range(buf, probe, object) {
+        match objects::range(buf, probe, object, 1) {
             Some(next) if next.end > range.end || next.start < range.start => {
                 range.start = range.start.min(next.start);
                 range.end = range.end.max(next.end);
+                done += 1;
             }
             // an outer-word probe sitting ON a line terminator re-selects
             // nothing (the raw range floors back INTO the line just
             // covered): vim continues across the break — newline, any
             // swallowed empty lines, then the next word with its trailing
             // blanks (`d2aw` on "ab cd\nef gh" covers " cd\nef "; on
-            // "foo\n\nbar" it empties the buffer — audit B1)
+            // "foo\n\nbar" it empties the buffer — audit B1). The bridge
+            // belongs to the object it extends: `done` does not advance.
             _ if matches!(object, objects::TextObject::Word { inner: false, .. })
                 && buf.char_at(probe) == Some('\n') =>
             {
                 match objects::newline_word_span(buf, big_of(object), probe) {
-                    Some(next) if next.end > range.end => range.end = next.end,
+                    // a bridge that REACHES the next line's word completes an
+                    // object (d2aw's second aw); a whitespace-only tail does
+                    // not (y3aw on 2 words still beeps — audit5 B-16)
+                    Some(next) if next.end > range.end => {
+                        let bridged = buf.slice(range.end..next.end.min(buf.len()));
+                        if bridged.chars().any(|c| !c.is_whitespace()) {
+                            done += 1;
+                        }
+                        range.end = next.end;
+                    }
                     _ => break,
                 }
             }
             _ => break,
         }
+    }
+    if done < count.max(1) {
+        return None;
     }
     Some(span_from_object(range))
 }
@@ -374,8 +454,9 @@ pub fn delete_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: O
     }
     let text = ctx.buf.slice(span.start..span.end);
     crate::registers::sync_clipboard_host(ctx.host, register, &text);
+    let use_reg_one = std::mem::take(&mut vim.use_reg_one);
     vim.registers
-        .store_delete(register, text, register_kind(span));
+        .store_delete(register, text, register_kind(span), use_reg_one);
     vim.edit_delete(ctx, span.start..span.end);
 
     vim.cursor.offset = if span.linewise {
@@ -1240,16 +1321,27 @@ pub fn put_ex(
             .buf
             .offset_to_line(cursor_at)
             .min(ctx.buf.line_count() - 1);
+        let last_pasted = (cursor_line + pasted_line_count - 1).min(ctx.buf.line_count() - 1);
+        // `'[`/`']` change marks: first pasted char .. last pasted char
+        // (audit5 C-5 — do_put's b_op_start/b_op_end accounting). The `]`
+        // lands on the last pasted CHAR's start — line_end-1 is the last
+        // BYTE, which sits inside a multibyte tail (中) and the stored mark
+        // then violates the addressability invariant (fuzz round-117)
+        let mark_end = crate::buffer::prev_grapheme_offset(
+            ctx.buf,
+            ctx.buf.line_end(last_pasted),
+        )
+        .unwrap_or(cursor_at)
+        .max(cursor_at);
+        vim.marks.set('[', cursor_at);
+        vim.marks.set(']', mark_end);
         if leave_after {
-            // gp linewise: cursor on the LAST pasted line; gP linewise: on
-            // the line just AFTER the pasted block (`:h gp` "just after the
-            // new text" — audit C5; gP used to park on the block's first
-            // line)
-            let line = if after {
-                cursor_line + pasted_line_count - 1
-            } else {
-                cursor_line + pasted_line_count
-            };
+            // gp linewise: cursor just AFTER the pasted block — the line
+            // FOLLOWING it (do_put MLINE `PUT_CURSEND: lnum+1`; audit5 C-8 —
+            // the old "last pasted line" came from probes pinned at the
+            // buffer end, where the clamp hides the difference); gP
+            // linewise: ditto (`:h gp` "just after the new text")
+            let line = cursor_line + pasted_line_count;
             vim.cursor.offset = ctx
                 .buf
                 .first_non_blank(line.min(ctx.buf.line_count() - 1));
@@ -1270,7 +1362,17 @@ pub fn put_ex(
         // prev_char_offset parks mid-cluster when the paste ends with a
         // combining mark / ZWJ member (the next `x` would split it)
         let end = at + repeated.len();
-        vim.cursor.offset = if leave_after {
+        // `'[`/`']`: first pasted char .. one past the last (audit5 C-5)
+        vim.marks.set('[', at);
+        vim.marks.set(']', end);
+        // a MULTILINE charwise paste puts the cursor back on the FIRST
+        // pasted character (do_put MCHAR multi-line arm restores b_op_start;
+        // audit5 C-9/C-10 — the engine parked on the last pasted char like
+        // the single-line shape)
+        let multiline = repeated.contains('\n');
+        vim.cursor.offset = if multiline {
+            clamp_cursor(ctx.buf, at)
+        } else if leave_after {
             // gp/gP charwise: just AFTER the last pasted char — one past
             // `end`, clamped like every cursor (the line end parks it on
             // the line's last char, vim's same clamp)
@@ -1587,27 +1689,25 @@ pub fn replace_chars_from_neighbor(
     };
     // same DISPLAY column on the neighbor line (wide chars align like the
     // terminal shows them, mirroring i_CTRL-E)
-    let col = crate::buffer::display_column(ctx.buf, start);
+    let mut col = crate::buffer::display_column(ctx.buf, start);
     let src = crate::buffer::offset_for_display_column(ctx.buf, neighbor, col);
     let neighbor_end = ctx.buf.line_end(neighbor);
-    if src >= neighbor_end {
-        return false;
-    }
-    // gather `count` characters from the neighbor
+
+    // 逐位配对：光标行的第 i 个字素取邻行同显示列起连续第 i 个字符。vim
+    // 逐位处理、某位在邻行取不到字符时**跳过**（ins_copychar 返回 NUL →
+    // 仅推进光标，normal.c nv_replace「will be decremented further
+    // down」）——短邻行不放弃整个命令。9.1 oracle：`abcdef` + `abX` 上
+    // `0ll2r<C-E>` → `abXdef`（'c'←'X'，'d' 跳过），光标落最后处理位
+    // 'd'。全部跳过 = 无操作（无编辑、无铃声、光标不动）。
+    //
+    // 越列判定：`offset_for_display_column` 对越列查询钳回最后字素起点
+    // （那是 `j`/`|` 的运动落点语义），不能当「该列有字符」用——要用
+    // 覆盖判定（字符的显示列区间盖住目标列）。
     let mut replacements = String::new();
-    let mut o = src;
-    for _ in 0..count {
-        if o >= neighbor_end {
-            return false;
-        }
-        let Some(c) = ctx.buf.char_at(o) else { return false };
-        replacements.push(c);
-        let Some(next) = ctx.buf.next_char_offset(o) else { return false };
-        o = next;
-    }
-    // the consumed span on the cursor line: `count` graphemes, cancel when
-    // the line runs out (same rule as `3rx` with two chars left)
     let mut end = start;
+    let mut last_pos_new_start = start;
+    let mut any_replaced = false;
+    let mut nsrc = src;
     for _ in 0..count {
         if end >= cursor_line_end {
             return false;
@@ -1616,12 +1716,40 @@ pub fn replace_chars_from_neighbor(
         if next == end {
             return false;
         }
+        last_pos_new_start = start + replacements.len();
+        let covered = nsrc < neighbor_end
+            && match ctx.buf.char_at(nsrc) {
+                Some(c) => {
+                    let cs = crate::buffer::display_column(ctx.buf, nsrc);
+                    let w = crate::buffer::char_display_width(c);
+                    let on = cs <= col && col < cs + w;
+                    if on {
+                        replacements.push(c);
+                        nsrc += c.len_utf8();
+                        any_replaced = true;
+                    }
+                    on
+                }
+                None => false,
+            };
+        if !covered {
+            // 跳过位保留光标行原字符（拼进替换串 = 文本不变）
+            replacements.push_str(&ctx.buf.slice(end..next));
+        }
         end = next;
+        // 下一位的邻行配对列 = 下一个光标字符自己的显示列（宽字符对齐
+        // 终端列；vim 的 ++col 是字节制 quirk，这里按显示列泛化）
+        col = crate::buffer::display_column(ctx.buf, end);
+    }
+    if !any_replaced {
+        return true;
     }
     vim.edit_replace(ctx, start..end, &replacements);
-    // cursor on the last replaced char's start (same landing as `r{char}`)
-    let last_len = replacements.chars().last().map_or(1, char::len_utf8);
-    vim.cursor.offset = clamp_cursor(ctx.buf, end.saturating_sub(last_len.max(1)));
+    // cursor on the last processed position's start in the NEW text (the
+    // pre-edit `end` no longer exists when the replacement is shorter —
+    // the old `end - last_len` landed inside the NEXT multibyte char,
+    // fuzz round35)
+    vim.cursor.offset = clamp_cursor(ctx.buf, last_pos_new_start);
     vim.cursor.desired_col = None;
     true
 }

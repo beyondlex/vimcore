@@ -87,6 +87,15 @@ pub struct Cmdline {
     pub last_replacement: Option<String>,
     /// cmdline `<C-r>{reg}` 的等待状态（审计 K3）。
     pub register_paste_pending: bool,
+    /// cmdline `<C-r>=` 的表达式子提示符：开启后按键进 expr_buffer，`<CR>`
+    /// 求值并把结果贴回命令行（c_CTRL-R_=，audit5 A-16——旧实现把 `=` 当
+    /// 普通寄存器名，键序被吞或贴陈旧值）。求值失败报 E121/E15、命令行
+    /// 保持原样。
+    pub expr_pending: bool,
+    pub expr_buffer: String,
+    /// `=` 提示符最近一次求值的表达式行：空输入重用它（get_expr_register
+    /// 的记忆，audit5 C-18）。
+    pub last_expression: Option<String>,
     /// cmdline `<C-v>` 的字面引用等待状态（audit G10）。
     pub literal_pending: bool,
     /// The last substitute command line (`s/pat/rep/flags`), for `&` and the
@@ -440,6 +449,10 @@ impl VimState {
                         linewise: false,
                     }
                 };
+                // op_delete's use_reg_one fires here too: `/`/`?` are
+                // nv_findpar motions (audit5 C-3 — the span was built before
+                // the state.rs hook could see the motion)
+                self.use_reg_one = true;
                 self.complete_operator_with_span(ctx, span);
             }
             // no operator left (a mapping rebuilt the state mid-prompt):
@@ -608,10 +621,13 @@ impl VimState {
             // cmdline_key 里被吞，Char('\t') 也会归一成 Named("tab")），但
             // 历史回放/未来输入路径不再依赖这个前提。
             let no_tail_ws = self.cmdline.buffer.trim_end();
+            // c_CTRL-W 只删一个【字母数字】词：`set ts=4<C-w>` 得 `set ts=`
+            // （'4' 删、'=' 留 → E521: Number required after =: ts=z，
+            // audit5 A-17；旧实现删整个非空白段，`=` 一起没）。
             let cut = no_tail_ws
                 .char_indices()
                 .rev()
-                .take_while(|(_, c)| !c.is_whitespace())
+                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
                 .last()
                 .map(|(i, _)| i)
                 .unwrap_or_else(|| no_tail_ws.len());
@@ -631,8 +647,17 @@ impl VimState {
             self.cmdline.register_paste_pending = true;
             return KeyResult::Consumed;
         }
+        // <C-r>= opens the EXPRESSION sub-prompt (c_CTRL-R_=, audit5 A-16):
+        // typed keys gather in expr_buffer until <CR>, the result is pasted
+        // into the command line; a failed evaluation reports E121/E15 and
+        // leaves the command line untouched.
         if self.cmdline.register_paste_pending {
             self.cmdline.register_paste_pending = false;
+            if key == Key::ctrl_char('=') || key.printable_char() == Some('=') {
+                self.cmdline.expr_pending = true;
+                self.cmdline.expr_buffer.clear();
+                return KeyResult::Consumed;
+            }
             if let Some(name) = key.printable_char() {
                 if let Some(data) = self.registers.get_for_paste(name, ctx.host) {
                     self.cmdline.buffer.push_str(&data.text);
@@ -642,6 +667,42 @@ impl VimState {
                     }
                     ctx.host.changed();
                 }
+            }
+            return KeyResult::Consumed;
+        }
+        if self.cmdline.expr_pending {
+            if key == Key::escape() {
+                // cancel back to the command line, text untouched (vim keeps
+                // the prompt's contents)
+                self.cmdline.expr_pending = false;
+                return KeyResult::Consumed;
+            }
+            if key == Key::enter() {
+                self.cmdline.expr_pending = false;
+                let expr = self.cmdline.expr_buffer.clone();
+                match eval_const_expression(&expr) {
+                    Some(value) => {
+                        self.cmdline.buffer.push_str(&value.to_string());
+                    }
+                    None => {
+                        // vim's message for an unknown name (E121) / bad
+                        // expression (E15); nothing is pasted. The oracle
+                        // observed the command line reset to empty — it was
+                        // empty to begin with in that probe.
+                        if expr.is_empty() {
+                            ctx.host.status_message("E15: Invalid expression: ''");
+                        } else {
+                            ctx.host.status_message(&format!(
+                                "E121: Undefined variable: {expr}"
+                            ));
+                        }
+                    }
+                }
+                ctx.host.changed();
+                return KeyResult::Consumed;
+            }
+            if let Some(c) = key.printable_char() {
+                self.cmdline.expr_buffer.push(c);
             }
             return KeyResult::Consumed;
         }
@@ -717,10 +778,26 @@ impl VimState {
                     // `<C-r>=` origin) — audit C9. No history, no `.`-record
                     // bookkeeping: the prompt is a pure value reader.
                     if prompt == '=' {
-                        let entry = std::mem::take(&mut self.cmdline.buffer);
+                        let mut entry = std::mem::take(&mut self.cmdline.buffer);
                         self.cmdline.history_pos = None;
                         self.cmdline.stash = None;
                         self.mode = Mode::Normal;
+                        // an EMPTY expression re-evaluates the LAST one
+                        // (get_expr_register returns the remembered
+                        // expression line; audit5 C-18 — `"=<CR>p` used to
+                        // paste an empty result)
+                        if entry.is_empty() {
+                            match &self.cmdline.last_expression {
+                                Some(last) => entry = last.clone(),
+                                None => {
+                                    ctx.host
+                                        .status_message("E15: Invalid expression: ^@");
+                                    self.fail_replay(ctx);
+                                    return KeyResult::Consumed;
+                                }
+                            }
+                        }
+                        self.cmdline.last_expression = Some(entry.clone());
                         match eval_const_expression(&entry) {
                             Some(v) => {
                                 let text = v.to_string();
@@ -1068,6 +1145,17 @@ impl VimState {
                 return;
             }
         }
+        // `|` command separator (`:h :bar`; audit5 A-2 — the engine E488'd
+        // the whole line and even the FIRST command never ran): run the
+        // head, then the tail as its own command line. The head re-enters
+        // with its range prefix intact.
+        if let Some(bar) = Self::split_command_bar(line) {
+            let range_text = &full_line[..full_line.len() - line.len()];
+            let head = format!("{}{}", range_text, &line[..bar]);
+            self.execute_ex(ctx, &head);
+            self.execute_ex(ctx, line[bar + 1..].trim());
+            return;
+        }
         match line {
             // vim's abbreviation rule accepts every unambiguous prefix of
             // `nohlsearch` — the old list stopped at `nohls` and E492'd on
@@ -1386,6 +1474,49 @@ impl VimState {
         // be a COUNT that re-anchors at the range's LAST line (vim: `:1,2d 3`
         // deletes lines 2-4; an EXPLICIT `:1,2d 1` deletes just line 2 —
         // any given count, even 1, re-anchors)
+        // `:dl`/`:dp`/`:dell`/`deletel`… — `:delete` with trailing PRINT
+        // flags (`l`/`p`/`#`; test_excmd Test_ex_delete, audit5 A-7 — the
+        // spellings table E492'd these and the line never got deleted).
+        // The bare forms route through the normal `:d` path below.
+        if let Some((rest, print_flags)) = Self::delete_print_form(line) {
+            let _ = print_flags;
+            if rest.starts_with('!') {
+                ctx.host
+                    .status_message("E477: No ! allowed");
+                self.fail_replay(ctx);
+                return;
+            }
+            let (register, count) = match Self::parse_reg_count(rest.trim()) {
+                Ok(parsed) => parsed,
+                Err(token) => {
+                    self.report_trailing(ctx, &token, line);
+                    return;
+                }
+            };
+            let (first, last) = Self::reanchor_range(ctx.buf, range, count);
+            // the `l`-flag print shows each deleted line list-style (TAB as
+            // ^I, `$` terminator — oracle q2 printed `^Ibar$`)
+            let printed: Vec<String> = (first..=last)
+                .map(|l| {
+                    ctx.buf
+                        .line_content(l)
+                        .chars()
+                        .take(200)
+                        .map(|c| match c {
+                            '\t' => "^I".to_owned(),
+                            '\r' => "^M".to_owned(),
+                            c => c.to_string(),
+                        })
+                        .collect::<String>()
+                        + "$"
+                })
+                .collect();
+            self.ex_delete_lines(ctx, (first, last), register);
+            for text in printed {
+                ctx.host.status_message(&text);
+            }
+            return;
+        }
         if let Some(rest) = DELETE_SPELLINGS
             .iter()
             .find_map(|cmd| Self::boundary_cmd_count(line, cmd))
@@ -1476,6 +1607,108 @@ impl VimState {
     fn boundary_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
         line.strip_prefix(cmd)
             .filter(|rest| rest.is_empty() || rest.starts_with(' ') || rest.starts_with('!'))
+    }
+
+    /// The `:dl`/`:dp`/`:dell`… family: a `:delete` spelling followed by
+    /// one or more print-flag chars (`l`/`p`/`#`). Returns the argument
+    /// rest after the command word and the flag run, or None when `line`
+    /// is not this shape (`:d`/`:delete` without flags fall through to the
+    /// spellings table; `:ap`/`:up` style words are not delete bases).
+    fn delete_print_form(line: &str) -> Option<(&str, &str)> {
+        let word_end = line
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(line.len());
+        let word = &line[..word_end];
+        let base = word.trim_end_matches(['l', 'p', '#']);
+        if base.is_empty() || base.len() == word.len() {
+            return None;
+        }
+        if !DELETE_SPELLINGS.contains(&base) {
+            return None;
+        }
+        Some((&line[word_end..], &word[base.len()..]))
+    }
+
+    /// Byte index of a top-level `|` command separator in the command part
+    /// (`:h :bar`), or None. The substitute family is special: a `|` is
+    /// pattern/replacement text until the THIRD unescaped delimiter closes
+    /// (`:s/a|b/x/` searches `a|b`; `:s/a/b/|j` splits). Everything else in
+    /// the implemented subset takes EX_TRLBAR semantics — the first
+    /// unescaped `|` separates (`\|` escapes). `:normal`/`:g` (not
+    /// implemented) see the bar literally in vim and are left alone.
+    fn split_command_bar(rest: &str) -> Option<usize> {
+        let word_end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '!')
+            .unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if word.is_empty() {
+            return None;
+        }
+        if matches!(word, "normal" | "g" | "global" | "v" | "vglobal") {
+            return None;
+        }
+        let substitute = word == "s" || (word.starts_with('s') && "substitute".starts_with(word));
+        let after = &rest[word_end..];
+        if substitute {
+            let mut chars = after.char_indices();
+            let mut delim = match chars.next() {
+                Some((_, '!')) => chars.next().map(|(_, c)| c),
+                Some((_, c)) => Some(c),
+                None => None,
+            };
+            if let Some(d) = delim {
+                // whitespace/letters can't delimit `:s` (E146 path) — a bar
+                // here belongs to whatever error the dispatcher reports
+                if d.is_alphanumeric() || d.is_whitespace() || d == '\\' {
+                    return None;
+                }
+                delim = Some(d);
+                let mut count = 0usize;
+                let mut i = 0usize;
+                let bytes = after.as_bytes();
+                while i < bytes.len() {
+                    let c = after[i..].chars().next().unwrap();
+                    if c == '\\' {
+                        i += 1 + after[i + 1..].chars().next().map_or(0, char::len_utf8);
+                        continue;
+                    }
+                    if c == d {
+                        count += 1;
+                        if count == 3 {
+                            // skip the flag run, then a `|` separates
+                            let tail = &after[i + c.len_utf8()..];
+                            let flags_end = tail
+                                .find(|c: char| {
+                                    !(c.is_alphanumeric()
+                                        || c.is_whitespace()
+                                        || c == '#'
+                                        || c == '&')
+                                })
+                                .unwrap_or(tail.len());
+                            let rest2 = &tail[flags_end..];
+                            return rest2.starts_with('|').then_some(
+                                word_end + i + c.len_utf8() + flags_end,
+                            );
+                        }
+                    }
+                    i += c.len_utf8();
+                }
+            }
+            return None;
+        }
+        let mut i = 0usize;
+        while i < after.len() {
+            let c = after[i..].chars().next().unwrap();
+            if c == '\\' {
+                i += 1 + after[i + 1..].chars().next().map_or(0, char::len_utf8);
+                continue;
+            }
+            if c == '|' {
+                return Some(word_end + i);
+            }
+            i += c.len_utf8();
+        }
+        None
     }
 
     /// Split one address into its BASE (`.`, `$`, `%`, digits, `'x`, or a
@@ -1833,7 +2066,7 @@ impl VimState {
     /// vim's `:sort n` key: the first decimal number in the line (a leading
     /// `-` counts as the sign); a line without a number compares as 0. Saturating
     /// arithmetic keeps a pathological 40-digit line from wrapping.
-    fn numeric_sort_key(text: &str) -> i64 {
+    fn numeric_sort_key(text: &str) -> (i64, i64) {
         let bytes = text.as_bytes();
         let mut i = 0usize;
         while i < bytes.len() {
@@ -1854,11 +2087,15 @@ impl VimState {
                 for &d in &bytes[digits_start..j] {
                     v = v.saturating_mul(10).saturating_add((d - b'0') as i64);
                 }
-                return if neg { -v } else { v };
+                // 第一键「有无数字」把无数字行整段排到数字行之前——
+                // vim 的 :sort n 不把无数字行当 0 混进数字段（test_sort
+                // "Non-numeric lines are ordered before numerical lines"，
+                // audit5 A-8：`abc/5/-3/7/x` → `abc x -3 5 7`）
+                return (1, if neg { -v } else { v });
             }
             i += 1;
         }
-        0
+        (0, 0)
     }
 
     /// One `:registers` listing line: `"x  c|l|b  text` with embedded
@@ -1888,10 +2125,85 @@ impl VimState {
 
     /// One `:marks` listing line: `mark  line  col  text`.
     fn mark_line(buf: &dyn crate::buffer::VimBuffer, name: char, offset: usize) -> String {
+        // 防御性取整：上游有 `hi.saturating_sub(1)` 一类的裸字节减法，
+        // 能落进多字节字符内部（fuzz round35 实证 `vl<Esc>:marks` 于
+        // CJK 缓冲 panic）
+        let offset = crate::buffer::floor_to_char_boundary(buf, offset);
         let line = buf.offset_to_line(offset);
-        let col = crate::buffer::display_column(buf, offset) + 1;
-        let text: String = buf.line_content(line).trim().chars().take(40).collect();
+        // vim 的 col 列是 **0 基字节列**（9.1 oracle：`ab\tcd` 上 `fcmd`
+        // 的标记 d 打 col 3——显示列是 8；`vll<Esc>` 的 `>` 打 6），
+        // 不是显示列+1
+        let col = offset - buf.line_start(line);
+        let text: String = buf
+            .line_content(line)
+            .chars()
+            .take(40)
+            .map(|c| match c {
+                // 行内容原样列出（旧实现 trim 掉了缩进），TAB/^M 转
+                // caret 记号（与 :reg 的 ^J 同族）
+                '\t' => "^I".to_owned(),
+                '\r' => "^M".to_owned(),
+                c => c.to_string(),
+            })
+            .collect();
         format!("{name}  line {}  col {}  {}", line + 1, col, text)
+    }
+
+    /// Ex 整段行重写命令（`:retab`、`:ce`/`:ri`/`:le`）的光标追踪快照。
+    ///
+    /// vim 在这类命令后把光标留在**原字符**上（marks 同步调整语义）；
+    /// 引擎的 `edit_replace` 不动光标，重写前后字节布局一变，原始偏移
+    /// 就指到别的字符、甚至陷进多字节字符内部（fuzz round35：IME 写入
+    /// 中文后 `:retab` 光标落进「文」中间）。快照记「行号 + 相对行内
+    /// 内容起点（首非空白）的显示列」——retab 保持非空白字符的显示列
+    /// 不变、align 平移整段内容，两者都能用这个二元组精确还原。
+    fn snap_cursor_for_range_rewrite(
+        &self,
+        ctx: &Ctx,
+        first: usize,
+        last: usize,
+    ) -> Option<(usize, usize)> {
+        let line = ctx.buf.offset_to_line(self.cursor.offset);
+        if !(first..=last).contains(&line) {
+            return None;
+        }
+        let off = crate::buffer::floor_to_char_boundary(ctx.buf, self.cursor.offset);
+        let ts = self.options.tabstop.max(1);
+        let col = crate::buffer::display_column_with(ctx.buf, off, ts);
+        let content_col =
+            crate::buffer::display_column_with(ctx.buf, ctx.buf.first_non_blank(line), ts);
+        Some((line, col.saturating_sub(content_col)))
+    }
+
+    /// 按快照还原光标；光标在范围外时按整块字节增量平移（范围后的
+    /// 内容整体挪了 delta 字节，裸偏移同样会指错字符）。末端 floor+
+    /// clamp 兜底可寻址不变量。
+    fn restore_cursor_after_range_rewrite(
+        &mut self,
+        ctx: &mut Ctx,
+        first: usize,
+        snap: Option<(usize, usize)>,
+        old_span: usize,
+        new_span: usize,
+    ) {
+        let delta = new_span as isize - old_span as isize;
+        if let Some((line, col_in_content)) = snap {
+            let ts = self.options.tabstop.max(1);
+            let content_off = ctx.buf.first_non_blank(line);
+            let content_col = crate::buffer::display_column_with(ctx.buf, content_off, ts);
+            let target = crate::buffer::offset_for_display_column_with(
+                ctx.buf,
+                line,
+                content_col + col_in_content,
+                ts,
+            );
+            self.cursor.offset = crate::buffer::clamp_cursor(ctx.buf, target);
+        } else if delta != 0 && self.cursor.offset > ctx.buf.line_start(first) {
+            self.cursor.offset = (self.cursor.offset as isize + delta).max(0) as usize;
+        }
+        self.cursor.offset =
+            crate::buffer::floor_to_char_boundary(ctx.buf, self.cursor.offset);
+        self.cursor.desired_col = None;
     }
 
     /// The `:marks` listing: named rows plus the engine-tracked specials,
@@ -1963,141 +2275,210 @@ impl VimState {
             Unusable,
             Line(usize),
         }
-        fn base_line(spec: &str, vim: &VimState, ctx: &Ctx) -> Result<Base, String> {
+        fn base_line(
+            spec: &str,
+            anchor: Option<usize>,
+            vim: &VimState,
+            ctx: &Ctx,
+        ) -> Result<Base, String> {
+            // One address part folds LEFT TO RIGHT over concatenated
+            // segments: vim's get_address loops `while (*cmd=='/'||*cmd=='?')`
+            // after a number (ex_docmd.c), so `2/foo/` is TWO addresses in
+            // sequence and the search STARTS FROM the previous address
+            // ("When search follows another address, start from there";
+            // audit5 A-1 — the engine parsed the whole part as one base and
+            // E16'd, or searched from the cursor line).
+            let cursor_line = ctx.buf.offset_to_line(vim.cursor.offset);
+            let buf_last = ctx.buf.line_count().saturating_sub(1);
             let unset_mark = |name: &str| format!("E20: Mark {name} not set");
-            match spec {
-                "." | "" => Ok(Base::Line(ctx.buf.offset_to_line(vim.cursor.offset))),
-                "%" => Ok(Base::Unusable),
-                "$" => Ok(Base::Line(ctx.buf.line_count().saturating_sub(1))),
-                "'<" => vim
-                    .marks
-                    .active_visual()
-                    .map(|(a, _)| Base::Line(ctx.buf.offset_to_line(a)))
-                    .or_else(|| {
-                        vim.marks.resolve('<', ctx.buf).map(|off| {
-                            let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
-                            Base::Line(ctx.buf.offset_to_line(off))
-                        })
-                    })
-                    .ok_or_else(|| unset_mark("'<")),
-                "'>" => {
-                    vim.marks
-                        .active_visual()
-                        .map(|(_, b)| {
-                            Base::Line(ctx.buf.offset_to_line(
-                                crate::buffer::floor_to_char_boundary(ctx.buf, b.saturating_sub(1)),
-                            ))
-                        })
-                        .or_else(|| {
-                            vim.marks.resolve('>', ctx.buf).map(|off| {
-                                // '<'> hi is exclusive; floor(hi-1) = last char
-                                let off = crate::buffer::floor_to_char_boundary(
-                                    ctx.buf,
-                                    off.saturating_sub(1),
-                                );
-                                Base::Line(ctx.buf.offset_to_line(off))
-                            })
-                        })
-                        .ok_or_else(|| unset_mark("'>"))
-                }
-                // `'a`-style marks: resolve through the mark table (the range
-                // scanner accepts any `'x`; dropping them here made
-                // `:'a,'b d` fail with E16 even though they parsed)
-                other if other.starts_with('\'') && other.len() > 1 => {
-                    // the name is one full char — a multi-byte char must not
-                    // be split (`:'中` panicking `split_at` was round12's
-                    // user-triggerable crash); vim reports E78 for unknown
-                    // mark *names*, E20 for unset ones.
-                    let name = other[1..].chars().next().unwrap_or('\'');
-                    if !name.is_ascii_alphanumeric()
-                        && !matches!(
+            let mark_line = |name: char| -> Result<usize, String> {
+                let valid = |name: char| {
+                    name.is_ascii_alphanumeric()
+                        || matches!(
                             name,
-                            '"' | '<'
-                                | '>'
-                                | '['
-                                | ']'
-                                | '('
-                                | ')'
-                                | '{'
-                                | '}'
-                                | '.'
-                                | '^'
-                                | '\''
-                                | '`'
+                            '"' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | '.' | '^'
+                                | '\'' | '`'
                         )
-                    {
-                        return Err("E78: Unknown mark".to_owned());
-                    }
-                    vim.marks
-                        .resolve(name, ctx.buf)
-                        .map(|off| {
-                            // `'>` stores the EXCLUSIVE end (one char past
-                            // the selection): the exact `'>` arm above
-                            // resolves line(off-1), and a mangled token
-                            // reaching this generic arm (`'><` from a
-                            // double `'<,'>` prefill) must land on the
-                            // same line, not the one after
-                            let off = if name == '>' {
-                                off.saturating_sub(1)
-                            } else {
-                                off
-                            };
-                            let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
-                            Base::Line(ctx.buf.offset_to_line(off))
-                        })
-                        // quote the PARSED mark name, not the raw address
-                        // token: a mangled multi-address line (`'<,'>'<,'>`
-                        // from a double prefill) must not echo its junk
-                        // tail into the E20 text
-                        .ok_or_else(|| unset_mark(&format!("'{name}")))
+                };
+                if !valid(name) {
+                    return Err("E78: Unknown mark".to_owned());
                 }
-                // `/pat[/]` / `?pat[?]` — the line of the first match after
-                // (before) the cursor line, wrapping (`:h :range`; audit F2)
-                pat if pat.starts_with('/') || pat.starts_with('?') && pat.len() > 1 => {
-                    let backward = pat.starts_with('?');
-                    let term = pat.chars().next().unwrap();
-                    let mut inner = &pat[1..];
-                    if inner.ends_with(term) {
-                        inner = &inner[..inner.len() - term.len_utf8()];
+                vim.marks
+                    .resolve(name, ctx.buf)
+                    .map(|off| {
+                        // `'>` stores the EXCLUSIVE end: the exact `'>` arm
+                        // resolves line(off-1); a mangled token reaching the
+                        // generic arm must land on the same line
+                        let off = if name == '>' {
+                            off.saturating_sub(1)
+                        } else {
+                            off
+                        };
+                        let off = crate::buffer::floor_to_char_boundary(ctx.buf, off);
+                        ctx.buf.offset_to_line(off)
+                    })
+                    .ok_or_else(|| unset_mark(&format!("'{name}")))
+            };
+            // One search segment: the first match line strictly AFTER the
+            // anchor (BEFORE for `?`), wrapping like vim's searchit; the
+            // anchor is the previous segment's line, or the cursor line.
+            let search_line = |pattern: &str, backward: bool, from: usize| -> Result<usize, String> {
+                let matches = crate::search::all_matches(vim, ctx.buf, pattern);
+                if matches.is_empty() {
+                    return Err(format!("E486: Pattern not found: {pattern}"));
+                }
+                let mut lines: Vec<usize> = matches
+                    .iter()
+                    .map(|m| ctx.buf.offset_to_line(m.start))
+                    .collect();
+                lines.dedup();
+                Ok(if backward {
+                    lines.iter().rev().find(|l| **l < from).copied()
+                        .unwrap_or(*lines.last().unwrap())
+                } else {
+                    lines.iter().find(|l| **l > from).copied()
+                        .unwrap_or(*lines.first().unwrap())
+                })
+            };
+            let mut rest = spec;
+            let mut current: Option<usize> = None;
+            loop {
+                rest = rest.trim_start();
+                let Some(c) = rest.chars().next() else { break };
+                if c.is_ascii_digit() {
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(rest.len());
+                    // an out-of-buffer number stays legal at parse time; the
+                    // caller validates against the buffer for COMMANDS
+                    let n: usize = rest[..end].parse().unwrap_or(usize::MAX);
+                    current = Some(n.saturating_sub(1));
+                    rest = &rest[end..];
+                    continue;
+                }
+                if c == '\'' {
+                    // `'` + one full char; a BARE `'` is vim's silent no-op
+                    // address (no E16, cursor unmoved — audit5 A-19)
+                    let name = rest[1..].chars().next();
+                    match name {
+                        None => {
+                            current = Some(cursor_line);
+                            rest = &rest[1..];
+                            continue;
+                        }
+                        Some(name) => {
+                            let name_len = name.len_utf8();
+                            if name == '<' || name == '>' {
+                                // the visual ends keep their dedicated
+                                // resolution (active_visual first, stored
+                                // mark second)
+                                current = Some(match name {
+                                    '<' => vim
+                                        .marks
+                                        .active_visual()
+                                        .map(|(a, _)| ctx.buf.offset_to_line(a))
+                                        .or_else(|| mark_line('<').ok())
+                                        .ok_or_else(|| unset_mark("'<"))?,
+                                    _ => vim
+                                        .marks
+                                        .active_visual()
+                                        .map(|(_, b)| {
+                                            ctx.buf.offset_to_line(
+                                                crate::buffer::floor_to_char_boundary(
+                                                    ctx.buf,
+                                                    b.saturating_sub(1),
+                                                ),
+                                            )
+                                        })
+                                        .or_else(|| mark_line('>').ok())
+                                        .ok_or_else(|| unset_mark("'>"))?,
+                                });
+                            } else {
+                                current = Some(mark_line(name)?);
+                            }
+                            rest = &rest[1 + name_len..];
+                            continue;
+                        }
+                    }
+                }
+                let reuse = c == '\\'
+                    && matches!(
+                        rest[1..].chars().next(),
+                        Some('/') | Some('?') | Some('&')
+                    );
+                if c == '/' || c == '?' || reuse {
+                    let (backward, consumed) = if reuse {
+                        let backward = rest[1..].chars().next() == Some('?');
+                        (backward, 2)
+                    } else {
+                        let backward = c == '?';
+                        let term = c;
+                        let mut i = term.len_utf8();
+                        while i < rest.len() {
+                            let d = rest[i..].chars().next().unwrap();
+                            i += d.len_utf8();
+                            if d == '\\' {
+                                if let Some(n) = rest[i..].chars().next() {
+                                    i += n.len_utf8();
+                                }
+                                continue;
+                            }
+                            if d == term {
+                                break;
+                            }
+                        }
+                        (backward, i.min(rest.len()))
+                    };
+                    let mut inner = if reuse {
+                        String::new()
+                    } else {
+                        rest[1..consumed].to_owned()
+                    };
+                    if reuse {
+                        // `\/`/`\?` reuse the last search pattern (backward
+                        // for `\?`); `\&` reuses the last SUBSTITUTE pattern
+                        // in vim — the engine's single slot holds the most
+                        // recent pattern either way (documented
+                        // simplification)
+                        match vim.search.pattern.clone() {
+                            Some(p) => inner = p,
+                            None => {
+                                return Err(
+                                    "E35: No previous regular expression".to_owned()
+                                )
+                            }
+                        }
+                    } else if inner.ends_with(c) {
+                        inner.truncate(inner.len() - c.len_utf8());
                     }
                     if inner.is_empty() {
-                        // an empty pattern reuses the last search, like the
-                        // `s//` form
-                        inner = vim
-                            .search
-                            .pattern
-                            .as_deref()
-                            .ok_or_else(|| "E35: No previous regular expression".to_owned())?;
-                    }
-                    let matches = crate::search::all_matches(vim, ctx.buf, inner);
-                    if matches.is_empty() {
-                        return Err(format!("E486: Pattern not found: {inner}"));
-                    }
-                    let cursor_line = ctx.buf.offset_to_line(vim.cursor.offset);
-                    let mut lines: Vec<usize> = matches
-                        .iter()
-                        .map(|m| ctx.buf.offset_to_line(m.start))
-                        .collect();
-                    lines.dedup();
-                    let line = if backward {
-                        match lines.iter().rev().find(|l| **l < cursor_line) {
-                            Some(l) => *l,
-                            None => *lines.last().unwrap(),
+                        match vim.search.pattern.clone() {
+                            Some(p) => inner = p,
+                            None => {
+                                return Err(
+                                    "E35: No previous regular expression".to_owned()
+                                )
+                            }
                         }
-                    } else {
-                        match lines.iter().find(|l| **l > cursor_line) {
-                            Some(l) => *l,
-                            None => *lines.first().unwrap(),
-                        }
-                    };
-                    Ok(Base::Line(line))
+                    }
+                    let from = current.or(anchor).unwrap_or(cursor_line);
+                    current = Some(search_line(&inner, backward, from)?);
+                    rest = &rest[consumed..];
+                    continue;
                 }
-                other => other
-                    .parse::<usize>()
-                    .ok()
-                    .map(|n| Base::Line(n.saturating_sub(1)))
-                    .ok_or_else(|| "E16: Invalid range".to_owned()),
+                if c == '.' {
+                    current = Some(cursor_line);
+                    rest = &rest[1..];
+                    continue;
+                }
+                if c == '$' {
+                    current = Some(buf_last);
+                    rest = &rest[1..];
+                    continue;
+                }
+                return Err("E16: Invalid range".to_owned());
             }
+            Ok(Base::Line(current.unwrap_or(cursor_line)))
         }
         fn with_offset(base: usize, spec: &str) -> Result<usize, String> {
             // Offset tokens accumulate after the base. A sign DIRECTLY
@@ -2186,6 +2567,17 @@ impl VimState {
                 range_end = i.min(line.len());
                 continue;
             }
+            // `\` + one char is the REUSE-address family (`\/`, `\?`, `\&` =
+            // next match of the last search/substitute pattern, `:h :range`;
+            // audit5 A-4 — the engine E492'd the whole command)
+            if c == '\\' {
+                i += 1;
+                if let Some(n) = line[i..].chars().next() {
+                    i += n.len_utf8();
+                }
+                range_end = i.min(line.len());
+                continue;
+            }
             break;
         }
         let (range_part, rest) = line.split_at(range_end);
@@ -2212,24 +2604,27 @@ impl VimState {
             // "fix" of the correct code). Whitespace before the offset
             // (`:5 +2d`) is skipped like vim does.
             let (base_str, off_str) = Self::split_address_offsets(part);
-            let value = match base_line(base_str.trim_end(), vim, ctx)? {
+            let base_str = base_str.trim_end();
+            // mid-range/leading `%` = `1,$`: both endpoints survive as TWO
+            // addresses and absorb any offset stream (`:%+1d` still deletes
+            // the whole file — vim 9.1 oracle, audit A2)
+            if base_str == "%" {
+                addresses.push(0);
+                addresses.push(last);
+                continue;
+            }
+            // the SEARCH anchor is the PREVIOUS address in the chain
+            // (`:2,/pat/d` searches from line 2, not the cursor — vim's
+            // get_address "When search follows another address, start from
+            // there")
+            let value = match base_line(
+                base_str,
+                addresses.last().copied(),
+                vim,
+                ctx,
+            )? {
                 Base::Line(base) => with_offset(base, off_str)?,
-                // mid-range `%` = `1,$` collapsed to its LAST line: only the
-                // final two addresses survive a longer chain anyway, so
-                // `:1,%d` deletes the whole file exactly like vim
-                Base::Unusable if base_str == "%" => {
-                    // `%` expands to BOTH endpoints and absorbs any offset
-                    // stream (`:%+1d` still deletes the whole file — vim
-                    // 9.1 oracle, audit A2; the old collapse-to-last turned
-                    // it into a single-line delete)
-                    addresses.push(0);
-                    addresses.push(last);
-                    continue;
-                }
-                Base::Unusable => {
-                    let base = addresses.last().copied().unwrap_or(cursor_line);
-                    with_offset(base, off_str)?
-                }
+                Base::Unusable => unreachable!("% is handled above"),
             };
             // An out-of-buffer address is legal at parse time: the BARE
             // address parks on the last line silently (vim 9.1 probes: bare
@@ -2400,6 +2795,7 @@ impl VimState {
         if lines.is_empty() {
             return;
         }
+        let snap = self.snap_cursor_for_range_rewrite(ctx, first, last);
         self.begin_edit();
         let start = ctx.buf.line_start(first);
         let end = ctx.buf.line_end(last);
@@ -2407,7 +2803,10 @@ impl VimState {
         self.edit_replace(ctx, start..end, &new_text);
         self.end_edit();
         // vim does not move the cursor line for the align family (audit A9
-        // — the engine dragged it to the range's first line)
+        // — the engine dragged it to the range's first line); and it stays
+        // on the SAME CHARACTER through the re-pad (fuzz round35: the raw
+        // byte offset landed inside a CJK char once padding grew the line)
+        self.restore_cursor_after_range_rewrite(ctx, first, snap, end - start, new_text.len());
         self.bump(ctx);
     }
 
@@ -2530,12 +2929,16 @@ impl VimState {
         if !any_change {
             return;
         }
+        let snap = self.snap_cursor_for_range_rewrite(ctx, first, last);
         self.begin_edit();
         let start = ctx.buf.line_start(first);
         let end = ctx.buf.line_end(last);
         let new_text = lines.join("\n");
         self.edit_replace(ctx, start..end, &new_text);
         self.end_edit();
+        // 光标留在原字符上（`:h :retab` 的 marks 调整语义；fuzz round35
+        // 抓到裸偏移陷进 CJK 字符内部）
+        self.restore_cursor_after_range_rewrite(ctx, first, snap, end - start, new_text.len());
         self.bump(ctx);
     }
 
@@ -2800,10 +3203,19 @@ impl VimState {
             // compares the same key (it IS the line). Numeric dedup folds
             // lines whose SORT KEYS are equal (vim's uniq shares the sort
             // comparator).
+            let before = lines.len();
             if numeric {
                 lines.dedup_by_key(|(key, _)| Self::numeric_sort_key(key));
             } else {
                 lines.dedup_by(|a, b| a.0 == b.0);
+            }
+            // vim's report: `:%sort u` on [1,1,2,2,3,3] says "3 fewer lines"
+            // (test_sort Test_sort_cmd_report; audit5 A-10) — only when
+            // lines were actually removed (`:2,3sort u` on distinct lines
+            // stays silent, oracle u21)
+            if lines.len() < before {
+                ctx.host
+                    .status_message(&format!("{} fewer lines", before - lines.len()));
             }
         }
         if reverse {
@@ -2865,9 +3277,13 @@ impl VimState {
                 .find(|ch: char| !ch.is_ascii_digit())
                 .unwrap_or(head.len());
             let (digits, rest) = head.split_at(digits_end);
-            let Ok(count) = digits.parse::<usize>() else {
-                return Err(head.to_owned());
-            };
+            // an overflow-sized count saturates instead of erroring: vim
+            // accepts `:2y 77777777777777777777` and clamps to the buffer
+            // end (test_excmd Test_address_line_overflow; audit5 A-18 —
+            // the usize parse overflow turned it into E488 garbage)
+            let count = digits
+                .parse::<usize>()
+                .unwrap_or(usize::MAX);
             if !rest.is_empty() {
                 return Err(rest.to_owned());
             }
@@ -3106,7 +3522,21 @@ impl VimState {
                     self.fail_replay(ctx);
                     return;
                 }
-                self.options.set_value(name, value)
+                if self.options.is_value_option(name) {
+                    match self.options.set_value(name, value) {
+                        Ok(()) => true,
+                        // the option-specific message (E521/E487/E474);
+                        // unknown names take the shared E518 arm below with
+                        // the full `arg` quoted (vim: E518 quotes `foo=1`)
+                        Err(message) => {
+                            ctx.host.status_message(&message);
+                            self.fail_replay(ctx);
+                            return;
+                        }
+                    }
+                } else {
+                    false
+                }
             } else if let Some(name) = arg
                 .strip_suffix("&vim")
                 .or_else(|| arg.strip_suffix("&vi"))
@@ -3228,6 +3658,24 @@ impl VimState {
             ctx.host.bell();
             return true;
         };
+        if sep == '\\' {
+            // vim rejects the backslash delimiter up front: E10 "\ should be
+            // followed by /, ? or &" (do_sub's check_regexp_delim; audit5
+            // A-15 — the engine used to parse `\` as the separator)
+            ctx.host
+                .status_message("E10: \\ should be followed by /, ? or &");
+            self.fail_replay(ctx);
+            return true;
+        }
+        if sep.is_whitespace() {
+            // whitespace can't delimit: E146 "Regular expressions can't be
+            // delimited by letters" (audit5 A-9 — the engine treated the
+            // space as a separator and REALLY substituted)
+            ctx.host
+                .status_message("E146: Regular expressions can't be delimited by letters");
+            self.fail_replay(ctx);
+            return true;
+        }
         if sep.is_alphanumeric() {
             // words starting with `s` that are not commands of this engine
             // (`:sort` is handled before this parser) get the standard
@@ -3269,7 +3717,25 @@ impl VimState {
             Some(i) => {
                 let tail = flags_raw[i..].trim_end();
                 match tail.parse::<usize>() {
-                    Ok(n) => (&flags_raw[..i], Some(n)),
+                    Ok(n) => {
+                        // count 0 is E939 "Positive count required" and the
+                        // command does not run (audit5 A-5 — the engine took
+                        // 0 as "no count" and substituted anyway); a count
+                        // over vim's number range is E1510 (audit5 A-12)
+                        if n == 0 {
+                            ctx.host
+                                .status_message("E939: Positive count required");
+                            self.fail_replay(ctx);
+                            return true;
+                        }
+                        if n >= i32::MAX as usize {
+                            ctx.host
+                                .status_message(&format!("E1510: Value too large: {tail}"));
+                            self.fail_replay(ctx);
+                            return true;
+                        }
+                        (&flags_raw[..i], Some(n))
+                    }
                     // digits mixed with junk (`:s/a/X/2x`) is trailing garbage
                     Err(_) => {
                         self.report_trailing(ctx, tail, line);
@@ -3290,11 +3756,21 @@ impl VimState {
         if let Some(bad) = flags_raw
             .chars()
             .filter(|c| !c.is_whitespace() && !c.is_ascii_digit())
-            .find(|c| !matches!(c, 'g' | 'i' | 'I' | 'n' | 'c' | 'e' | 'l' | 'p' | '#' | '&'))
+            .find(|c| {
+                !matches!(
+                    c,
+                    'g' | 'i' | 'I' | 'n' | 'c' | 'e' | 'l' | 'p' | '#' | '&' | 'r'
+                )
+            })
         {
             self.report_trailing(ctx, &bad.to_string(), line);
             return true;
         }
+        // `r` = RE_SEARCH: an empty pattern takes the last SEARCH pattern
+        // (not the most-recent-user). The engine's single pattern slot
+        // already holds the last search after an intervening `/pat`, so the
+        // slot read below is the same value (audit5 A-6; the flag used to
+        // E488 the whole command)
         // a trailing count re-anchors at the range's LAST line and extends
         // DOWN (`reanchor_range`; probe 9.1: `:5s/a/X/20` on ten lines
         // replaces 5-10, `:1,3s/a/X/2` replaces 3-4)
@@ -3319,6 +3795,47 @@ impl VimState {
         } else {
             pattern.to_owned()
         };
+        // `\n` as the WHOLE pattern is do_sub's special-cased JOIN
+        // (ex_cmds.c: the break between range lines is what matches;
+        // test_substitute Test_substitute_join). In-line `\n` can never
+        // match in the engine's line-at-a-time loop, so the old path E486'd
+        // the whole command (audit5 A-3). The replacement is spliced in at
+        // every removed break; vim reports "N fewer lines" for this shape.
+        // (Replacement vim-specials `&`/`~`/`\u` ride along raw here — the
+        // join path never had a per-match expansion.)
+        if pattern == "\\n" {
+            let (first_line, last_line) = range;
+            if first_line == last_line {
+                if !flags.contains('e') {
+                    ctx.host
+                        .status_message(&format!("E486: Pattern not found: {pattern}"));
+                    self.fail_replay(ctx);
+                }
+                return true;
+            }
+            let mut joined = String::new();
+            for line_no in first_line..=last_line {
+                if line_no > first_line {
+                    joined.push_str(&replacement_raw);
+                }
+                joined.push_str(&ctx.buf.line_content(line_no));
+            }
+            self.cmdline.last_substitute = Some(line.to_owned());
+            self.cmdline.last_replacement = Some(replacement_raw.clone());
+            self.begin_edit();
+            let start = ctx.buf.line_start(first_line);
+            let end = ctx.buf.line_end(last_line);
+            self.edit_replace(ctx, start..end, &joined);
+            self.end_edit();
+            self.cursor.offset = ctx.buf.first_non_blank(first_line);
+            self.cursor.desired_col = None;
+            ctx.host
+                .status_message(&format!("{} fewer lines", last_line - first_line));
+            self.bump(ctx);
+            ctx.host.changed();
+            self.commit_change_record();
+            return true;
+        }
         // the `n` flag reports the match count WITHOUT substituting (vim:
         // `:%s/foo//n` → "2 matches on 2 lines", buffer untouched — probe
         // 9.1; the engine used to ignore the flag and DELET everything the
@@ -3405,7 +3922,10 @@ impl VimState {
         // raw replacement rides along for `~` in the NEXT substitute.
         self.cmdline.last_substitute = Some(line.to_owned());
         self.cmdline.last_replacement = Some(replacement_raw.clone());
-        let global = flags.contains('g');
+        // `g` toggles per occurrence: `gg` cancels the global flag (audit5
+        // A-11 — `contains` made any number of g's global; vim's
+        // Test_substitute_gdefault: `s/foo/FOO/gg` replaces only the first)
+        let global = flags.matches('g').count() % 2 == 1;
 
         let (first_line, last_line) = range;
 
