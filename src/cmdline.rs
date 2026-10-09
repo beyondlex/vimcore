@@ -1145,6 +1145,57 @@ impl VimState {
                 return;
             }
         }
+        // :{range}!{filter} — run the range's lines through a shell command
+        // (`:%!jq .`); bare `:!{cmd}` is vim's shell escape (no buffer
+        // change, output to the status line). Checked BEFORE the `|` bar
+        // split: within `!`, a `|` belongs to the shell command (vim passes
+        // it through). The spawn mirrors the `!` prompt filter (same `sh
+        // -c` convention, same undo group via run_shell_filter).
+        if let Some(command) = line.strip_prefix('!') {
+            if command.trim().is_empty() {
+                ctx.host.status_message("E471: Argument required");
+                self.fail_replay(ctx);
+                return;
+            }
+            match range {
+                Some((first, last)) => {
+                    let last = last.min(ctx.buf.line_count().saturating_sub(1));
+                    let first = first.min(last);
+                    let span = crate::ops::OpSpan {
+                        start: ctx.buf.line_start(first),
+                        end: ctx.buf.line_range(last).end,
+                        linewise: true,
+                    };
+                    self.run_shell_filter(ctx, &span, command.trim());
+                }
+                None => {
+                    let output = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(command)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::null())
+                        .output()
+                        .ok()
+                        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                        .unwrap_or_default();
+                    let shown: String = output
+                        .lines()
+                        .next()
+                        .unwrap_or("(no output)")
+                        .chars()
+                        .take(120)
+                        .collect();
+                    let extra = if output.lines().count() > 1 {
+                        format!(" …(+{} 行)", output.lines().count() - 1)
+                    } else {
+                        String::new()
+                    };
+                    ctx.host.status_message(&format!("{shown}{extra}"));
+                }
+            }
+            return;
+        }
         // `|` command separator (`:h :bar`; audit5 A-2 — the engine E488'd
         // the whole line and even the FIRST command never ran): run the
         // head, then the tail as its own command line. The head re-enters
