@@ -864,9 +864,6 @@ impl Motion {
                                 }
                             }
                         }
-                        if found.is_some() && want > 1 && false {
-                            // counts iterate via the idx cursor above
-                        }
                     }
                 }
                 match found {
