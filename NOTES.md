@@ -14,8 +14,10 @@
 `:set`、插入缩进）。收口方式：**探索型 TSV 脚手架退役，表转断言**——
 151 例进 `tests/audit8_a.rs` 的 `CASES`（`parity_with_vim_oracle` 一条
 test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条定点断言，
-两端报文/文本/光标都钉死。全量 `cargo test` 0 失败。同源的
-`tests/audit7_b.rs`（第六轮 B 域：对拍 fuzz runner + 定点回归）一并入库。
+两端报文/文本/光标都钉死。全量 `cargo test` 0 失败（非 `#[ignore]` 492
+例，另有 64 项 `#[ignore]` 挂账/工具探针）。同批的
+`tests/audit7_b.rs`（第六轮 B 域的 motion/算子/可视对拍 fuzz runner，
+`#[ignore]`，两侧采样纪律已写进文件头）一并入库。
 
 修复（A-1…A-6 + 插入缩进一组，全部 9.1 实证）：
 
@@ -68,7 +70,7 @@ test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条�
   | cjk3 | `中文abc` @0:0 | `w` | 光标 8 | 6（列 7） |
   | cjk4 | `中文abc` @0:0 | `dw` | `\n`（整行删空） | `abc\n` |
   | cjk5 | `中文abc` @0:0 | `diw` | `\n` | `abc\n` |
-  | em5 | `👨\u{200d}👩x` @0:0 | `x` | `x\n` | `‍👩x\n` |
+  | em5 | `👨\u{200d}👩x` @0:0 | `x` | `x\n` | `\u{200d}👩x\n` |
   | m20 | `abc def` @0:0 | `2g_` | 光标 6 | 0 |
   | m24 | `Aaa. Bbb. Ccc.` @8:0 | `(` | 光标 10 | 0 |
   | rr2 | `abcdef` @0:0 | `R«X»l«Y»<Esc>` | `XYcdef` | `XlYdef` |
