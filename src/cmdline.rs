@@ -3467,8 +3467,15 @@ impl VimState {
     /// channel). Stops at the first unknown item (bell).
     fn ex_set(&mut self, ctx: &mut Ctx, args: &str) {
         // `:set all` lists every option like the bare `:set` (audit A12 —
-        // the old path read "all" as an unknown option name and E518'd)
-        if args.trim() == "all" || args.trim() == "all&" {
+        // the old path read "all" as an unknown option name and E518'd);
+        // `:set all&` RESETS every option to its default (vim 9.1 probe,
+        // audit8 A-2 — the engine used to LIST here too)
+        if args.trim() == "all&" {
+            self.options.reset_all();
+            self.search.matches_generation = None;
+            return;
+        }
+        if args.trim() == "all" {
             for text in self.options.describe_all() {
                 ctx.host.status_message(&text);
             }
@@ -3757,66 +3764,54 @@ impl VimState {
             self.report_trailing(ctx, &format!("{sep}{extra}"), line);
             return true;
         }
-        // a trailing COUNT (`:s/a/X/ 3`, `:s/a/X/3`, `:s/a/X/g2`) adjusts the
+        // A trailing COUNT (`:s/a/X/ 3`, `:s/a/X/3`, `:s/a/X/g2`) adjusts the
         // range to {count} lines ending count-1 lines BELOW the range's last
         // line (vim 9.1 probes: `:s/a/X/ 3` from line 1 replaces lines 1-3,
-        // `:1,2s/a/X/2` replaces lines 2-3). The engine used to drop it, so
-        // the command silently ran on fewer lines than vim.
-        // find (not split_once — the pattern char itself must stay in the
-        // tail or `:s/a/X/3` parses "" and falsely reports E488)
-        let (flags, count) = match flags_raw.find(|c: char| c.is_ascii_digit()) {
-            Some(i) => {
-                let tail = flags_raw[i..].trim_end();
-                match tail.parse::<usize>() {
-                    Ok(n) => {
-                        // count 0 is E939 "Positive count required" and the
-                        // command does not run (audit5 A-5 — the engine took
-                        // 0 as "no count" and substituted anyway); a count
-                        // over vim's number range is E1510 (audit5 A-12)
-                        if n == 0 {
-                            ctx.host
-                                .status_message("E939: Positive count required");
-                            self.fail_replay(ctx);
-                            return true;
-                        }
-                        if n >= i32::MAX as usize {
-                            ctx.host
-                                .status_message(&format!("E1510: Value too large: {tail}"));
-                            self.fail_replay(ctx);
-                            return true;
-                        }
-                        (&flags_raw[..i], Some(n))
-                    }
-                    // digits mixed with junk (`:s/a/X/2x`) is trailing garbage
-                    Err(_) => {
-                        self.report_trailing(ctx, tail, line);
-                        return true;
-                    }
-                }
-            }
-            None => (flags_raw, None),
+        // `:1,2s/a/X/2` replaces lines 2-3). vim's grammar: the flag run sits
+        // IMMEDIATELY after the third delimiter — a leading space before the
+        // flags is E488 (`:s/a/b/ e` → "E488: Trailing characters: e"; the
+        // engine used to accept it and substitute, audit8 A-3) — then
+        // optional whitespace and a decimal count; anything left over is
+        // E488 quoting the offending tail (`:s/a/b/2g` → "g").
+        const VALID_FLAGS: &str = "giIncelp#&r";
+        let (flags, count_tail) = if flags_raw.len() != flags_raw.trim_start().len() {
+            // leading whitespace: the whole tail must be a bare count
+            ("", flags_raw)
+        } else {
+            let flag_len = flags_raw
+                .find(|c: char| !VALID_FLAGS.contains(c))
+                .unwrap_or(flags_raw.len());
+            flags_raw.split_at(flag_len)
         };
-        // vim rejects a flag outside its set with E488 and runs NOTHING
-        // (9.1 probe: `:s/a/X/z` → "E486"-style E488 "Trailing characters:
-        // z", buffer untouched). The engine used to ignore unknown letters
-        // and substitute anyway — a typo'd flag silently changed the text.
-        // VALID vim flags: g i I n + the accepted-no-op set below (`c` is
-        // the documented no-UI divergence; `e` suppresses the miss report
-        // below; `l`/`p`/`#`/`&` ride along). Digits/whitespace are the
-        // count, handled above.
-        if let Some(bad) = flags_raw
-            .chars()
-            .filter(|c| !c.is_whitespace() && !c.is_ascii_digit())
-            .find(|c| {
-                !matches!(
-                    c,
-                    'g' | 'i' | 'I' | 'n' | 'c' | 'e' | 'l' | 'p' | '#' | '&' | 'r'
-                )
-            })
-        {
-            self.report_trailing(ctx, &bad.to_string(), line);
+        let rest = count_tail.trim_start();
+        let digits_end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let (digits, trailing) = rest.split_at(digits_end);
+        if !trailing.is_empty() {
+            self.report_trailing(ctx, trailing, line);
             return true;
         }
+        let count = if digits.is_empty() {
+            None
+        } else {
+            // vim clamps an over-range count to i64::MAX and reports E1510
+            // with the clamped value (9.1 probe: `:s/a/b/999…` → "E1510:
+            // Value too large: 9223372036854775807"); a count at/over
+            // i32::MAX is E1510, count 0 is E939 (audit5 A-5/A-12)
+            let n: i64 = digits.parse().unwrap_or(i64::MAX);
+            if n == 0 {
+                ctx.host.status_message("E939: Positive count required");
+                self.fail_replay(ctx);
+                return true;
+            }
+            if n >= i32::MAX as i64 {
+                ctx.host.status_message(&format!("E1510: Value too large: {n}"));
+                self.fail_replay(ctx);
+                return true;
+            }
+            Some(n as usize)
+        };
         // `r` = RE_SEARCH: an empty pattern takes the last SEARCH pattern
         // (not the most-recent-user). The engine's single pattern slot
         // already holds the last search after an intervening `/pat`, so the
@@ -3895,28 +3890,42 @@ impl VimState {
         if flags.contains('n') {
             let (first_line, last_line) = range;
             let mut builder = search::compile(self, &pattern);
-            // i/I: LAST occurrence wins (`iI` = sensitive, audit A8)
-            let ic_last_wins = match (flags.rfind('i'), flags.rfind('I')) {
-                (Some(a), Some(b)) => a > b,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => true,
+            // i/I: LAST occurrence wins (`iI` = sensitive, audit A8); with
+            // NEITHER flag the compile()'s option-driven case setting stands
+            // (`:set noic` + `:s/a/X/n` must be case-sensitive — the old
+            // unconditional `true` forced insensitive, audit8 A-5)
+            match (flags.rfind('i'), flags.rfind('I')) {
+                (Some(a), Some(b)) => {
+                    builder.case_insensitive(a > b);
+                }
+                (Some(_), None) => {
+                    builder.case_insensitive(true);
+                }
+                (None, Some(_)) => {
+                    builder.case_insensitive(false);
+                }
+                (None, None) => {}
             };
-            if ic_last_wins {
-                builder.case_insensitive(true);
-            } else if flags.contains('I') {
-                builder.case_insensitive(false);
-            }
             let Ok(re) = builder.build() else {
                 ctx.host.bell();
                 return true;
             };
+            // `n` counts matches the way the substitute WOULD replace them:
+            // one per line unless `g` is present (vim 9.1 probe: `:s/a/X/n`
+            // on "aa" → "1 match on 1 line"; `:s/a/X/gn` → "2 matches on 1
+            // line" — the old code always counted every occurrence, audit8
+            // A-4)
+            let global = flags.matches('g').count() % 2 == 1;
             let mut total = 0usize;
             let mut lines_with = 0usize;
             for line_no in first_line..=last_line {
                 let ls = ctx.buf.line_start(line_no);
                 let le = ctx.buf.line_end(line_no);
-                let hits = re.find_iter(&ctx.buf.slice(ls..le)).count();
+                let hits = if global {
+                    re.find_iter(&ctx.buf.slice(ls..le)).count()
+                } else {
+                    usize::from(re.is_match(&ctx.buf.slice(ls..le)))
+                };
                 if hits > 0 {
                     total += hits;
                     lines_with += 1;
@@ -3932,28 +3941,33 @@ impl VimState {
                 }
                 return true;
             }
-            let msg = if lines_with == 1 {
-                format!("{total} match on 1 line")
-            } else {
-                format!("{total} matches on {lines_with} lines")
-            };
+            // vim: "%ld match%s on %ld line%s" — the plural rides the COUNT,
+            // the line noun rides the line count
+            let msg = format!(
+                "{total} match{} on {lines_with} line{}",
+                if total == 1 { "" } else { "es" },
+                if lines_with == 1 { "" } else { "s" },
+            );
             ctx.host.status_message(&msg);
             return true;
         }
         let mut builder = search::compile(self, &pattern);
         // `i` forces case-insensitive for this substitution, `I` forces
-        // case-sensitive (overriding ignorecase/smartcase, like vim)
-        let ic_last_wins = match (flags.rfind('i'), flags.rfind('I')) {
-            (Some(a), Some(b)) => a > b,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => true,
+        // case-sensitive (overriding ignorecase/smartcase, like vim); with
+        // NEITHER flag the option-driven setting from compile() stands
+        // (audit8 A-5 — the old unconditional `true` broke `:set noic`)
+        match (flags.rfind('i'), flags.rfind('I')) {
+            (Some(a), Some(b)) => {
+                builder.case_insensitive(a > b);
+            }
+            (Some(_), None) => {
+                builder.case_insensitive(true);
+            }
+            (None, Some(_)) => {
+                builder.case_insensitive(false);
+            }
+            (None, None) => {}
         };
-        if ic_last_wins {
-            builder.case_insensitive(true);
-        } else if flags.contains('I') {
-            builder.case_insensitive(false);
-        }
         let Ok(re) = builder.build() else {
             // the pattern never compiled — "not found" would lie (vim's
             // legacy regex accepts `[` unclosed and reports E486 instead;

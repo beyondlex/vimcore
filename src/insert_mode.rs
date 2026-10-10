@@ -750,15 +750,18 @@ impl VimState {
         ctx.host.changed();
     }
 
-    /// `<C-t>` / `<C-d>`: add/remove one `'shiftwidth'` of indent at the
-    /// START of the cursor line (`:h i_CTRL-T`; audit D1/D2 — both were
-    /// unbound). The cursor keeps its screen column: text left of it shifts
-    /// by the byte delta. `0<C-d>` (the `0` typed first on this line, not
-    /// yet more text) removes ALL indent and un-types the `0`.
+    /// `<C-t>` / `<C-d>`: shift the current line's indent to a `'shiftwidth'`
+    /// multiple (`:h i_CTRL-T`; audit D1/D2 — both were unbound). vim ROUNDS
+    /// the indent (`get_new_sw_indent` with `round=TRUE`): `^T` goes to the
+    /// NEXT multiple up, `^D` to the PREVIOUS one down. The cursor keeps its
+    /// screen column. `0<C-d>` (the `0` typed first on this line, not yet
+    /// more text) removes ALL indent and un-types the `0`.
     fn insert_shift_indent(&mut self, ctx: &mut Ctx, dir: i64) {
         // `0<C-d>`: the typed "0" comes out of the line first (it is a
         // command character, not text — vim 9.1 oracle `i0<C-d><Esc>` leaves
-        // "abc" on "        abc", audit D2b)
+        // "abc" on "        abc", audit D2b), and the indent is SET to 0
+        // (vim ins_shift's INDENT_SET branch; oracle: `i0<C-d>` on an
+        // 8-space indent leaves "foo", not the 4 the old `old-sw` produced)
         let at = self.cursor.offset;
         let line = ctx.buf.offset_to_line(at);
         let typed_zero = self.insert_typed_start.is_some_and(|t| {
@@ -768,42 +771,69 @@ impl VimState {
             // anyway (fuzz round 7: slice(22..0) panic)
             t < at && ctx.buf.offset_to_line(t) == line && ctx.buf.slice(t..at) == "0"
         });
+        let mut force_zero = false;
         if dir < 0 && typed_zero {
             self.insert_delete_typed_span(ctx, at - 1..at);
             self.cursor.offset = at - 1;
+            force_zero = true;
         }
         let at = self.cursor.offset;
         let line = ctx.buf.offset_to_line(at);
         let ls = ctx.buf.line_start(line);
         let old_bytes = self.current_line_indent(ctx);
-        let old_width: usize = ctx
-            .buf
-            .slice(ls..ls + old_bytes)
-            .chars()
-            .map(crate::buffer::char_display_width)
-            .sum();
+        // the indent's WIDTH is in SCREEN columns (`get_indent()`/`set_indent()`
+        // speak vcols), so a TAB indent counts per `'tabstop'` — with the plain
+        // char_display_width a `\t\t` indent read as 2 cells and `<C-t>` shifted
+        // to 4 instead of vim's 12 (audit8: 9.1 `\t\tfoo` + `0i<C-t>X`)
+        let ts = self.options.tabstop;
+        let mut old_width = 0usize;
+        for c in ctx.buf.slice(ls..ls + old_bytes).chars() {
+            old_width += crate::buffer::char_display_width_at(c, old_width, ts);
+        }
         let sw = self.shiftwidth();
-        let new_width = if dir > 0 {
-            old_width + sw
+        // ROUND to a 'shiftwidth' multiple (vim get_new_sw_indent, round).
+        // Oracle (ts=sw=4, et): `i<C-t>` on 2/0/4/6-space indents →
+        // 4/4/8/8; `i<C-d>` on 2/6/4/8 → 0/4/0/4.
+        let new_width = if force_zero {
+            0
+        } else if dir > 0 {
+            (old_width / sw + 1) * sw
         } else {
-            old_width.saturating_sub(sw)
+            let q = old_width / sw;
+            if old_width % sw != 0 {
+                q * sw
+            } else {
+                q.saturating_sub(1) * sw
+            }
         };
         let new_indent = self.indent_string_for_width(ctx, new_width);
         if new_indent == ctx.buf.slice(ls..ls + old_bytes) {
             return;
         }
+        // the cursor's screen column BEFORE the edit (vim change_indent keeps
+        // the cursor on the same character: a cursor INSIDE the indent rides
+        // the indent's COLUMN delta, clamped to the line start; oracle
+        // `i<C-t>X` on a 2-space indent at col 0/1 → cursor 2/3)
+        let cur_col = self.display_column_ts(ctx.buf, at);
+        let delta = new_width as isize - old_width as isize;
         self.begin_edit();
         self.edit_replace(ctx, ls..ls + old_bytes, &new_indent);
         self.republish_search(ctx);
-        // the cursor follows its character: text PAST the indent shifts, and
-        // a typing point AT the indent end rides the new indent (`3i<C-t>x`:
-        // x must land AFTER the added shiftwidth — oracle K1, audit D10)
+        // a cursor at/after the indent shifts by the byte delta (equal to the
+        // column delta under the default 'expandtab'); one INSIDE the indent
+        // re-derives its byte offset from the shifted screen column
         self.cursor.offset = if at >= ls + old_bytes {
-            // the typing point rides the new indent (`3i<C-t>x`: x lands
-            // AFTER the added shiftwidth — oracle K1, audit D10)
-            at - old_bytes + new_indent.len()
+            (at as isize + (new_indent.len() as isize - old_bytes as isize)).max(ls as isize)
+                as usize
         } else {
-            at.min(ls + new_indent.len())
+            let new_col = (cur_col as isize + delta).max(0) as usize;
+            crate::buffer::offset_for_display_column_with(
+                ctx.buf,
+                line,
+                new_col,
+                self.options.tabstop,
+            )
+            .max(ls)
         };
         // the indent bytes are part of what the session landed: the count-
         // repeat's cursor invariant must cover them

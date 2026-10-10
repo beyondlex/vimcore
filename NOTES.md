@@ -5,6 +5,90 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第三十五轮：独立审计（七）A 域收口——audit8 对拍表转断言 + Ex/`:s`/`:set`/插入缩进 7 项修复（2026-10-10，`tests/audit8_a.rs` 162 例）
+
+素材是纯黑盒对拍：161 个（初始缓冲, **原始按键字节**）形状同一份喂引擎
+与 `/usr/bin/vim`（9.1 patches 1-1752，`-Nu NONE -N -i NONE -n`，前置
+`:set ic scs ts=4 tw=78 et` 把引擎有意分歧的默认值钉成 oracle 前提），
+`:wq` 写回后逐字节比缓冲文本 + 比光标字节位。域 = A（Ex 命令行、`:s`、
+`:set`、插入缩进）。收口方式：**探索型 TSV 脚手架退役，表转断言**——
+151 例进 `tests/audit8_a.rs` 的 `CASES`（`parity_with_vim_oracle` 一条
+test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条定点断言，
+两端报文/文本/光标都钉死。全量 `cargo test` 0 失败。同源的
+`tests/audit7_b.rs`（第六轮 B 域：对拍 fuzz runner + 定点回归）一并入库。
+
+修复（A-1…A-6 + 插入缩进一组，全部 9.1 实证）：
+
+| # | 症状 → 规则 |
+|---|---|
+| A-1 | `:set noic?` 旧实现按 `no` 前缀**取反**显示。vim 里 `no{opt}?` 只是 `{opt}?` 的另一种拼写，报告的是真实状态（`:set ic` 后 `:set noic?` → `  ignorecase`） |
+| A-2 | `:set all&` 旧实现跟 `:set all` 一样只列表。vim 是**全部重置为默认值**（`ts=9` + `:set all&` → `tabstop=8`）。新增 `Options::reset_all`，顺带清 `search.matches_generation` |
+| A-3 | `:s/a/b/ e`（第三个分隔符后先空格再旗标）旧实现照跑。vim 的旗标串**紧贴**分隔符；一旦前置空白，整段 tail 只能是一个裸 count，否则 `E488: Trailing characters: e`。旗标白名单也收成 `giIncelp#&r`，尾部杂字符一律 E488 引用原文 |
+| A-4 | `:s/pat/repl/n` 旧实现按「全部命中」计数。vim 按**替换会怎么做**计数：无 `g` 每行至多 1（"aa" 上 → `1 match on 1 line`），`g` 才数每一处。报文两个名词各走各的数：`{total} match{es} on {lines_with} line{s}` |
+| A-5 | 旗标里没有 `i`/`I` 时旧实现无条件强制 insensitive，`:set noic` 后 `:s/a/X/`（含 `n` 臂）仍把 `A` 也吃掉。改为「旗标只覆盖，不覆盖就跟随 `ignorecase`/`smartcase`」 |
+| A-6 | `:set notabstop?` 报 unknown option。**值选项**的 `no` 前缀一样被解掉：`ts=6` 时打印 `  tabstop=6`（`describe` 里 bool 与 value 两路都要解前缀） |
+| 附 | 插入 `<C-t>`/`<C-d>` 四处：①旧式 `old ± sw` 改成 vim `get_new_sw_indent(round=TRUE)` 的**取整到 shiftwidth 倍数**（升=下一个倍数；降=下取整，恰为倍数时再降一格，所以 4→0 而不是 4→4 的原地假成功）；②缩进宽度按 `'tabstop'` 折算——`\t\t` 在 ts=4 下是 8 列，旧代码 `char_display_width` 数成 2 列，`<C-t>` 得 4 而非 vim 的 12（改用 `char_display_width_at`）；③光标落在缩进**内部**时随缩进的列位移走并钳到行首（`change_indent` 的 vcol 臂：`\t\tfoo` + `0i<C-t>X` → `    X        foo`、光标字节 4）；④`0<C-d>` 走 `INDENT_SET 0`——退掉打出的 `0` 并把缩进**清零**，不是「减一个 shiftwidth」 |
+
+### 本轮抓到的两条采样纪律（都有案，别再踩）
+
+- **`-s {scriptin}` 与 `+cmd`/`-c cmd` 的先后**：startup 命令先执行、
+  typeahead 后消费，所以 `+':w! out'` 采到的是**初始缓冲**——一整批
+  「两端都没变」的假对拍就这么来的（本轮 `i0<C-d>` 首测显示缩进纹丝不动）。
+  正确姿势：把采样也写进 typeahead（`:redir! > f` / `:echo
+  string(getline(1))` / `:redir END` / `:q!`）。上一轮的同款坑是
+  `timeout` 截断，这次是命令顺序，症状一模一样（都像 no-op）。
+- **insert 模式的可打印字符属于宿主的文本通道**：引擎把 raw key 收进
+  `pending_unknown_chars` 等宿主落地（见 `state.rs` 的 macOS 注释与
+  `take_pending_unknown_chars`），`Fixture::feed(["0"])` 在插入模式下会
+  **整字符丢掉**。测试里要打文本一律 `type_text`；命令行提示符反过来
+  ——那里的字符是键事件（`type_text` 在 prompt 态会自己回灌成 feed）。
+
+### 已知分歧变化
+
+- 分歧 #12 的名册补上 `:copy`/`:move`（`:t`/`:co`/`:m` 整族未实现，落
+  E492），并指向红探针。
+
+### 挂账（按本轮范围划出，未修）
+
+- `:copy`/`:move` 整族：红探针 `tests/audit6_a.rs` 的
+  `copy_command_missing`/`move_command_missing`/
+  `move_cursor_lands_on_moved_line_first_non_blank` 已带完整 oracle 矩阵
+  （`:2m0`→`[b,a,c,d]`、`:2t0`→`[b,a,b,c,d]`、`:1m2` 光标落搬移行首非
+  空白），实现即转绿。
+- `:<C-h>d`（空命令行上的退格）：`-s` 通道与 expect PTY 给出**互相矛盾**
+  的 vim 结果（一边响铃拒绝、一边把后续字符吃掉），未定性，故不入
+  `CASES`。
+- 同一批脚手架（TSV 对拍表，328 例，覆盖面推到 motion/可视/undo/插入）
+  的 16 项差异（10 文本 + 6 光标）。脚手架本体已随本轮退役，形状在表里
+  复原得出来（`初始@行:列` + 按键；`«…»` 是宿主的文本通道，等价于
+  `type_text`）。逐项只记**观测**，不作结论：
+
+  | id | 初始 @行:列 | 按键 | 引擎 | vim |
+  |---|---|---|---|---|
+  | cjk3 | `中文abc` @0:0 | `w` | 光标 8 | 6（列 7） |
+  | cjk4 | `中文abc` @0:0 | `dw` | `\n`（整行删空） | `abc\n` |
+  | cjk5 | `中文abc` @0:0 | `diw` | `\n` | `abc\n` |
+  | em5 | `👨\u{200d}👩x` @0:0 | `x` | `x\n` | `‍👩x\n` |
+  | m20 | `abc def` @0:0 | `2g_` | 光标 6 | 0 |
+  | m24 | `Aaa. Bbb. Ccc.` @8:0 | `(` | 光标 10 | 0 |
+  | rr2 | `abcdef` @0:0 | `R«X»l«Y»<Esc>` | `XYcdef` | `XlYdef` |
+  | rr4 | `abcdef` @0:0 | `R«XY»<Left>«Z»<Esc>` | `XZcdef` | `XYLeftZ` |
+  | u4 | `a\nb\nc` @0:0 | `dddd u` | `b\nc` | `a\nb\nc` |
+  | u5 | `abcdef` @0:0 | `xxu.` | `cdef` | `bcdef` |
+  | vis11 | `abcdef` @0:0 | `vlly` | 光标 2 | 0 |
+  | vis12 | `abcdef` @0:0 | `vllP` | `abcdef`（未粘贴） | `def` |
+  | vis13 | `ab\ncd\nef` @0:0 | `VjP` | 不动 | `ef` |
+  | blk5 | `abcd\nefgh` @0:0 | `<C-v>jlA«Z»<Esc>` | 文本同 | 光标 2 vs 0 |
+  | blk7 | `abcd\nefgh` @0:0 | `<C-v>jlc«Z»<Esc>` | 文本同 | 光标 4 vs 0 |
+  | insr5 | `abc` @0:0 | `i«X»<C-o>dw<Esc>` | `Xabc` | `X\n` |
+
+  入账前先过 oracle 纪律：`rr4` 的 vim 侧出现字面 `Left`，`m20`/`m24`/
+  `vis11`/`blk5`/`blk7` 的 vim 侧终态是光标 byte 0——这批是 `-s` 通道把
+  方向键/后续按键吞掉的形状（NOTES 多轮有案：方向键、可视 `:`、响铃类
+  必须 expect PTY），vim 侧值不可信。文本真差异（`cjk4`/`cjk5`/`em5`/
+  `u4`/`u5`/`vis12`/`vis13`/`insr5`）里 CJK 词 motion、可视粘贴、
+  `<C-o>` 后的删除、undo 粒度都是可修方向，但按本轮范围划出未动。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第三十四轮：独立审计（四）63 项全量修复（2026-10-09，`tests/audit5_{a,b,c}.rs` + `BUG_AUDIT4.md`）
 
 3 个并行分域智能体（A=Ex、B=motion/对象、C=寄存器/可视/undo）+ 主会话
@@ -2115,7 +2199,11 @@ undo 树、搜索提示符行为失真——undo 类探针用「数 undo 次数�
     行首 `<C-w>`/`<C-u>` 与上一行并线，块插入会话内响铃拒绝）。
 12. **`:g`、`:normal`、函数/autocmd** 不支持，走 E492 或 rc
     `ignored` 收集（IdeaVim 同款取舍）。（`:sort` 已在第二十三轮实现：
-    `ex_sort`，含 E475/数值排序/`u` 去重/`!` 反转。）
+    `ex_sort`，含 E475/数值排序/`u` 去重/`!` 反转。）**`:copy`/`:move`
+    （`:t`/`:co`/`:m`）整族也未实现**——同族行命令 `:d`/`:y`/`:j`/`:pu`/
+    `:s` 都在，缺这俩是缺兄弟（第三十五轮挂账，oracle 矩阵已在红探针
+    `tests/audit6_a.rs` 的 `copy_command_missing`/`move_command_missing`/
+    `move_cursor_lands_on_moved_line_first_non_blank` 里，实现即转绿）。
 13. **`""yy` 落 `"0`**：`""` 即匿名寄存器，yank 必写 `"0`，行为与 vim
     一致；但 `""dd` 不进数字环（vim 也如此）。
 14. ~~visual `:` 执行后 `'<`/`'>` 被按「锚点..当前光标」重写~~

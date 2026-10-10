@@ -249,26 +249,60 @@ impl Options {
     /// `:set name?` feedback in vim's rendering: two-space indent, then
     /// `ignorecase` / `noignorecase` / `tabstop=4` (9.1: `:set ts?` prints
     /// `  tabstop=8` — audit H2; the bare unpadded form was engine-shaped).
-    /// The `no` spelling queries too (`noic?` → `noignorecase`). `None` when
-    /// the name is unknown.
+    /// The `no` spelling queries too and reports the option's REAL state —
+    /// `:set noic?` prints `ignorecase` when 'ignorecase' is ON (9.1 probe:
+    /// the prefix never inverts the shown value; the old `negated` flag
+    /// printed the opposite, audit8 A-1). `None` when the name is unknown.
     pub fn describe(&self, name: &str) -> Option<String> {
-        let (name, negated) = match name.strip_prefix("no") {
-            Some(stripped) if canonical_bool(stripped).is_some() => (stripped, true),
-            _ => (name, false),
-        };
-        if let Some(canon) = canonical_bool(name) {
-            let on = self.bool_option(name)? != negated;
-            return Some(if on {
+        let describe_bool = |name: &str| -> Option<String> {
+            let canon = canonical_bool(name)?;
+            let on = self.bool_option(name)?;
+            Some(if on {
                 format!("  {canon}")
             } else {
                 format!("  no{canon}")
-            });
+            })
+        };
+        if let Some(text) = describe_bool(name) {
+            return Some(text);
         }
-        if negated {
-            return None; // `notabstop` is not a thing
+        // `no{bool}` is a valid query spelling of `{bool}?`; and the prefix
+        // simply resolves away for a VALUE option too — `:set notabstop?`
+        // prints the tabstop state (9.1 probe with `ts=6`: "  tabstop=6",
+        // audit8 A-6; the engine reported an unknown option)
+        if let Some(stripped) = name.strip_prefix("no") {
+            if let Some(text) = describe_bool(stripped) {
+                return Some(text);
+            }
+            if let Some(canon) = canonical_value(stripped) {
+                return Some(format!("  {}={}", canon, self.value_of(canon)));
+            }
+            return None;
         }
         let canon = canonical_value(name)?;
         Some(format!("  {}={}", canon, self.value_of(canon)))
+    }
+
+    /// `:set all&` — reset EVERY option to its default (vim 9.1 probe:
+    /// `:set ts=9` + `:set all&` → `tabstop=8`; the engine used to LIST the
+    /// options instead of resetting them, audit8 A-2).
+    pub fn reset_all(&mut self) {
+        let defaults = Options::default();
+        self.number = defaults.number;
+        self.relativenumber = defaults.relativenumber;
+        self.expandtab = defaults.expandtab;
+        self.autoindent = defaults.autoindent;
+        self.ignorecase = defaults.ignorecase;
+        self.smartcase = defaults.smartcase;
+        self.hlsearch = defaults.hlsearch;
+        self.incsearch = defaults.incsearch;
+        self.showmode = defaults.showmode;
+        self.showcmd = defaults.showcmd;
+        self.lisp = defaults.lisp;
+        self.tabstop = defaults.tabstop;
+        self.shiftwidth = defaults.shiftwidth;
+        self.textwidth = defaults.textwidth;
+        self.scrolloff = defaults.scrolloff;
     }
 
     /// `:set` with no arguments: every option, rendered like [`describe`].
