@@ -14,10 +14,13 @@
 `:set`、插入缩进）。收口方式：**探索型 TSV 脚手架退役，表转断言**——
 151 例进 `tests/audit8_a.rs` 的 `CASES`（`parity_with_vim_oracle` 一条
 test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条定点断言，
-两端报文/文本/光标都钉死。全量 `cargo test` 0 失败（非 `#[ignore]` 492
-例，另有 64 项 `#[ignore]` 挂账/工具探针）。同批的
+两端报文/文本/光标都钉死。全量 `cargo test --no-fail-fast`：**1127 例
+（非 `#[ignore]` 1063 + 64 项挂账/工具探针）0 失败**（实测计数，不是
+`| grep` 的退出码）。同批的
 `tests/audit7_b.rs`（第六轮 B 域的 motion/算子/可视对拍 fuzz runner，
-`#[ignore]`，两侧采样纪律已写进文件头）一并入库。
+`#[ignore]`，两侧采样纪律已写进文件头）一并入库——收口时它自己也被修了
+两处：oracle 侧的 `\<C-v>` 记法改原始字节、engine 侧的多字符记号改逐字符
+（见下条纪律），所以它此前报的任何差异数都不作数。
 
 修复（A-1…A-6 + 插入缩进一组，全部 9.1 实证）：
 
@@ -31,7 +34,7 @@ test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条�
 | A-6 | `:set notabstop?` 报 unknown option。**值选项**的 `no` 前缀一样被解掉：`ts=6` 时打印 `  tabstop=6`（`describe` 里 bool 与 value 两路都要解前缀） |
 | 附 | 插入 `<C-t>`/`<C-d>` 四处：①旧式 `old ± sw` 改成 vim `get_new_sw_indent(round=TRUE)` 的**取整到 shiftwidth 倍数**（升=下一个倍数；降=下取整，恰为倍数时再降一格，所以 4→0 而不是 4→4 的原地假成功）；②缩进宽度按 `'tabstop'` 折算——`\t\t` 在 ts=4 下是 8 列，旧代码 `char_display_width` 数成 2 列，`<C-t>` 得 4 而非 vim 的 12（改用 `char_display_width_at`）；③光标落在缩进**内部**时随缩进的列位移走并钳到行首（`change_indent` 的 vcol 臂：`\t\tfoo` + `0i<C-t>X` → `    X        foo`、光标字节 4）；④`0<C-d>` 走 `INDENT_SET 0`——退掉打出的 `0` 并把缩进**清零**，不是「减一个 shiftwidth」 |
 
-### 本轮抓到的两条采样纪律（都有案，别再踩）
+### 本轮抓到的五条采样/对拍纪律（都有案，别再踩）
 
 - **`-s {scriptin}` 与 `+cmd`/`-c cmd` 的先后**：startup 命令先执行、
   typeahead 后消费，所以 `+':w! out'` 采到的是**初始缓冲**——一整批
@@ -39,6 +42,29 @@ test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条�
   正确姿势：把采样也写进 typeahead（`:redir! > f` / `:echo
   string(getline(1))` / `:redir END` / `:q!`）。上一轮的同款坑是
   `timeout` 截断，这次是命令顺序，症状一模一样（都像 no-op）。
+- **管道吃掉 cargo 的退出码**：`cargo test 2>&1 | grep …` 的 `$?` 是
+  `grep`/`tail` 的，不是 cargo 的。本轮就因此把「1 个 target 失败」读成
+  「全量绿」——落盘再数才对（`cargo test --no-fail-fast > log 2>&1`，然
+  后 `grep "^test result" log`）。同一批里被逮出的两个旧钉
+  （`parity_round6::set_query_reports_current_value_without_changing_it`
+  的 `:set noic?` → `noignorecase`、`parity_round13::probe_describe_garbage`
+  的 `describe("notabstop") → None`）正是 A-1/A-6 推翻的旧引擎形状，已按
+  oracle 更正并在测试里附实证（`execute('set noic?')` 在 `ic` 打开时返回
+  `  ignorecase`；`execute('set notabstop?')` 在 `ts=6` 时返回
+  `  tabstop=6`）。
+- **`-s {scriptin}` 里 vim 的 `\<C-x>` 记法不展开**：脚本文件是原始键入
+  流，`\<C-v>` 会被当六个普通字符吃进去（`audit7_b` 的 oracle 侧原本就
+  这么写，于是「块可视」「可视 `gU`」一片假阳——vim 侧输出里 `\t`、
+  `-- INSERT --`、`Error reading input` 就是它的尸检报告）。控制键要写
+  原始字节，方向键还是得 expect PTY。
+- **对拍的两侧必须是同一个键粒度**：`audit7_b` 的生成器发多字符记号
+  （`gg`/`ge`/`aw`/`iW`），vim 侧当键流逐字符吃，引擎侧 `Fixture::feed`
+  走的是 `Key::parse`——`Key::parse("aw")` 得到 `KeyKind::Named("aw")`，
+  未知名直接吞掉。于是整条 text object/motion 在引擎侧**没发生**、vim 侧
+  照常执行，runner 一口气报了 20+ 处「差异」（`gUaw` 引擎不动 vim 变大写
+  那一族最像真 bug，其实全是它）。改逐字符展开（`engine_tokens`）后重跑
+  才算数。教训与 `:set` 那条同源：**oracle 假阳的第一来源是通道，不是
+  引擎**。
 - **insert 模式的可打印字符属于宿主的文本通道**：引擎把 raw key 收进
   `pending_unknown_chars` 等宿主落地（见 `state.rs` 的 macOS 注释与
   `take_pending_unknown_chars`），`Fixture::feed(["0"])` 在插入模式下会
@@ -84,12 +110,14 @@ test 跑完，`feed` 把字节还原成引擎键名），修复面另立 11 条�
   | blk7 | `abcd\nefgh` @0:0 | `<C-v>jlc«Z»<Esc>` | 文本同 | 光标 4 vs 0 |
   | insr5 | `abc` @0:0 | `i«X»<C-o>dw<Esc>` | `Xabc` | `X\n` |
 
-  入账前先过 oracle 纪律：`rr4` 的 vim 侧出现字面 `Left`，`m20`/`m24`/
-  `vis11`/`blk5`/`blk7` 的 vim 侧终态是光标 byte 0——这批是 `-s` 通道把
-  方向键/后续按键吞掉的形状（NOTES 多轮有案：方向键、可视 `:`、响铃类
-  必须 expect PTY），vim 侧值不可信。文本真差异（`cjk4`/`cjk5`/`em5`/
-  `u4`/`u5`/`vis12`/`vis13`/`insr5`）里 CJK 词 motion、可视粘贴、
-  `<C-o>` 后的删除、undo 粒度都是可修方向，但按本轮范围划出未动。
+  入账前先过 oracle 纪律（脚手架的 `key_bytes` 已核：`<C-v>`/`<Esc>`/
+  `<BS>` 这类**有**展开成原始字节，但 `<Left>`/`<Right>` 等方向键落回
+  `name.encode()` 当字面文本发——`rr4` 的 vim 侧出现字面 `Left` 就是这条）：
+  `rr4` 直接作废；`m20`/`m24`/`vis11`/`blk5`/`blk7` 的 vim 侧终态是光标
+  byte 0，是「按键整段没被消费」的形状（vim 停在起点），逐例走 expect
+  PTY 复跑再入账。文本真差异（`cjk4`/`cjk5`/`em5`/`u4`/`u5`/`vis12`/
+  `vis13`/`insr5`）里 CJK 词 motion、可视粘贴、`<C-o>` 后的删除、undo
+  粒度都是可修方向，但按本轮范围划出未动。
 
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第三十四轮：独立审计（四）63 项全量修复（2026-10-09，`tests/audit5_{a,b,c}.rs` + `BUG_AUDIT4.md`）
 

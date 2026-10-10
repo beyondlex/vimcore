@@ -4,8 +4,11 @@
 //!
 //! 采样纪律两侧对齐：vim 侧全程 typeahead（`:set binary` → `:w!` →
 //! `writefile(line2byte+col-1)` → `:qa!`，startup 命令不参与，8s 看门狗
-//! 兜住阻塞），引擎侧把选项钉成 vim 出厂值（`ts=8 sw=8 noet`）。键序
-//! 一律不进插入模式打字（进 insert 就 `<Esc>` 收尾），避免把「宿主文本
+//! 兜住阻塞），**控制键一律原始字节**（`-s` 不展开 `\<C-v>` 记法，见
+//! [`vim_keys`]），方向键不生成（那条通道要 expect PTY）；引擎侧把选项
+//! 钉成 vim 出厂值（`ts=8 sw=8 noet`），且记号**逐字符**进键管道（见
+//! [`engine_tokens`]，多字符记号整块喂 `Key::parse` 会变成未知键被吃掉）。
+//! 键序不进插入模式打字（进 insert 就 `<Esc>` 收尾），避免把「宿主文本
 //! 通道」的字符丢掉造成假阳。
 
 mod common;
@@ -151,29 +154,57 @@ fn gen_seq() -> Vec<String> {
     v
 }
 
+/// 命名键 → **原始控制字节**。`-s {scriptin}` 读的是原始键入流，vim 的
+/// `\<C-v>` 记法在这里**不展开**：旧实现把 `\<C-v>` 当文本喂进去，oracle
+/// 侧收到的是 `\`、`<`、`C`、`-`、`v`、`>` 六个字符（块可视根本没开始，
+/// 缓冲还被 `\`/`<` 这些 normal 键搅了），一整批「引擎错」其实是假阳。
+/// 方向键同理不能走这条通道（NOTES 多轮有案：必须 expect PTY），生成器
+/// 不产它们。
 fn vim_keys(tokens: &[String]) -> String {
     let mut s = String::new();
     for t in tokens {
         s.push_str(match t.as_str() {
-            "<Esc>" => "\\<Esc>",
-            "<C-a>" => "\\<C-a>",
-            "<C-x>" => "\\<C-x>",
-            "<C-r>" => "\\<C-r>",
-            "<C-v>" => "\\<C-v>",
-            "<C-w>" => "\\<C-w>",
-            "<C-u>" => "\\<C-u>",
-            "<C-t>" => "\\<C-t>",
-            "<C-d>" => "\\<C-d>",
-            "<C-y>" => "\\<C-y>",
-            "<C-e>" => "\\<C-e>",
-            "<C-o>" => "\\<C-o>",
-            "<BS>" => "\\<BS>",
+            "<Esc>" => "\u{1b}",
+            "<C-a>" => "\u{01}",
+            "<C-b>" => "\u{02}",
+            "<C-d>" => "\u{04}",
+            "<C-e>" => "\u{05}",
+            "<C-f>" => "\u{06}",
+            "<C-g>" => "\u{07}",
+            "<C-n>" => "\u{0e}",
+            "<C-o>" => "\u{0f}",
+            "<C-p>" => "\u{10}",
+            "<C-r>" => "\u{12}",
+            "<C-t>" => "\u{14}",
+            "<C-u>" => "\u{15}",
+            "<C-v>" => "\u{16}",
+            "<C-w>" => "\u{17}",
+            "<C-x>" => "\u{18}",
+            "<C-y>" => "\u{19}",
+            "<BS>" => "\u{08}",
             "<Space>" => " ",
-            "<CR>" => "\\<CR>",
+            "<CR>" => "\r",
             other => other,
         });
     }
     s
+}
+
+/// 生成器的多字符记号（`gg`/`ge`/`aw`/`iW`…）在 vim 侧是**逐字符**的键流，
+/// 引擎侧也必须逐字符进 `Key::parse`：`Key::parse("aw")` 落进
+/// `KeyKind::Named("aw")`（未知键，直接被吃掉），于是整条 text object/motion
+/// 在引擎侧**根本没发生**，vim 侧却照常执行——旧 runner 那批「差异」就是这个
+/// 粒度错配批量造的假阳（`<...>` 与单字符本来就已对齐）。
+fn engine_tokens(tokens: &[String]) -> Vec<String> {
+    let mut v = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        if t.starts_with('<') || t.chars().count() == 1 {
+            v.push(t.clone());
+        } else {
+            v.extend(t.chars().map(|c| c.to_string()));
+        }
+    }
+    v
 }
 
 fn oracle(initial: &str, tokens: &[String]) -> Option<(String, usize)> {
@@ -239,7 +270,7 @@ fn engine_run(initial: &str, tokens: &[String]) -> (String, usize) {
         "s", "e", "t", " ", "t", "s", "=", "8", " ", "s", "w", "=", "8", " ", "n", "o", "e", "t",
         "<CR>",
     ]);
-    f.feed(tokens.iter().map(|s| s.as_str()));
+    f.feed(engine_tokens(tokens).iter().map(|s| s.as_str()));
     (f.text(), f.cursor())
 }
 
