@@ -184,9 +184,13 @@ fn set_query_reports_current_value_without_changing_it() {
     assert_eq!(f.host.statuses, vec!["  ignorecase"]);
     assert!(f.vim.options_mut().ignorecase, "query leaves the value");
 
+    // `no{opt}?` is just another SPELLING of `{opt}?`: vim reports the
+    // option's real state, the prefix never inverts it (9.1 实证 with
+    // `execute()`: `:set ic` then `:set noic?` → "  ignorecase"; the old
+    // engine-shaped expectation `noignorecase` was the bug, audit8 A-1).
     let mut f = Fixture::new("text\n");
     ex(&mut f, "set noic?");
-    assert_eq!(f.host.statuses, vec!["  noignorecase"]);
+    assert_eq!(f.host.statuses, vec!["  ignorecase"]);
 
     let mut f = Fixture::new("text\n");
     ex(&mut f, "set ts?");

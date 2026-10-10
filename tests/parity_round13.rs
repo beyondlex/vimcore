@@ -92,7 +92,10 @@ fn probe_octal_increment_overflow() {
 #[test]
 fn probe_describe_garbage() {
     let o = vimcore::options::Options::default();
-    assert_eq!(o.describe("notabstop"), None);
+    // `no{bool}` 是 `{bool}?` 的合法拼写，但对**值选项**前缀也照样解掉：
+    // vim 9.1 的 `execute('set notabstop?')`（`ts=6` 时）返回
+    // `  tabstop=6`，不是 unknown option（audit8 A-6 实证，旧钉作废）
+    assert_eq!(o.describe("notabstop").as_deref(), Some("  tabstop=4"));
     assert_eq!(o.describe("nosuchopt"), None);
     assert_eq!(o.describe("nu").as_deref(), Some("  nonumber"));
 }
