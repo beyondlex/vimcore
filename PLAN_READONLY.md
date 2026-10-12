@@ -197,6 +197,7 @@ M1–M3 完成后 alacer 即可迁移（用 A 步兼容层 + 拦截点即可满�
 | M3 | ✅ | `MotionHook` + `VimHost(Ro)::motion_hook()`，插入点 `Motion::target` |
 | M4 | ✅ | `VimHostRo` / `CtxRo` / `handle_key_ro`（`RoHost` + `RoBuffer` 适配器，主管线零改动） |
 | M5 | ✅ 跨仓 | gpui-vim-x 0.2.0 已发布（pager 迁 RO 管线，40/40 绿）；alacer 已合流 registry 0.2.0 并完成 diff view 迁移（§9，三期全落地，773/773 绿） |
+| M6 | ✅ 跨仓 | alacer merge view 只读窗格（Local/Remote）迁 RO 管线，Result 保持 RW；`is_write_key` 拦截表 + 写了再回滚机制删除（§10，778/778 绿） |
 
 版本随 M1 的源级破坏（写原语签名）与 M4 的 0.2 API 演进提到 **0.2.0**。
 
