@@ -2929,6 +2929,24 @@ impl VimState {
         self.republish_search_inner(ctx);
     }
 
+    /// [`VimState::refresh_highlights`] on the read-only pipeline: re-scans
+    /// the CURRENT buffer and republishes, so a host that swaps the text
+    /// underneath the engine (pane/window switches in a multi-view layout)
+    /// can re-align `hlsearch` without feeding a synthetic key.
+    /// No-op without a live search pattern.
+    pub fn refresh_highlights_ro(&mut self, ctx: &mut CtxRo) {
+        let was_modifiable = self.modifiable;
+        self.modifiable = false;
+        let mut buf = crate::buffer::RoBuffer::new(ctx.buf);
+        let mut host = crate::host::RoHost::new(&mut *ctx.host);
+        let mut inner = Ctx {
+            buf: &mut buf,
+            host: &mut host,
+        };
+        self.republish_search_inner(&mut inner);
+        self.modifiable = was_modifiable;
+    }
+
     /// While set, `:action <unknown-id>` misses are silently ignored
     /// (host chooses whether the bridge reports; shared rc files contain
     /// mappings aimed at other apps).

@@ -648,3 +648,50 @@ fn insert_corners_refuse_at_entry_without_entering_insert() {
         assert_eq!(buf.slice(0..buf.len()), text, "{keys:?}: 缓冲被改动");
     }
 }
+
+/// `refresh_highlights_ro`：宿主把引擎下面的文本换掉（多视图布局的窗格
+/// 切换）后，不喂合成键就能按当前缓冲重扫并重发高亮。无活动 pattern 时
+/// 是安静的 no-op（不得清空宿主已有的发布）。
+#[test]
+fn refresh_highlights_ro_republishes_for_the_new_buffer() {
+    let a = BufferView::from_text("alpha\nbeta\ngamma\n");
+    let b = BufferView::from_text("beta\nzzz\n");
+    let mut host = RoHost::new();
+    let mut vim = VimState::new();
+    feed_ro(&mut vim, &a, &mut host, &["/", "b", "e", "t", "a", "<CR>"]);
+    assert_eq!(host.highlights, vec![6..10], "缓冲 A 上的 beta 命中");
+
+    // 换缓冲（宿主侧 pane switch 的等价物）：同一 pattern 重扫
+    {
+        let b: &dyn VimBuffer = &b;
+        let mut ctx = CtxRo {
+            buf: b,
+            host: &mut host,
+        };
+        vim.refresh_highlights_ro(&mut ctx);
+    }
+    assert_eq!(
+        host.highlights,
+        vec![0..4],
+        "重扫必须按新缓冲的坐标发布，而不是沿用旧偏移"
+    );
+    assert_eq!(a.slice(0..a.len()), "alpha\nbeta\ngamma\n", "刷新不得写缓冲");
+
+    // 无 pattern（新引擎实例）：no-op，不清空宿主状态
+    let mut fresh = RoHost::new();
+    fresh.highlights = vec![1..2];
+    let mut vim2 = VimState::new();
+    {
+        let b: &dyn VimBuffer = &b;
+        let mut ctx = CtxRo {
+            buf: b,
+            host: &mut fresh,
+        };
+        vim2.refresh_highlights_ro(&mut ctx);
+    }
+    assert_eq!(
+        fresh.highlights,
+        vec![1..2],
+        "没有活动 pattern 时 refresh 必须是 no-op"
+    );
+}
