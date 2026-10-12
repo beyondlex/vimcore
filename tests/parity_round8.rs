@@ -328,9 +328,17 @@ fn marks_listing_shows_change_and_insert_specials() {
     f.type_text("Z");
     f.feed(["escape"]);
     f.feed([":", "m", "a", "r", "k", "s", "\n"]);
-    let msgs = f.host.statuses.join("\n");
-    assert!(msgs.contains(".  line 1"), ":marks 应列出 `.`（{msgs}）");
-    assert!(msgs.contains("^  line 1"), ":marks 应列出 `^`（{msgs}）");
+    // vim 9.1 行格式为 ` %c %6ld %4d %s`（mark.c），故特殊标记以 " ."/" ^" 起
+    assert!(
+        f.host.statuses.iter().any(|s| s.starts_with(" .")),
+        ":marks 应列出 `.`（{:?}）",
+        f.host.statuses
+    );
+    assert!(
+        f.host.statuses.iter().any(|s| s.starts_with(" ^")),
+        ":marks 应列出 `^`（{:?}）",
+        f.host.statuses
+    );
 }
 
 /// `:bN` 是 `:bprev` 的 vim 别名（旧行为 E492）。

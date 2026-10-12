@@ -295,17 +295,19 @@ fn empty_line_pattern_no_phantom_match_after_trailing_newline() {
 
 #[test]
 fn shift_in_range_reports_e16_when_out_of_range() {
-    // 【第十四轮修正】vim 9.1 探针：2 行缓冲上 `:5>` 报
-    // "E16: Invalid range: 5>"——范围解析先于命令识别，越界地址先报 E16。
-    // 第十二轮的 E492 断言基于「> 不该被当范围字符」的正确修复，但对
-    // 这个具体输入选择了错误的期望值；第十四轮的 E16 严格化后与 vim 一致。
-    // 命令在范围内时 `:5>` 式输入仍走 E492（如 2 行缓冲上 `:2>`）。
+    // 【第十五轮修正】`:>`/`:<` 已实现（此前 E492）。vim 9.1 探针：
+    // 2 行缓冲上 `:5>` 越界 → "E16: Invalid range"；`:2>` 正常右移
+    // （引擎默认 et → 4 空格缩进；vim 默认 noet → TAB）。
     let f = edit("a\nb\n", 0, 0, &[":", "5", ">", "\r"]);
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert!(last.starts_with("E16"), "got {last:?}");
     let f = edit("a\nb\n", 0, 0, &[":", "2", ">", "\r"]);
-    let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
-    assert!(last.starts_with("E492"), "got {last:?}");
+    assert_eq!(f.text(), "a\n    b\n", ":2> 应右移第 2 行（et → 4 空格）");
+    assert!(
+        !f.host.statuses.iter().any(|s| s.starts_with("E492")),
+        ":2> 不是未知命令：{:?}",
+        f.host.statuses
+    );
 }
 
 #[test]
@@ -328,6 +330,11 @@ fn marks_listing_dedupes_user_set_dot() {
     // m. 设过 . mark 后,:marks 只列一行 .(旧实现 items + last_change 各一行)
     let mut f = edit("a\nb\n", 0, 0, &["m", "."]);
     f.feed([":", "m", "a", "r", "k", "s", "\r"]);
-    let dot_rows = f.host.statuses.iter().filter(|s| s.starts_with(". ")).count();
+    let dot_rows = f
+        .host
+        .statuses
+        .iter()
+        .filter(|s| s.starts_with(" ."))
+        .count();
     assert_eq!(dot_rows, 1, "dot mark listed once, got {:?}", f.host.statuses);
 }

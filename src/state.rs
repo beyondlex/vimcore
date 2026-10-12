@@ -13,7 +13,7 @@
 
 use crate::buffer::{clamp_cursor, VimBuffer, VimBufferMut};
 use crate::cmdline::Cmdline;
-use crate::host::{ScrollAnchor, VimHost};
+use crate::host::{ScrollAnchor, VimHost, VimHostRo};
 use crate::key::{Key, KeyKind, Modifiers};
 use crate::keymap::{self, Keymaps, MappingMatch};
 use crate::marks::Marks;
@@ -32,6 +32,19 @@ use std::ops::Range;
 pub struct Ctx<'a> {
     pub buf: &'a mut dyn VimBufferMut,
     pub host: &'a mut dyn VimHost,
+}
+
+/// The READ-ONLY twin of [`Ctx`]: a `&dyn VimBuffer` (no write primitives at
+/// all) plus a [`VimHostRo`] (no undo stack, no save, no buffer cycling).
+///
+/// This is the shape a viewing host — a diff viewer, a log pager, a preview
+/// pane — can actually produce, which [`Ctx`] cannot: it demands a
+/// `&mut dyn VimBufferMut`. Feed it to [`VimState::handle_key_ro`] and the
+/// full mode machine, motions, text objects, search, marks, scrolling and
+/// yank work; edits answer `E21`.
+pub struct CtxRo<'a> {
+    pub buf: &'a dyn VimBuffer,
+    pub host: &'a mut dyn VimHostRo,
 }
 
 /// What happened to a key.
@@ -87,6 +100,17 @@ struct BlockInsert {
     /// Cursor offset right after the last appended chunk; a backspace
     /// landing here undoes typed text and shrinks `text` to match.
     typed_end: Option<usize>,
+    /// Byte offset of the block's LEFT edge on the block's FIRST row (taken
+    /// at session start, after the block `c`/`C` deletion and any `A` pads).
+    /// The first row is always at or above the typing row, so rows shifting
+    /// below the typing row never invalidate it.
+    first_line_edge: usize,
+    /// `I`/`A` park the cursor ON `first_line_edge` (vim `op_insert` sets
+    /// `w_cursor.col = oap->start.col`); `c`/`C` park it on the LAST typed
+    /// char of that row (vim `op_change` keeps the insert cursor and only
+    /// `check_cursor()`s). 9.1 oracles: `<C-v>jlAab<Esc>` → col 2 (edge),
+    /// `<C-v>jlcab<Esc>` → col 3 (last typed char).
+    park_on_edge: bool,
 }
 
 /// Pending count-repeat of a plain insert session (`3ifoo<Esc>` types foo
@@ -140,6 +164,10 @@ const MAX_MAP_DEPTH: usize = 1_000; // vim 9.1 default maxmapdepth=1000
 
 /// Cap for the jumplist (`C-o`/`C-i` history) and the changelist (`g;`/`g,`).
 const LIST_LIMIT: usize = 100;
+
+/// vim's `E21` status text, verbatim (9.1 oracle: `:set nomodifiable` + `x`
+/// → `E21: Cannot make changes, 'modifiable' is off`).
+pub const E21_MODIFIABLE_OFF: &str = "E21: Cannot make changes, 'modifiable' is off";
 
 /// One recorded step of the last change, for `.` repeat. Typed text is
 /// recorded as [`RecordedStep::Text`] (it never goes through the key
@@ -243,6 +271,13 @@ pub(crate) enum SearchMotion {
 pub struct VimState {
     pub mode: Mode,
     pub cursor: Cursor,
+    /// vim's `'modifiable'`: `false` rejects every editing command with
+    /// `E21` (bell + status message, key still `Consumed`) while leaving
+    /// motions, text objects, search, marks, scrolling and yank fully
+    /// working. This is what a read-only host (diff viewer, log pager) sets
+    /// once at startup — see [`VimState::set_modifiable`] and
+    /// [`VimState::handle_key_ro`].
+    pub(crate) modifiable: bool,
     pub(crate) visual_anchor: Option<usize>,
 
     // pending command assembly
@@ -311,6 +346,20 @@ pub struct VimState {
     macro_capture: Option<(char, Vec<RecordedStep>)>,
     /// Last register executed with `@` (for `@@`).
     last_macro_played: Option<char>,
+    /// Nesting depth of `execute_ex` (vim's `do_cmdline` `call_depth`), the
+    /// counter behind `E169: Command too recursive`. See `MAX_EX_DEPTH`.
+    pub(crate) ex_depth: usize,
+    /// The register currently being EXECUTED (`@{reg}` playback), vim's
+    /// `reg_executing`. While it is set `q` neither starts nor stops a
+    /// recording and takes no character argument — vim's `nv_record` is
+    /// gated on `reg_executing == 0` (`src/normal.c`). Without the gate a
+    /// played `q` can flip the recording state mid-macro, so the macro
+    /// captures its own `@{reg}` keys and replays itself; combined with
+    /// eager replay expansion that is unbounded memory (fuzz round 36).
+    /// 9.1 probes: `:let @b='qax'` + `@b` → `@a` stays empty, no recording
+    /// opens (`a`/`x` run as plain commands); `:let @c='q'` + `qa@cxq` →
+    /// `"a` is `@cx`, the played `q` did not stop the session.
+    reg_executing: Option<char>,
 
     /// Remaining keys of a `:noremap` expansion: the mapping table is not
     /// consulted while these are consumed (no recursive remap).
@@ -368,6 +417,10 @@ pub struct VimState {
 
     pub(crate) insert_session: Option<InsertSession>,
     pub(crate) insert_register_pending: bool,
+    /// `i_CTRL-R CTRL-R`/`CTRL-O`/`CTRL-P` literal forms (audit E-C-1): the
+    /// ctrl key that armed the literal insert, remembered across the extra
+    /// pending step. `None` = plain `i_CTRL-R {reg}`.
+    pub(crate) insert_register_literal: Option<char>,
     /// pending_visual_marks 入库时刻的编辑前光标（audit C12/C13——gv 的
     /// 光标端取算子**进入时**的位置，编辑漏斗会把它随行调整到编辑后坐标）。
     pub(crate) pending_visual_cursor: Option<usize>,
@@ -516,6 +569,7 @@ impl VimState {
                 offset: 0,
                 desired_col: None,
             },
+            modifiable: true,
             visual_anchor: None,
             count: None,
             register: None,
@@ -542,6 +596,8 @@ impl VimState {
             macros: HashMap::new(),
             macro_capture: None,
             last_macro_played: None,
+            ex_depth: 0,
+            reg_executing: None,
             no_remap_left: 0,
             expanding_mapping: false,
             expansion_keys_left: 0,
@@ -559,6 +615,7 @@ impl VimState {
             jump_pos: 0,
             insert_session: None,
             insert_register_pending: false,
+            insert_register_literal: None,
             filter_span: None,
             pending_visual_cursor: None,
             macro_sync_gen: HashMap::new(),
@@ -775,6 +832,29 @@ impl VimState {
         }
     }
 
+    /// vim's `'modifiable'` — [`VimState::set_modifiable`]'s getter.
+    pub fn is_modifiable(&self) -> bool {
+        self.modifiable
+    }
+
+    /// Turn vim's `'modifiable'` on/off. With it off, every editing command
+    /// (operator execution, `i/a/o/O/R`, `x`/`~`/`r`, `:s`, `:!` filters,
+    /// paste, `.`, undo/redo) is refused with `E21` + a bell while motions,
+    /// text objects, search, marks, scrolling and `y` keep working — the
+    /// read-only host's one-line opt-in:
+    ///
+    /// ```ignore
+    /// impl VimBuffer for MyView { … }
+    /// impl VimBufferMut for MyView {}   // no methods: writes refuse
+    /// vim.set_modifiable(false);
+    /// ```
+    ///
+    /// The key is always reported `Consumed` (a refusal is the engine having
+    /// handled it — vim does not leak it back to the host either).
+    pub fn set_modifiable(&mut self, modifiable: bool) {
+        self.modifiable = modifiable;
+    }
+
     /// Host-side recording suppression: while set, text placed into the
     /// buffer is NOT recorded for `.` repeat. Wrap IME composition preview
     /// mutations (the raw pinyin) with this; only the committed text should
@@ -822,6 +902,42 @@ impl VimState {
     }
 
     // ---- top-level entry ---------------------------------------------------
+
+    /// Feed one keystroke into the engine over a READ-ONLY buffer + host
+    /// (see [`CtxRo`]).
+    ///
+    /// This is [`VimState::handle_key`] with the buffer and the host
+    /// presented through adapters that cannot write: [`RoBuffer`]'s write
+    /// primitives refuse and [`RoHost`]'s editing-side hooks are inert. The
+    /// main pipeline — and only the main pipeline — runs, so there is no
+    /// second copy of the 6.5k-line key handler to keep in sync; `'modifiable'`
+    /// is forced off for the duration of the call, which is what turns every
+    /// editing command into vim's `E21` before it can reach a write.
+    ///
+    /// The read-only host's whole integration is therefore:
+    ///
+    /// ```ignore
+    /// impl VimBuffer for MyView { … }            // read access only
+    /// impl VimHostRo for MyHost { … }            // no undo / save / buffers
+    /// let mut ctx = CtxRo { buf: &my_view, host: &mut my_host };
+    /// vim.handle_key_ro(&mut ctx, key);
+    /// ```
+    ///
+    /// `modifiable` is restored to its pre-call value on the way out, so a
+    /// host that toggles it (`:set noma` from the cmdline) keeps its choice.
+    pub fn handle_key_ro(&mut self, ctx: &mut CtxRo, key: Key) -> KeyResult {
+        let was_modifiable = self.modifiable;
+        self.modifiable = false;
+        let mut buf = crate::buffer::RoBuffer::new(ctx.buf);
+        let mut host = crate::host::RoHost::new(&mut *ctx.host);
+        let mut inner = Ctx {
+            buf: &mut buf,
+            host: &mut host,
+        };
+        let result = self.handle_key(&mut inner, key);
+        self.modifiable = was_modifiable;
+        result
+    }
 
     /// Feed one keystroke into the engine.
     pub fn handle_key(&mut self, ctx: &mut Ctx, mut key: Key) -> KeyResult {
@@ -893,8 +1009,10 @@ impl VimState {
             // the keys as typed (`:h q`) — but the two paths must not
             // DOUBLE-push: `record_key` already writes the macro copy.
             if prompt == ':' {
-                if let Some((_, keys)) = &mut self.macro_capture {
-                    keys.push(RecordedStep::Key(key.clone()));
+                if self.reg_executing.is_none() {
+                    if let Some((_, keys)) = &mut self.macro_capture {
+                        keys.push(RecordedStep::Key(key.clone()));
+                    }
                 }
             } else if self.recording_active() {
                 self.record_key(&key);
@@ -919,6 +1037,7 @@ impl VimState {
                 self.replaying = false;
                 self.replay_records = false;
                 self.replay_texts.clear();
+                self.reg_executing = None;
                 return KeyResult::Consumed;
             }
 
@@ -986,6 +1105,7 @@ impl VimState {
                 self.replaying = false;
                 self.replay_records = false;
                 self.replay_texts.clear();
+                self.reg_executing = None;
                 self.recording.clear();
                 self.recording_mutated = false;
                 // the aborted keys may have edited mid-replay: republish the
@@ -1021,6 +1141,7 @@ impl VimState {
             self.replay_records = false;
             self.expanding_mapping = false;
             self.replay_texts.clear();
+            self.reg_executing = None;
             self.recording.clear();
             self.recording_mutated = false;
         }
@@ -1233,6 +1354,27 @@ impl VimState {
         ctx.host.bell();
     }
 
+    /// vim's `E21` — an edit was attempted with `'modifiable'` off (or the
+    /// host's write primitive refused it). A HARD failure: the message goes
+    /// to the status channel and a running `@`/`.` replay aborts, exactly
+    /// like every other error vim reports (9.1 oracle: `x`, `dw`, `i`,
+    /// `:s/a/b/`, `u`, `dd`, `p`, `J`, `~`, `o`, `O`, `C`, `S`, `gUiw`, `>G`
+    /// all report E21 under `:set nomodifiable`, while `y`, `yy`, `m{a}` and
+    /// `:q` stay legal).
+    pub(crate) fn report_readonly(&mut self, ctx: &mut Ctx) {
+        ctx.host
+            .status_message(E21_MODIFIABLE_OFF);
+        self.fail_replay(ctx);
+    }
+
+    /// [`VimState::report_readonly`] plus the pending-command reset the
+    /// direct-dispatch paths (visual-block `I`/`A`) owe: a refused key must
+    /// not leave a count or a register prefix armed for the NEXT one.
+    pub(crate) fn reject_readonly_pending(&mut self, ctx: &mut Ctx) {
+        self.reset_pending();
+        self.report_readonly(ctx);
+    }
+
     /// A HARD command failure during a replay: vim aborts the remaining
     /// macro keys and rounds (`:h @` error semantics — oracle D2: a failed
     /// `fx` kills the rest of `2@a`). Plain stuck motions only beep and
@@ -1249,18 +1391,28 @@ impl VimState {
     /// append to the recording (its steps come FROM the recording), while an
     /// `@` replay keeps recording so the macro's changes land in
     /// `last_change`.
+    ///
+    /// Keys delivered BY an executed register never join the macro capture:
+    /// vim stuffs them with `ins_typebuf(..., nottyped = TRUE)`, and only
+    /// `nottyped == FALSE` reads reach `gotchars()`/`recordbuff`
+    /// (`src/getchar.c`). 9.1 probe: `:let @c='x'` + `qa@cq` → `"a` is `@c`,
+    /// not `@cx`. The `.` recording keeps them (vim's redo model, above).
     fn record_key(&mut self, key: &Key) {
         self.recording.push(RecordedStep::Key(key.clone()));
-        if let Some((_, keys)) = &mut self.macro_capture {
-            keys.push(RecordedStep::Key(key.clone()));
+        if self.reg_executing.is_none() {
+            if let Some((_, keys)) = &mut self.macro_capture {
+                keys.push(RecordedStep::Key(key.clone()));
+            }
         }
     }
 
     /// Undo [`VimState::record_key`] when the engine declines the key.
     fn unrecord_key(&mut self) {
         self.recording.pop();
-        if let Some((_, keys)) = &mut self.macro_capture {
-            keys.pop();
+        if self.reg_executing.is_none() {
+            if let Some((_, keys)) = &mut self.macro_capture {
+                keys.pop();
+            }
         }
     }
 
@@ -1287,14 +1439,18 @@ impl VimState {
     /// pipeline; recorded text is applied inline via the synthetic
     /// [`DOT_TEXT_MARKER`] key.
     ///
-    /// The queue is built EAGERLY, so `count` is clamped to the pipeline
-    /// guard's budget (`count × steps` keys would otherwise be pre-allocated
-    /// up front — `99999999.` meant gigabytes of queue before the guard ever
-    /// saw a step). Beyond the budget the replay stops early instead of
-    /// tripping the lose-everything guard.
+    /// The queue is built EAGERLY, so the budget is the queue's REMAINING
+    /// room, not a fresh `MAX_PIPELINE_STEPS` per call: a macro that plays
+    /// itself (`"a` == "@a", or one that recorded its own `@a`) re-enters
+    /// here for EVERY queued `@`, so a per-call budget grows the queue faster
+    /// than the pipeline drains it — fuzz round 36 hit ~100k keys queued per
+    /// consumed key and a ~50 GB footprint before the iteration guard could
+    /// trip. Beyond the budget the replay stops early instead of tripping the
+    /// lose-everything guard.
     fn enqueue_replay(&mut self, steps: &[RecordedStep], count: usize) {
-        let rounds = (MAX_PIPELINE_STEPS / steps.len().max(1)).max(1);
-        for _ in 0..count.min(rounds) {
+        let room = MAX_PIPELINE_STEPS.saturating_sub(self.pending_keys.len());
+        let rounds = (room / steps.len().max(1)).min(count);
+        for _ in 0..rounds {
             for step in steps {
                 match step {
                     RecordedStep::Key(key) => self.pending_keys.push_back(key.clone()),
@@ -1836,7 +1992,14 @@ impl VimState {
             self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
-        ctx.buf.insert_text(at, text);
+        if !ctx.buf.insert_text(at, text) {
+            // Safety net for a host that forgot `set_modifiable(false)`: the
+            // write primitive refused, so vim's E21 applies and NO stored
+            // offset moves (the shift bookkeeping below would strand marks
+            // inside text that was never written).
+            self.report_readonly(ctx);
+            return;
+        }
         let len = text.len();
         self.marks.adjust_insert(at, len);
         Self::adjust_positions(&mut self.changes, |p| if p > at { p + len } else { p });
@@ -1912,7 +2075,10 @@ impl VimState {
             })
         });
         self.flush_undo_group(ctx);
-        ctx.buf.delete_range(range.clone());
+        if !ctx.buf.delete_range(range.clone()) {
+            self.report_readonly(ctx);
+            return;
+        }
         self.marks.adjust_delete(range.clone());
         if let Some((rel_lo, rel_hi, kind)) = visual_fold {
             let line = ctx.buf.offset_to_line(crate::buffer::floor_to_char_boundary(
@@ -1996,7 +2162,10 @@ impl VimState {
             self.recording_mutated = true;
         }
         self.flush_undo_group(ctx);
-        ctx.buf.replace_range(range.clone(), text);
+        if !ctx.buf.replace_range(range.clone(), text) {
+            self.report_readonly(ctx);
+            return;
+        }
         let new_len = text.len();
         self.marks.adjust_replace(range.clone(), new_len);
         // same inner-preservation rule as marks: an equal-length replace
@@ -2123,12 +2292,27 @@ impl VimState {
             }
         );
         if in_block {
+            let ts = self.options.tabstop.max(1);
             let col = self.block_cursor_col.get_or_insert_with(|| {
-                crate::buffer::display_column(ctx.buf, self.cursor.offset)
+                crate::buffer::display_column_with(ctx.buf, self.cursor.offset, ts)
             });
             match motion {
-                Motion::Right => *col = col.saturating_add(count.max(1)),
-                Motion::Left => *col = col.saturating_sub(count.max(1)),
+                // `l`/`h` land on the NEXT/PREV character, so the block edge
+                // follows that character's DISPLAY column, not a flat +1 cell
+                // — a wide (CJK) char spans 2 cells and a tab up to 'tabstop'
+                // (9.1 oracles: `<C-v>jlx` on 中文字 deletes BOTH 中文, and
+                // `<C-v>jl` on "\tabc" covers the tab + 'a'). When the byte
+                // cursor cannot move (line end/start) the column still shifts
+                // by one VIRTUAL cell so the block can extend past a short row.
+                Motion::Right | Motion::Left => {
+                    if result.moved {
+                        *col = crate::buffer::display_column_with(ctx.buf, result.offset, ts);
+                    } else if motion == Motion::Right {
+                        *col = col.saturating_add(count.max(1));
+                    } else {
+                        *col = col.saturating_sub(count.max(1));
+                    }
+                }
                 _ => {}
             }
         }
@@ -2146,11 +2330,13 @@ impl VimState {
                 // any other motion re-anchors at where it landed
                 Motion::Right | Motion::Left => {}
                 other => {
+                    let ts = self.options.tabstop.max(1);
                     *self.block_cursor_col.get_or_insert_with(|| {
-                        crate::buffer::display_column(ctx.buf, self.cursor.offset)
-                    }) = crate::buffer::display_column(
+                        crate::buffer::display_column_with(ctx.buf, self.cursor.offset, ts)
+                    }) = crate::buffer::display_column_with(
                         ctx.buf,
                         clamp_cursor(ctx.buf, result.offset),
+                        ts,
                     );
                     let _ = other;
                 }
@@ -2531,7 +2717,6 @@ impl VimState {
                     })
                     .collect();
                 rows.sort_unstable_by(|a, b| b.cmp(a)); // bottom-up inserts
-                let mut first_row = usize::MAX;
                 for offset in rows {
                     // the delta model assumes ONLY typing happened on the
                     // session's typing row; any other length change above a
@@ -2540,7 +2725,6 @@ impl VimState {
                     // lands at worst one char off, never mid-character (the
                     // buffer insert itself would panic the host)
                     let offset = crate::buffer::floor_to_char_boundary(ctx.buf, offset);
-                    first_row = first_row.min(offset);
                     let replica = if repeat > 1 {
                         std::borrow::Cow::Owned(block.text.repeat(repeat))
                     } else {
@@ -2556,17 +2740,22 @@ impl VimState {
                         self.cursor.offset += replica.len();
                     }
                 }
-                // vim parks the cursor on the FIRST row of the block, on the
-                // last inserted character (9.1 oracle: `<C-v>jI-<Esc>` on
-                // ["aa","bb","cc"] → line 1 col 1) — the engine used to leave
-                // it on the typing row (the row vim never sits on, the
-                // anchor+count row down), putting every subsequent command a
-                // block-row below where vim's lands (audit D11: the `.` redo
-                // re-ran the block one row low)
-                if first_row != usize::MAX {
+                // vim parks the exit cursor on the block's FIRST row (op_insert
+                // sets `w_cursor.lnum = oap->start.lnum`). The COLUMN differs
+                // by command: `I`/`A` sit ON the block's left edge
+                // (`w_cursor.col = oap->start.col`), `c`/`C` on the LAST typed
+                // char of that row (`op_change` keeps the insert cursor and
+                // only `check_cursor()`s). `first_line <= typing_line` always,
+                // so `first_line_edge` never shifts. The old formula used the
+                // first REPLICA row + text end — a row low for `c` (typing row
+                // == first row) and past the appended text for `A` (audit D11
+                // `.`-redo row offset was a symptom of the row, not the col).
+                if block.park_on_edge {
+                    self.cursor.offset = crate::buffer::clamp_cursor(ctx.buf, block.first_line_edge);
+                } else {
                     let at = crate::buffer::floor_to_char_boundary(
                         ctx.buf,
-                        first_row + block.text.len(),
+                        block.first_line_edge + block.text.len(),
                     );
                     let line_start = ctx.buf.line_start(ctx.buf.offset_to_line(at));
                     self.cursor.offset = crate::buffer::prev_grapheme_offset(ctx.buf, at)
@@ -2610,6 +2799,7 @@ impl VimState {
         self.end_edit();
         self.mode = Mode::Normal;
         self.insert_register_pending = false;
+        self.insert_register_literal = None;
         ctx.host.changed();
     }
 
@@ -2804,8 +2994,12 @@ impl VimState {
                 Some(RecordedStep::Text(existing)) => existing.push_str(text),
                 _ => self.recording.push(RecordedStep::Text(text.to_owned())),
             }
-            if let Some((_, keys)) = &mut self.macro_capture {
-                keys.push(RecordedStep::Text(text.to_owned()));
+            // see `record_key`: text delivered by an executed register is
+            // "not typed" and stays out of the macro capture
+            if self.reg_executing.is_none() {
+                if let Some((_, keys)) = &mut self.macro_capture {
+                    keys.push(RecordedStep::Text(text.to_owned()));
+                }
             }
         }
     }
@@ -3000,6 +3194,11 @@ impl VimState {
     }
 
     fn apply_block_operator(&mut self, ctx: &mut Ctx, op: Operator) {
+        if !self.modifiable && op.is_edit() {
+            self.report_readonly(ctx);
+            self.reset_pending();
+            return;
+        }
         let Some(block) = ops::span_from_visual_block(self, ctx.buf) else {
             self.note_bell(ctx);
             return;
@@ -3136,6 +3335,8 @@ impl VimState {
                     text: String::new(),
                     typed_end: None,
                     repeat: 1,
+                    first_line_edge: self.cursor.offset,
+                    park_on_edge: false,
                 });
                 self.begin_insert(InsertKind::Insert);
                 self.end_edit();
@@ -3166,6 +3367,8 @@ impl VimState {
                     text: String::new(),
                     typed_end: None,
                     repeat: 1,
+                    first_line_edge: self.cursor.offset,
+                    park_on_edge: false,
                 });
                 self.begin_insert(InsertKind::Insert);
                 // blockwise `c` needs per-row text replication that a replay of
@@ -3368,6 +3571,14 @@ impl VimState {
             text: String::new(),
             typed_end: None,
             repeat,
+            // vim `op_insert`: the exit cursor is `oap->start.col` on the
+            // block's FIRST row — the block's left edge, NOT the append point
+            // (`A`) nor the last typed char.
+            first_line_edge: ranges
+                .first()
+                .map(|r| r.start)
+                .unwrap_or_else(|| ctx.buf.line_start(block.first_line)),
+            park_on_edge: true,
         });
         self.begin_insert(InsertKind::Insert);
         // visual-block I/A 的录制保留（audit D11）：vim 的 `.` 重放原键序
@@ -3768,6 +3979,7 @@ impl VimState {
                     if let Some(n) = count {
                         self.cmdline.buffer.push_str(".,.+");
                         self.cmdline.buffer.push_str(&(n - 1).to_string());
+                        self.cmdline.cursor = self.cmdline.buffer.len();
                     }
                     return ProcessOutcome::Consumed;
                 }
@@ -3960,6 +4172,7 @@ impl VimState {
             self.register = None;
             self.begin_cmdline(':');
             self.cmdline.buffer.push_str("'<,'>");
+            self.cmdline.cursor = self.cmdline.buffer.len();
             return ProcessOutcome::Consumed;
         }
         // `/`/`?` in visual mode: vim's search-as-motion — on execute the
@@ -3993,6 +4206,10 @@ impl VimState {
             if let (KeyKind::Char(c), true) = (&key.kind, key.modifiers.is_plain()) {
                 match *c {
                     'I' | 'A' => {
+                        if !self.modifiable {
+                            self.reject_readonly_pending(ctx);
+                            return ProcessOutcome::Consumed;
+                        }
                         let repeat = self.take_total_count().max(1);
                         self.begin_block_insert(ctx, *c == 'A', repeat);
                         return ProcessOutcome::Consumed;
@@ -4005,13 +4222,21 @@ impl VimState {
                         self.apply_block_operator(ctx, Operator::Delete);
                         return ProcessOutcome::Consumed;
                     }
+                    // block `Y` is a YANK — legal with 'modifiable' off
                     'Y' => {
                         self.apply_block_operator(ctx, Operator::Yank);
                         return ProcessOutcome::Consumed;
                     }
-                    'C' | 'S' => {
+                    'C' => {
                         // per-row change TO END OF LINE (`:h v_b_C` — audit
-                        // C10; plain block `c` deletes only the block slice)
+                        // C10; plain block `c` deletes only the block slice).
+                        // `S` is NOT a block operator: vim treats it like the
+                        // charwise/linewise visual `S` — a LINEWISE change of
+                        // the selected rows (9.1 oracle: `<C-v>jllS Z<Esc>` on
+                        // "long line here"/"abc"/"def" → "Z"/"def" with a
+                        // linewise register; it used to run BlockChangeToEnd).
+                        // It falls through to the Visual `LinewiseOp(Change)`
+                        // table entry below.
                         self.apply_block_operator(ctx, Operator::BlockChangeToEnd);
                         return ProcessOutcome::Consumed;
                     }
@@ -4049,6 +4274,17 @@ impl VimState {
 
     /// Execute a resolved command. `count`/`register` come from pending state.
     pub(crate) fn execute_command(&mut self, ctx: &mut Ctx, kind: CmdKind) -> ProcessOutcome {
+        // `q` is INERT while a register executes: vim's `nv_record` runs
+        // `do_record()` only when `reg_executing == 0` (`src/normal.c`), so a
+        // played `q` neither opens nor closes a recording AND takes no
+        // character argument (the following key stays a normal command).
+        // Skipping this gate let a macro capture its own `@{reg}` keys, which
+        // then replayed itself — fuzz round 36 grew the queue to ~50 GB.
+        // 9.1 probes: `:let @b='qax'` + `@b` → `"a` empty, line reads "defx";
+        // `:let @c='q'` + `qa@cxq` → `"a` is `@cx`.
+        if kind == CmdKind::Normal(NormalCmd::RecordMacro) && self.reg_executing.is_some() {
+            return ProcessOutcome::Consumed;
+        }
         // `q` while recording stops immediately (vim semantics) — it must not
         // wait for a char argument, or the NEXT key would be eaten as the
         // "stop key" and the real trailing `q` would stay in the macro
@@ -4079,6 +4315,16 @@ impl VimState {
             self.count = None;
             self.register = None;
             self.register_pending = false;
+            return ProcessOutcome::Consumed;
+        }
+        // 'modifiable' off: refuse an editing command at its EXECUTION point
+        // (E21 + bell, key still consumed). Arming an operator is exempt —
+        // vim's `d` waits silently and the E21 only arrives once the motion
+        // completes it (`complete_operator_with_span`), which is also what
+        // keeps the cursor from drifting on `dw`.
+        if !self.modifiable && kind.is_edit() && !matches!(kind, CmdKind::Operator(_)) {
+            self.reset_pending();
+            self.report_readonly(ctx);
             return ProcessOutcome::Consumed;
         }
         // char-argument commands wait for their argument first
@@ -4378,6 +4624,13 @@ impl VimState {
             self.apply_block_operator(ctx, op);
             return;
         }
+        if !self.modifiable && op.is_edit() {
+            // E21 with the selection intact: vim leaves visual mode's
+            // selection and cursor alone on a refused operator
+            self.report_readonly(ctx);
+            self.reset_pending();
+            return;
+        }
         let Some(span) = ops::span_from_visual(self, ctx.buf) else {
             self.note_bell(ctx);
             return;
@@ -4434,6 +4687,13 @@ impl VimState {
     /// An operator got its motion/object (from the trie or a doubled key).
     pub(crate) fn complete_operator_with_span(&mut self, ctx: &mut Ctx, span: ops::OpSpan) {
         let Some(op) = self.op.take() else { return };
+        // vim's op_* check 'modifiable' before touching the text: `dw` under
+        // `:set nomodifiable` is E21 and the cursor stays put (9.1 oracle).
+        if !self.modifiable && op.is_edit() {
+            self.reset_pending();
+            self.report_readonly(ctx);
+            return;
+        }
         self.op_count = None;
         let gen_before = self.edit_generation;
         self.begin_edit();
@@ -5765,11 +6025,18 @@ impl VimState {
                         self.cursor.offset =
                             ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
                     } else {
-                        self.edit_insert(ctx, span.start.min(ctx.buf.len()), &repeated);
-                        let end = span.start + repeated.len();
-                        self.cursor.offset =
-                            crate::buffer::prev_grapheme_offset(ctx.buf, end)
-                                .unwrap_or(span.start);
+                        let at = span.start.min(ctx.buf.len());
+                        self.edit_insert(ctx, at, &repeated);
+                        let end = at + repeated.len();
+                        // a MULTILINE charwise paste parks on the FIRST pasted
+                        // character (do_put MCHAR multi-line arm restores
+                        // b_op_start — vim 9.1 `Gviwp` lands on (3,1)); a
+                        // single-line paste stays on the last pasted char.
+                        self.cursor.offset = if repeated.contains('\n') {
+                            crate::buffer::clamp_cursor(ctx.buf, at)
+                        } else {
+                            crate::buffer::prev_grapheme_offset(ctx.buf, end).unwrap_or(at)
+                        };
                     }
                 }
                 self.end_edit();
@@ -5860,10 +6127,16 @@ impl VimState {
                         self.edit_insert(ctx, at, &repeated);
                         // cursor on the last pasted GRAPHEME start — byte - 1
                         // sits inside a multi-byte character, prev_char_offset
-                        // sits on a trailing combining mark
+                        // sits on a trailing combining mark. A MULTILINE
+                        // charwise paste instead parks on the FIRST pasted
+                        // character (do_put MCHAR multi-line arm — vim 9.1
+                        // `Gviwp` lands on (3,1) = byte 4).
                         let end = at + repeated.len();
-                        self.cursor.offset = crate::buffer::prev_grapheme_offset(ctx.buf, end)
-                            .unwrap_or(at);
+                        self.cursor.offset = if repeated.contains('\n') {
+                            crate::buffer::clamp_cursor(ctx.buf, at)
+                        } else {
+                            crate::buffer::prev_grapheme_offset(ctx.buf, end).unwrap_or(at)
+                        };
                     }
                 }
                 self.end_edit();
@@ -5961,10 +6234,15 @@ impl VimState {
                 let Some(span) = ops::span_from_visual(self, ctx.buf) else {
                     return;
                 };
-                let count = self.take_total_count();
+                // vim's visual `J` ignores the typed count: the join length
+                // is the SELECTED line count (do_pending_operator sets
+                // oap->line_count from the selection; OP_JOIN only clamps
+                // `< 2 → 2`, cap->count0 is not consulted). 9.1 oracle:
+                // `VjJ` and `Vj3J` both give "a b\nc\nd" on "a\nb\nc\nd".
+                let _ = self.take_total_count();
                 let first = ctx.buf.offset_to_line(span.start);
                 let last = ops::last_line_of_span(ctx.buf, &span);
-                let requested = (last - first + 1).max(count);
+                let requested = last - first + 1;
                 self.begin_edit();
                 self.cursor.offset = span.start;
                 let performed = ops::join_lines(self, ctx, requested, literal);
@@ -6270,10 +6548,20 @@ impl VimState {
                 self.macro_capture = Some((slot, seed));
             }
             CharArgCmd::MacroPlay => {
-                // `@:` repeats the last executed Ex command line, [count]
-                // times (audit D3 — the count was ignored)
-                if c == ':' {
+                // nv_at records ANY register name as the "last played" one —
+                // including ':' (a `@:` then `@@` repeats the Ex command
+                // line; audit E-C-13). Resolve the register FIRST so both the
+                // explicit `@:` and a later `@@` reach the same Ex arm.
+                let reg = if c == '@' {
+                    self.last_macro_played
+                } else {
+                    Some(c)
+                };
+                if reg == Some(':') {
+                    // `@:` repeats the last executed Ex command line, [count]
+                    // times (audit D3 — the count was ignored)
                     let count = self.take_total_count().max(1);
+                    self.last_macro_played = Some(':');
                     match self.cmdline.last_command.clone() {
                         Some(line) => {
                             for _ in 0..count {
@@ -6286,11 +6574,6 @@ impl VimState {
                     self.end_command();
                     return ProcessOutcome::Consumed;
                 }
-                let reg = if c == '@' {
-                    self.last_macro_played
-                } else {
-                    Some(c)
-                };
                 // the register is the SOURCE OF TRUTH for a-z once it was
                 // written after the recording (audit D4 — vim's macros ARE
                 // registers): `"ayy` replaces `@a`, and `qax` round-trips
@@ -6326,6 +6609,7 @@ impl VimState {
                         // `last_change` (`.` after `@a` repeats it — vim 9.1)
                         self.begin_replay();
                         self.replay_records = true;
+                        self.reg_executing = Some(r);
                         self.enqueue_replay(&keys, count);
                     }
                     None => ctx.host.bell(),

@@ -21,6 +21,15 @@ type Shared = Rc<RefCell<String>>;
 #[derive(Clone)]
 pub struct BufferView(pub Shared);
 
+impl BufferView {
+    /// A standalone buffer (tests that drive the engine without a
+    /// [`Fixture`], e.g. the read-only pipeline where two views of one text
+    /// must not share a `RefCell`).
+    pub fn from_text(text: &str) -> Self {
+        BufferView(Rc::new(RefCell::new(text.to_owned())))
+    }
+}
+
 impl VimBuffer for BufferView {
     fn len(&self) -> usize {
         self.0.borrow().len()
@@ -95,11 +104,13 @@ impl VimBuffer for BufferView {
 }
 
 impl VimBufferMut for BufferView {
-    fn insert_text(&mut self, offset: usize, text: &str) {
+    fn insert_text(&mut self, offset: usize, text: &str) -> bool {
         self.0.borrow_mut().insert_str(offset, text);
+        true
     }
-    fn delete_range(&mut self, range: Range<usize>) {
+    fn delete_range(&mut self, range: Range<usize>) -> bool {
         self.0.borrow_mut().replace_range(range, "");
+        true
     }
 }
 

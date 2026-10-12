@@ -821,7 +821,9 @@ fn substitute_dollar_appends_across_range() {
     let mut f = Fixture::new("hello\nworld\n");
     f.feed([":", "%", "s", "/", "$", "/", "<", "/", "<CR>"]);
     assert_eq!(f.text(), "hello<\nworld<\n");
-    assert_eq!(f.host.statuses, ["2 substitutions on 2 lines"]);
+    // vim: 2 个替换 ≤ 'report'（默认 2），静默（oracle osr2；旧断言误记 2 个
+    // 替换会报 "2 substitutions on 2 lines"）
+    assert_eq!(f.host.statuses, Vec::<String>::new());
 }
 
 /// `a*` 在无 `a` 文本上每处都是零宽匹配：vim `:s/a*/-/` 得 "-bbb"。
@@ -1251,7 +1253,7 @@ fn marks_listing_does_not_duplicate_caret() {
         .host
         .statuses
         .iter()
-        .filter(|s| s.starts_with("^ "))
+        .filter(|s| s.starts_with(" ^"))
         .count();
     assert_eq!(caret_rows, 1, "statuses: {:?}", f.host.statuses);
 }
@@ -2175,13 +2177,20 @@ fn sentence_object_on_multibyte_cursor_char() {
 
 #[test]
 fn marks_listing_shows_both_visual_ends() {
-    // vim 的 :marks 同时列出 '< 与 '>（引擎曾只列 '<）
+    // vim 的 :marks 同时列出 '< 与 '>（引擎曾只列 '<）；行格式为
+    // `" %c %6ld %4d %s"`，所以行以 " <"/" >" 起头
     let mut f = Fixture::new("alpha\nbeta\n");
     f.feed(["V", "j", "d"]);
     f.feed([":", "m", "a", "r", "k", "s", "<CR>"]);
     let joined = f.host.statuses.join("\n");
-    assert!(joined.contains("\n<  line") || joined.starts_with("<  line"), "应列出 '<\n{joined}");
-    assert!(joined.contains("\n>  line") || joined.contains(">  line"), "应列出 '>\n{joined}");
+    assert!(
+        f.host.statuses.iter().any(|s| s.starts_with(" <")),
+        "应列出 '<\n{joined}"
+    );
+    assert!(
+        f.host.statuses.iter().any(|s| s.starts_with(" >")),
+        "应列出 '>\n{joined}"
+    );
 }
 
 // ---- 第二十七轮：宿主历史轴（undo/redo）与组所有权 ---------------------------

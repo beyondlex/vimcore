@@ -1436,14 +1436,16 @@ fn ex_feedback_goes_through_status_channel() {
         Some("E486: Pattern not found: zz")
     );
 
-    // success: substitution count
-    let mut f = Fixture::at("foo bar foo\n", 0, 0);
+    // success: substitution count (only reported when > 'report', i.e. 3+ —
+    // a 2-substitution command is silent, so use three matches here; oracle
+    // osr2/osr3)
+    let mut f = Fixture::at("foo bar foo foo\n", 0, 0);
     f.feed([
         ":", "%", "s", "/", "f", "o", "o", "/", "q", "u", "x", "/", "g", "<CR>",
     ]);
     assert_eq!(
         f.host.statuses.last().map(String::as_str),
-        Some("2 substitutions on 1 line")
+        Some("3 substitutions on 1 line")
     );
 
     // unknown command: E492

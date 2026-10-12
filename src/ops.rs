@@ -560,16 +560,26 @@ pub fn span_from_visual_block(
     let first_line = buf.offset_to_line(anchor.min(cursor));
     let last_line = buf.offset_to_line(anchor.max(cursor));
     // `$` in blockwise visual (`:h v_$`): the block extends to the end of
-    // EVERY selected line — and the probes showed the anchor column drops
-    // out entirely (each row covers col 0..content end). Tracked on the
-    // engine by `VimState::block_dollar`, armed by the LineEnd motion.
+    // EVERY selected line. The LEFT edge, however, stays at the ANCHOR
+    // column — 9.1 oracle: a block anchored at col 3, then `j$d` on
+    // "abcdef"/"gh" deletes cols 3-6 of row 1 and NOTHING of the short row
+    // 2 (`ab`/`gh` left); the earlier "anchor drops out, each row covers
+    // col 0..content end" model only held when the anchor sat in column 1.
+    // Tracked on the engine by `VimState::block_dollar`, armed by LineEnd.
     if vim.block_dollar {
+        let a_row = buf.offset_to_line(anchor);
+        let ts = vim.options.tabstop.max(1);
+        let a_col = vim
+            .block_anchor_vcol
+            .unwrap_or_else(|| crate::buffer::display_column_with(buf, anchor, ts))
+            .min(crate::buffer::display_column_with(buf, buf.line_end(a_row), ts));
+        let col_lo = a_col;
         let rows = (first_line..=last_line)
-            .map(|line| buf.line_start(line)..buf.line_end(line))
+            .map(|line| block_row_range(buf, line, col_lo, usize::MAX, vim.options.tabstop))
             .collect();
         return Some(BlockSpan {
-            col_lo: 0,
-            col_hi: 0, // unused: dollar skips both the yank pads and the A pads
+            col_lo,
+            col_hi: usize::MAX, // `$` has no shared right edge; pads/A are skipped
             first_line,
             rows,
             dollar: true,
@@ -585,39 +595,22 @@ pub fn span_from_visual_block(
     // on the way back)
     let a_row = buf.offset_to_line(anchor);
     let c_row = buf.offset_to_line(cursor);
+    let ts = vim.options.tabstop.max(1);
     let a_col = vim
         .block_anchor_vcol
-        .unwrap_or_else(|| crate::buffer::display_column(buf, anchor))
-        .min(crate::buffer::display_column(buf, buf.line_end(a_row)));
+        .unwrap_or_else(|| crate::buffer::display_column_with(buf, anchor, ts))
+        .min(crate::buffer::display_column_with(buf, buf.line_end(a_row), ts));
     let c_col = vim
         .block_cursor_col
-        .unwrap_or_else(|| crate::buffer::display_column(buf, cursor))
-        .min(crate::buffer::display_column(buf, buf.line_end(c_row)));
-    // An anchor sitting ON a TAB snaps the block's left edge to the tab's
-    // END and measures the width as the cursor/anchor column distance + 1
-    // (audit C15 — 9.1 oracle matrix at ts=4: `\tab` + `<C-v>l` covers
-    // cols 4..6 = "ab" on the tab row, "ef" on the next; `<C-v>` alone
-    // covers just col 4 = 'a'/'e'. The old ts=1 model read cols 0..2 and
-    // shredded the tab.)
-    if buf.char_at(anchor) == Some('\t') {
-        let ts = vim.options.tabstop.max(1);
-        let a_col_raw = vim
-            .block_anchor_vcol
-            .unwrap_or_else(|| crate::buffer::display_column(buf, anchor));
-        let tab_end = (a_col_raw / ts + 1) * ts;
-        let width = c_col.saturating_sub(a_col_raw) + 1;
-        let (col_lo, col_hi) = (tab_end, tab_end + width);
-        let rows = (first_line..=last_line)
-            .map(|line| block_row_range(buf, line, col_lo, col_hi, vim.options.tabstop))
-            .collect();
-        return Some(BlockSpan {
-            col_lo,
-            col_hi,
-            first_line,
-            rows,
-            dollar: false,
-        });
-    }
+        .unwrap_or_else(|| crate::buffer::display_column_with(buf, cursor, ts))
+        .min(crate::buffer::display_column_with(buf, buf.line_end(c_row), ts));
+    // No special case for an anchor ON a tab: vim's block left edge is the
+    // anchor's DISPLAY column (the tab's START), and the right edge is the
+    // cursor char's display column — the same [min, max] model as every other
+    // anchor. 9.1 oracles: `<C-v>l` on "\tab" (ts=4) covers cols 0..4 =
+    // `\ta` (register `\x165:\ta`), `<C-v>jld` on "\tabc"/"\tdef" deletes
+    // `\ta`/`\te` → "bc"/"ef". (The old branch snapped the left edge to the
+    // tab's END, an over-generalisation from a single ts=1-era probe.)
     let (col_lo, col_hi) = if a_col <= c_col {
         (a_col, c_col)
     } else {
@@ -1227,6 +1220,16 @@ pub fn put_ex(
     leave_after: bool,
 ) {
     let Some(data) = vim.registers.get_for_paste(register, ctx.host) else {
+        // vim's do_put reports `E353: Nothing in register %s` (register.c
+        // do_put) — the unnamed register shows as `"`. The old code rang the
+        // bell silently, so the status bar never carried the message.
+        let name = if register == crate::registers::UNNAMED {
+            "\"".to_owned()
+        } else {
+            register.to_string()
+        };
+        ctx.host
+            .status_message(&format!("E353: Nothing in register {name}"));
         vim.note_bell(ctx);
         return;
     };
@@ -1252,7 +1255,7 @@ pub fn put_ex(
     let count = clamped_repeat_count(text.len(), count.max(1));
 
     if data.kind == RegisterKind::Blockwise {
-        put_blockwise(vim, ctx, &text, count, after);
+        put_blockwise(vim, ctx, &text, count, after, leave_after);
         return;
     }
     let repeated = text.repeat(count);
@@ -1403,9 +1406,17 @@ pub(crate) fn clamped_repeat_count(per: usize, count: usize) -> usize {
 /// past the buffer's last line open padded NEW lines at the tail (the old
 /// "push down, never merge" model came from probes that all sat on the
 /// buffer's last line, where the two models coincide). The cursor sits on
-/// the first pasted character. `count` repeats each row horizontally (vim's
-/// blockwise count).
-fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, after: bool) {
+/// the first pasted character, or — for `gp`/`gP` (`leave_after`) — one
+/// past the last pasted character (do_put MBLOCK `PUT_CURSEND`). `count`
+/// repeats each row horizontally (vim's blockwise count).
+fn put_blockwise(
+    vim: &mut VimState,
+    ctx: &mut Ctx,
+    text: &str,
+    count: usize,
+    after: bool,
+    leave_after: bool,
+) {
     // NO trailing-newline trim: the block yank stores rows joined by `\n`
     // with no terminator, but an EMPTY last row legitimately produces a
     // trailing `\n` ("cde\n" = rows ["cde", ""]) — trimming it dropped the
@@ -1419,7 +1430,10 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
     // rows 2..: bottom-up over the lines below the cursor line, then the
     // overflow (targets past the buffer end) appends at the tail in order
     let merged = (rows.len() - 1).min(line_count.saturating_sub(line + 1));
-    if rows.len() > merged + 1 {
+    // the exclusive end of the LAST pasted row (for the gp/gP cursor)
+    let mut last_end = 0usize;
+    let has_overflow = rows.len() > merged + 1;
+    if has_overflow {
         let indent = " ".repeat(col);
         let mut extra = String::new();
         for row in &rows[merged + 1..] {
@@ -1432,9 +1446,15 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
         // the same `\n` prefix — line_end == len there)
         let at = ctx.buf.line_end(line_count - 1);
         vim.edit_insert(ctx, at, &extra);
+        last_end = at + extra.len();
     }
     for i in (0..merged).rev() {
-        insert_block_row_at_column(vim, ctx, line + 1 + i, col, &rows[i + 1]);
+        let end = insert_block_row_at_column(vim, ctx, line + 1 + i, col, &rows[i + 1]);
+        // rows[merged] is the LAST merged row (i == merged-1); the overflow
+        // rows (if any) are below it, so keep the tail end in that case
+        if !has_overflow && i + 1 == merged {
+            last_end = end;
+        }
     }
     // first row: byte boundary at display column `col` on the cursor line;
     // short lines get padded with spaces up to the column first
@@ -1453,9 +1473,17 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
         at += pad;
     }
     vim.edit_insert(ctx, at, &rows[0]);
+    if merged == 0 {
+        last_end = at + rows[0].len();
+    }
     // block cursor on the first pasted char (vim 9.1: `p` of a 2-row block
-    // leaves the cursor at the insert column of the cursor line)
-    vim.cursor.offset = clamp_cursor(ctx.buf, at);
+    // leaves the cursor at the insert column of the cursor line); `gp`/`gP`
+    // park it one past the LAST pasted char (do_put MBLOCK PUT_CURSEND)
+    vim.cursor.offset = if leave_after {
+        clamp_cursor(ctx.buf, last_end)
+    } else {
+        clamp_cursor(ctx.buf, at)
+    };
     vim.cursor.desired_col = None;
 }
 
@@ -1463,14 +1491,15 @@ fn put_blockwise(vim: &mut VimState, ctx: &mut Ctx, text: &str, count: usize, af
 /// spaces up to `col` first when the line is shorter (vim's blockwise put
 /// merge: "cccc" + row at col 1 → "c<row>ccc"; a 2-char line at col 3 pads
 /// to "bb " before the row). Shared by the normal-mode put (`put_blockwise`)
-/// and the visual-block put's overflow rows.
+/// and the visual-block put's overflow rows. Returns the exclusive end
+/// offset of the inserted text.
 pub(crate) fn insert_block_row_at_column(
     vim: &mut VimState,
     ctx: &mut Ctx,
     target: usize,
     col: usize,
     row: &str,
-) {
+) -> usize {
     let le = ctx.buf.line_end(target);
     let width = crate::buffer::display_column(ctx.buf, le);
     // col == width is an APPEND (byte point = line end), not the clamped
@@ -1485,6 +1514,7 @@ pub(crate) fn insert_block_row_at_column(
     if !text.is_empty() {
         vim.edit_insert(ctx, at, &text);
     }
+    at + text.len()
 }
 
 /// `J` / `gJ`: join `count` lines (at least one join). `literal` = `gJ`

@@ -208,14 +208,28 @@ fn quit_all_spellings_wqa_exit_exist() {
     );
 }
 
-/// D13（P3）`:marks {name}` 按名列出标记（oracle：`:marks a` 只输出 a 一行）；
-/// 引擎只认裸 `:marks`，带参数直接 E492。
+/// D13（P3）`:marks {name}` 按名列出标记（oracle：`:marks a` 输出表头 +
+/// 一行 ` a      1    0 aa`）；引擎只认裸 `:marks`，带参数直接 E492。
 #[test]
 fn marks_accepts_name_arguments() {
     let mut f = edit("aa\n", 0, 0, &["m", "a"]);
     f.feed([":", "m", "a", "r", "k", "s", " ", "a", "<CR>"]);
+    // vim 9.1（oracle redir）：表头 + 一行按 ` %c %6ld %4d %s` 渲染
+    //   mark line  col file/text
+    //    a      1    0 aa
     assert!(
-        f.host.statuses.iter().any(|s| s.starts_with("a  line")),
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s == "mark line  col file/text"),
+        ":marks a 先输出表头：{:?}",
+        f.host.statuses
+    );
+    assert!(
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s.starts_with(" a") && s.contains("aa")),
         ":marks a 应列出标记 a：{:?}",
         f.host.statuses
     );

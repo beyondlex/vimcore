@@ -2,7 +2,22 @@
 //!
 //! The engine computes *what* to do; the host decides *how* it shows up:
 //! scrolling, the system clipboard, search highlighting and the undo stack.
+//!
+//! Two host traits live here:
+//!
+//! - [`VimHost`] — the full surface, for an EDITING host.
+//! - [`VimHostRo`] — the VIEWING half only, for a read-only host (diff
+//!   viewer, log pager): no undo stack, no save, no buffer cycling, no
+//!   clipboard reads. [`VimState::handle_key_ro`](crate::state::VimState::handle_key_ro)
+//!   drives it through [`RoHost`], which adapts it back onto [`VimHost`] so
+//!   the engine keeps ONE key pipeline (PLAN_READONLY P1-B).
+//!
+//! Editing hosts are unaffected: [`VimHost`] keeps every method it has
+//! always had, and the read-only path is opt-in per call.
 
+use crate::buffer::VimBuffer;
+use crate::motions::{Motion, MotionResult};
+use crate::state::VimState;
 use std::ops::Range;
 
 /// Where the requested line should land in the viewport (`zz`/`zt`/`zb`).
@@ -17,6 +32,39 @@ pub enum ScrollAnchor {
     Top,
     /// `zb` — bottom of the viewport.
     Bottom,
+}
+
+/// Opt-in hook that lets a host OWN individual motions.
+///
+/// A host with a projected view of the buffer — folded regions, a diff
+/// viewer's unified synthetic rows — needs `j`/`k` to walk *visible* rows
+/// and `]c`/`[c` to land on chunk boundaries. Rather than leaking a fold
+/// model into the engine, the host answers "I know where this motion goes"
+/// and returns the same [`MotionResult`] the engine would have built:
+///
+/// - `Some(result)` — the host handled it. The engine applies only its
+///   generic bookkeeping (operator span, visual extension, jumplist).
+/// - `None` — fall through to the built-in implementation.
+///
+/// The hook answers for every phase that resolves a motion: plain cursor
+/// moves, operator-pending (`d{motion}`) and visual extension all route
+/// through `Motion::target`, so one hook covers all three.
+///
+/// A host that does not implement it pays nothing: [`VimHost::motion_hook`]
+/// (and [`VimHostRo::motion_hook`]) default to `None`.
+///
+/// Self-authored motions (`]c`) need no `Motion` variant of their own — the
+/// host computes the target line from its own model and returns the result
+/// directly.
+pub trait MotionHook {
+    /// `count` is the resolved count (an absent count arrives as 1).
+    fn intercept_motion(
+        &mut self,
+        vim: &VimState,
+        buf: &dyn VimBuffer,
+        motion: Motion,
+        count: usize,
+    ) -> Option<MotionResult>;
 }
 
 /// Side-effect hooks the host must (or may) implement.
@@ -141,5 +189,163 @@ pub trait VimHost {
     /// (mappings aimed at other apps are expected to miss: ignore quietly).
     fn dispatch_host_action_hinted(&mut self, id: &str, strict: bool) {
         let _ = (id, strict);
+    }
+
+    /// Opt-in [`MotionHook`] for hosts with a projected view (folds, diff
+    /// chunks). Default `None` = every motion takes the built-in path.
+    fn motion_hook(&mut self) -> Option<&mut dyn MotionHook> {
+        None
+    }
+}
+
+/// The VIEWING half of [`VimHost`] — everything a read-only host needs to
+/// drive [`VimState::handle_key_ro`](crate::state::VimState::handle_key_ro).
+///
+/// Deliberately a STANDALONE trait rather than a supertrait of [`VimHost`]:
+/// a supertrait would force every existing editing host to add a second
+/// `impl` block (and would let a forgotten `viewport` silently fall back to
+/// a default). [`RoHost`] bridges the two instead.
+///
+/// What is NOT here, and why: `begin_undo_group`/`undo`/`redo` (no undo
+/// stack), `save`/`cycle_buffer`/`first_buffer`/`last_buffer` (`:w` and
+/// buffer rotation are meaningless without an editable buffer list),
+/// `clipboard_read` (paste is an edit — `E21`).
+pub trait VimHostRo {
+    /// Inclusive `(first_line, last_line)` of what is currently visible.
+    fn viewport(&self) -> (usize, usize);
+
+    /// Make sure `line` is visible — a MINIMAL scroll, never a re-center
+    /// (see [`VimHost::scroll_to_line`]).
+    fn scroll_to_line(&mut self, line: usize);
+
+    /// Make `line` visible with a specific anchor (`zz`/`zt`/`zb`).
+    fn scroll_to_line_anchored(&mut self, line: usize, anchor: ScrollAnchor) {
+        let _ = anchor;
+        self.scroll_to_line(line);
+    }
+
+    /// Scroll the viewport by `lines` (positive = down) without moving the
+    /// cursor (`C-e`/`C-y`).
+    fn scroll_lines(&mut self, lines: i32) {
+        let _ = lines;
+    }
+
+    fn clipboard_write(&mut self, text: &str);
+
+    fn set_search_highlights(&mut self, matches: &[Range<usize>], current: Option<Range<usize>>);
+
+    /// The host's window width in display columns (`'columns'`).
+    fn columns(&self) -> usize {
+        80
+    }
+
+    fn changed(&mut self) {}
+
+    /// Feedback for ignored keys (visual bell / flash).
+    fn bell(&mut self) {}
+
+    /// Non-fatal feedback text for the status UI.
+    fn status_message(&mut self, message: &str) {
+        let _ = message;
+    }
+
+    fn buffer_name(&self) -> &str {
+        ""
+    }
+
+    /// `:q` — close the viewer.
+    fn request_close(&mut self) {}
+
+    /// `:q!`/`ZQ` with the force flag.
+    fn request_close_forced(&mut self, forced: bool) {
+        let _ = forced;
+        self.request_close();
+    }
+
+    /// Opt-in [`MotionHook`] (folds, diff chunks). Default `None`.
+    fn motion_hook(&mut self) -> Option<&mut dyn MotionHook> {
+        None
+    }
+}
+
+/// Adapts a [`VimHostRo`] onto [`VimHost`] so the read-only pipeline can
+/// reuse the ONE key pipeline. Editing-side hooks are inert: `undo`/`redo`
+/// report "nothing to undo", `clipboard_read` reports "nothing to paste",
+/// `save` and buffer cycling do nothing.
+pub struct RoHost<'a> {
+    inner: &'a mut dyn VimHostRo,
+}
+
+impl<'a> RoHost<'a> {
+    pub fn new(host: &'a mut dyn VimHostRo) -> Self {
+        RoHost { inner: host }
+    }
+}
+
+impl VimHost for RoHost<'_> {
+    fn viewport(&self) -> (usize, usize) {
+        self.inner.viewport()
+    }
+    fn scroll_to_line(&mut self, line: usize) {
+        self.inner.scroll_to_line(line)
+    }
+    fn scroll_to_line_anchored(&mut self, line: usize, anchor: ScrollAnchor) {
+        self.inner.scroll_to_line_anchored(line, anchor)
+    }
+    fn scroll_lines(&mut self, lines: i32) {
+        self.inner.scroll_lines(lines)
+    }
+    fn columns(&self) -> usize {
+        self.inner.columns()
+    }
+    fn clipboard_write(&mut self, text: &str) {
+        self.inner.clipboard_write(text)
+    }
+    fn clipboard_read(&self) -> Option<String> {
+        None
+    }
+    fn set_search_highlights(&mut self, matches: &[Range<usize>], current: Option<Range<usize>>) {
+        self.inner.set_search_highlights(matches, current)
+    }
+    fn begin_undo_group(&mut self, _id: u64, _cursor_offset: usize) {}
+    fn undo(&mut self) -> Option<usize> {
+        None
+    }
+    fn redo(&mut self) -> Option<usize> {
+        None
+    }
+    fn changed(&mut self) {
+        self.inner.changed()
+    }
+    fn bell(&mut self) {
+        self.inner.bell()
+    }
+    fn save(&mut self) {}
+    fn request_close(&mut self) {
+        self.inner.request_close()
+    }
+    fn request_close_forced(&mut self, forced: bool) {
+        self.inner.request_close_forced(forced)
+    }
+    fn status_message(&mut self, message: &str) {
+        self.inner.status_message(message)
+    }
+    fn buffer_name(&self) -> &str {
+        self.inner.buffer_name()
+    }
+    fn cycle_buffer(&mut self, _forward: bool) -> bool {
+        false
+    }
+    fn first_buffer(&mut self) -> bool {
+        false
+    }
+    fn last_buffer(&mut self) -> bool {
+        false
+    }
+    fn dispatch_host_action_hinted(&mut self, id: &str, strict: bool) {
+        let _ = (id, strict);
+    }
+    fn motion_hook(&mut self) -> Option<&mut dyn MotionHook> {
+        self.inner.motion_hook()
     }
 }

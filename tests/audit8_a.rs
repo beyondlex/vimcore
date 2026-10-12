@@ -175,7 +175,7 @@ const CASES: &[(&str, &str, &str, &str)] = &[
         ("colon_print", "aa\nbb\n", ":1p\r", "aa\nbb\n"),
         ("colon_num", "aa\nbb\n", ":2\rx", "aa\nb\n"),
         ("colon_numrange", "aa\nbb\ncc\n", ":1,2\rx", "aa\nb\ncc\n"),
-        ("k_cmd", "aa\nbb\n", ":ka\r:'ad\r", "aa\nbb\n"),
+        ("k_cmd", "aa\nbb\n", ":ka\r:'ad\r", "bb\n"),
         ("put_zero", "aa\nbb\n", ":1y\r:0pu\r", "aa\naa\nbb\n"),
         ("put_above", "aa\nbb\n", ":1y\r:2pu!\r", "aa\naa\nbb\n"),
         ("put_named", "aa\nbb\n", "\"ayy\r:2pu a\r", "aa\nbb\naa\n"),

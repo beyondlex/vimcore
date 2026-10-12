@@ -12,7 +12,8 @@ use common::Fixture;
 // 多字节字符内部，宿主 `offset_to_line` 切片 panic。
 //
 // oracle：`中文缓冲` 上 `vll<Esc>` 后 `:marks` 正常输出 `>` 行
-// `>      1    6 中文缓冲`（fuzz round35 只抓 panic 面；col 语义见 R35-2）。
+// ` >      1    6 中文缓冲`（行格式 ` %c %6ld %4d %s`；fuzz round35 只抓
+// panic 面；col 语义见 R35-2）。
 #[test]
 fn r35_1_marks_gt_row_on_cjk_selection_does_not_panic() {
     let mut f = Fixture::new("中文缓冲\n");
@@ -26,25 +27,19 @@ fn r35_1_marks_gt_row_on_cjk_selection_does_not_panic() {
         .host
         .statuses
         .iter()
-        .find(|s| s.starts_with('>') || s.starts_with(" >"))
-        .or_else(|| {
-            f.host
-                .statuses
-                .iter()
-                .find(|s| s.contains("line 1") && s.contains("缓冲"))
-        })
+        .find(|s| s.starts_with(" >"))
         .cloned();
     let gt = gt.unwrap_or_else(|| format!("no > row in {:?}", f.host.statuses));
     assert!(
-        gt.contains("col 6"),
+        gt.ends_with("6 中文缓冲"),
         "oracle: `>` 行 col 6（选区末字符「缓」的 0 基字节列）：{gt:?}"
     );
 }
 
 // ---- R35-2（P2）：`:marks` 的 col 列是 0 基字节列，不是显示列+1 ------------
 //
-// oracle（-es 通道，2026-10-09）：`ab\tcd` 上 `fc` `md` 后 `:marks d` →
-// `d      1    3 ab^Icd`。d 的 0 基**字节**列是 3（显示列是 9，ts=8）；
+// oracle（redir 通道，2026-10-09）：`ab\tcd` 上 `fc` `md` 后 `:marks d` →
+// ` d      1    3 ab^Icd`。d 的 0 基**字节**列是 3（显示列是 9，ts=8）；
 // 行内容原样列出（不 trim 缩进）、TAB 转 `^I`。
 #[test]
 fn r35_2_marks_col_is_zero_based_byte_column() {
@@ -56,7 +51,7 @@ fn r35_2_marks_col_is_zero_based_byte_column() {
     f.feed(keys);
     assert_eq!(
         f.host.statuses.last().map(String::as_str),
-        Some("d  line 1  col 3  ab^Icd"),
+        Some(" d      1    3 ab^Icd"),
         "oracle: col 是 0 基字节列 3，行内容不 trim、TAB 转 ^I：{:?}",
         f.host.statuses
     );

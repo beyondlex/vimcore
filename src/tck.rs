@@ -23,9 +23,9 @@
 use std::ops::Range;
 
 use crate::buffer::{VimBuffer, VimBufferMut};
-use crate::host::VimHost;
+use crate::host::{VimHost, VimHostRo};
 use crate::key::Key;
-use crate::state::{Ctx, VimState};
+use crate::state::{Ctx, CtxRo, VimState};
 
 /// 只读契约：`VimBuffer` 的行语义与字符边界。
 ///
@@ -336,12 +336,235 @@ impl VimBuffer for TckStrBuf {
 }
 
 impl VimBufferMut for TckStrBuf {
-    fn insert_text(&mut self, offset: usize, text: &str) {
+    fn insert_text(&mut self, offset: usize, text: &str) -> bool {
         self.0.insert_str(offset, text);
+        true
     }
-    fn delete_range(&mut self, range: Range<usize>) {
+    fn delete_range(&mut self, range: Range<usize>) -> bool {
         self.0.replace_range(range, "");
+        true
     }
+}
+
+/// 只读契约：`'modifiable'` 关闭时编辑类命令必须按 vim 的 E21 拒绝。
+///
+/// 用自带的记录型宿主（`&mut impl VimBufferMut` 只提供缓冲）在真实按键
+/// 管线上跑：每个编辑类键位喂进去后，断言
+///
+/// - **缓冲逐字节不变**（拒绝不能留下半个改动）；
+/// - **状态通道收到 E21**（不是静默 no-op，也不是 panic）；
+/// - **后续 motion / 搜索 / 标记 / yank 仍然正常**（拒绝不污染状态机：
+///   算子不残留、计数不残留、光标不动）。
+///
+/// 语义取自 vim 9.1 实证：`:set nomodifiable` 下 `x` `dw` `dd` `i` `o` `O`
+/// `C` `S` `~` `p` `J` `r` `u` `>` `:s` `:d` `:j` `:m` `:pu` 全部报 E21；
+/// `y` `yy` `m{a}` `q` `:q` 不报。
+/// 探针用文本：契约的光标/寄存器断言（`gg`→0、`w`→6、`yiw`→"beta"）
+/// 全部按它写死。
+pub const READONLY_PROBE_TEXT: &str = "alpha\nbeta\ngamma\n";
+
+///
+/// 要求缓冲内容恰为 [`READONLY_PROBE_TEXT`]（断言的光标/寄存器值写死在
+/// 探针里；只读宿主拿不出"空缓冲 + 写入"这两步）。
+pub fn readonly_contract(buf: &mut impl VimBufferMut) -> Result<(), String> {
+    let mut host = TckHostRo::default();
+    let mut vim = VimState::new();
+    vim.set_modifiable(false);
+    let before = buf.slice(0..buf.len());
+    if before != READONLY_PROBE_TEXT {
+        return Err(format!(
+            "readonly_contract 要求缓冲内容恰为 {READONLY_PROBE_TEXT:?}（got {before:?}）"
+        ));
+    }
+    buffer_read_contract(buf)?;
+    // The A-step shape: a plain `Ctx` over the caller's `VimBufferMut`, with
+    // `'modifiable'` already off.
+    readonly_probe(&mut vim, &before, &mut host, |vim, host, keys| {
+        let mut ctx = Ctx { buf, host };
+        for k in keys {
+            vim.handle_key(&mut ctx, Key::parse(k));
+        }
+        buf.slice(0..buf.len())
+    })
+}
+
+/// [`readonly_contract`] 的只读管线版本：缓冲以 `&dyn VimBuffer`
+/// 传入，**写原语在类型层面不可达**，宿主只实现 [`VimHostRo`]。
+///
+/// 这是 diff view / 日志查看器类宿主的接入形态
+/// （`VimState::handle_key_ro` + `CtxRo`），也是本契约最强的一形态：
+/// 缓冲不被改动不是断言出来的，而是构造上不可能。
+///
+/// 要求缓冲内容恰为 [`READONLY_PROBE_TEXT`]（只读管线拿不到 `&mut`，写不进去）。
+pub fn readonly_pipeline_contract(buf: &dyn VimBuffer) -> Result<(), String> {
+    let mut host = TckHostRo::default();
+    let mut vim = VimState::new();
+    let before = buf.slice(0..buf.len());
+    if before != READONLY_PROBE_TEXT {
+        return Err(format!(
+            "readonly_pipeline_contract 要求缓冲内容恰为 {READONLY_PROBE_TEXT:?}（got {before:?}）"
+        ));
+    }
+    buffer_read_contract(buf)?;
+    // No `set_modifiable(false)` and no `&mut`: `handle_key_ro` forces
+    // `'modifiable'` off for the call and the buffer reference is shared, so
+    // a mutation is impossible BY CONSTRUCTION rather than by assertion.
+    readonly_probe(&mut vim, &before, &mut host, |vim, host, keys| {
+        let mut ctx = CtxRo { buf, host };
+        for k in keys {
+            vim.handle_key_ro(&mut ctx, Key::parse(k));
+        }
+        buf.slice(0..buf.len())
+    })
+}
+
+/// 编辑类键位表：只读模式下每一条都必须被 E21 拒绝且不改动缓冲。
+/// 全部有 vim 9.1 实证（`:set nomodifiable` 下逐条采样）。
+const EDIT_KEYS: &[&[&str]] = &[
+    &["x"],
+    &["X"],
+    &["d", "w"],
+    &["d", "d"],
+    &["d", "i", "w"],
+    &["c", "w"],
+    &["s"],
+    &["S"],
+    &["C"],
+    &["D"],
+    &["o"],
+    &["O"],
+    &["i"],
+    &["a"],
+    &["I"],
+    &["A"],
+    &["R"],
+    &["~"],
+    &["r", "Z"],
+    &["J"],
+    &["g", "J"],
+    &["p"],
+    &["P"],
+    &["u"],
+    &["<C-r>"],
+    &["."],
+    &["<C-a>"],
+    &["<C-x>"],
+    &[">", ">"],
+    &["<", "<"],
+    &["g", "u", "u"],
+    &["g", "U", "U"],
+    // Ex 命令（逐字符喂，Enter 收尾）
+    &[":", "s", "/", "a", "/", "b", "/", "<CR>"],
+    &[":", "%", "s", "/", "a", "/", "b", "/", "g", "<CR>"],
+    &[":", "d", "<CR>"],
+    &[":", "%", "d", "<CR>"],
+    &[":", "j", "<CR>"],
+    &[":", "1", "m", "2", "<CR>"],
+    &[":", "p", "u", "<CR>"],
+    // 可视模式下的编辑
+    &["v", "l", "d"],
+    &["V", "d"],
+    &["v", "l", "~"],
+];
+
+/// 查看类键位表：只读模式下每一条都必须照常工作，**不得**出现 E21。
+/// `y`/`yy`/`m{a}`/`q`/`:q` 在 vim 里都不报 E21（同批实证）。
+const VIEW_KEYS: &[&[&str]] = &[
+    &["g", "g"],
+    &["w"],
+    &["y", "i", "w"],
+    &["y", "y"],
+    &["m", "b"],
+    &["V", "j", "y"],
+    &["/", "g", "a", "m", "m", "a", "<CR>"],
+    &["G"],
+    &["<C-o>"],
+    &["z", "z"],
+];
+
+fn readonly_probe(
+    vim: &mut VimState,
+    before: &str,
+    host: &mut TckHostRo,
+    // `run` feeds the keys and hands back the buffer text afterwards — one
+    // closure so the two contracts can share the whole body while differing
+    // in how they reach the buffer (`Ctx` vs `CtxRo`).
+    mut run: impl FnMut(&mut VimState, &mut TckHostRo, &[&str]) -> String,
+) -> Result<(), String> {
+    for keys in EDIT_KEYS {
+        run(vim, host, &["<Esc>"]);
+        host.statuses.clear();
+        let after = run(vim, host, keys);
+        if after != before {
+            return Err(format!(
+                "{keys:?}: 缓冲被改动了（{before:?} → {after:?}）——只读模式下的编辑必须整条拒绝"
+            ));
+        }
+        if !host.statuses.iter().any(|s| s.contains("E21")) {
+            return Err(format!(
+                "{keys:?}: 没收到 E21（收到 {:?}）——拒绝必须是响铃 + 状态消息，不是静默 no-op",
+                host.statuses
+            ));
+        }
+    }
+    // 拒绝不污染状态机：查看类键位照常工作（motion / 搜索 / 标记 / yank）
+    host.statuses.clear();
+    run(vim, host, &["<Esc>"]);
+    run(vim, host, &["g", "g"]);
+    if vim.cursor.offset != 0 {
+        return Err(format!(
+            "拒绝之后 gg 的光标 = {}（应为 0）——状态机被 E21 污染了",
+            vim.cursor.offset
+        ));
+    }
+    run(vim, host, &["w"]);
+    if vim.cursor.offset != 6 {
+        return Err(format!(
+            "拒绝之后 w 的光标 = {}（应为 6，\"beta\" 行首）",
+            vim.cursor.offset
+        ));
+    }
+    // yank 仍然可用：写寄存器，并（`"+` 前缀时）写剪贴板
+    run(vim, host, &["y", "i", "w"]);
+    let yanked = vim
+        .registers
+        .get('"')
+        .map(|r| r.text.clone())
+        .unwrap_or_default();
+    if yanked != "beta" {
+        return Err(format!(
+            "只读模式下 yiw 抽出的是 {yanked:?}（应为 \"beta\"）"
+        ));
+    }
+    host.clipboard = None;
+    run(vim, host, &["\"", "+", "y", "i", "w"]);
+    let clipped = vim.registers.get('+').map(|r| r.text.clone()).unwrap_or_default();
+    if clipped != "beta" {
+        return Err(format!(
+            "只读模式下 \"+yiw 抽出的是 {clipped:?}（应为 \"beta\"）"
+        ));
+    }
+    if host.clipboard.as_deref() != Some("beta") {
+        return Err(format!(
+            "只读模式下的 \"+y 没有写剪贴板（{:?}）——查看类宿主也要能复制",
+            host.clipboard
+        ));
+    }
+    for keys in VIEW_KEYS {
+        host.statuses.clear();
+        run(vim, host, keys);
+        if host.statuses.iter().any(|s| s.contains("E21")) {
+            return Err(format!(
+                "{keys:?}: 查看类键位被误报 E21（{:?}）",
+                host.statuses
+            ));
+        }
+    }
+    let after = run(vim, host, &[]);
+    if after != before {
+        return Err(format!("查看类键位改动了缓冲（{before:?} → {after:?}）"));
+    }
+    Ok(())
 }
 
 /// 无副作用宿主：只想让引擎驱动 buffer 时使用。宿主自身的 undo、剪贴板、
@@ -367,6 +590,94 @@ impl VimHost for TckHost {
         None
     }
     fn changed(&mut self) {}
+}
+
+/// 记录型只读宿主：`VimHostRo` 的最小实现 + 状态/响铃/剪贴板记录，供
+/// [`readonly_contract`] 与 [`readonly_pipeline_contract`] 断言「拒绝被上报、
+/// 而不是静默吞掉」。它同时实现 [`VimHost`]（编辑侧钩子全空），所以两条
+/// 管线（A 步兼容层与 B 步 `handle_key_ro`）共用一套探针。
+#[derive(Default)]
+pub struct TckHostRo {
+    pub statuses: Vec<String>,
+    pub bells: usize,
+    pub clipboard: Option<String>,
+    pub highlights: Vec<Range<usize>>,
+    pub current_highlight: Option<Range<usize>>,
+    pub scrolled_to: Vec<usize>,
+    pub close_requested: bool,
+    pub close_forced: bool,
+}
+
+impl VimHostRo for TckHostRo {
+    fn viewport(&self) -> (usize, usize) {
+        (0, 24)
+    }
+    fn scroll_to_line(&mut self, line: usize) {
+        self.scrolled_to.push(line);
+    }
+    fn clipboard_write(&mut self, text: &str) {
+        self.clipboard = Some(text.to_owned());
+    }
+    fn set_search_highlights(&mut self, matches: &[Range<usize>], current: Option<Range<usize>>) {
+        self.highlights = matches.to_vec();
+        self.current_highlight = current;
+    }
+    fn changed(&mut self) {}
+    fn bell(&mut self) {
+        self.bells += 1;
+    }
+    fn status_message(&mut self, message: &str) {
+        self.statuses.push(message.to_owned());
+    }
+    fn request_close(&mut self) {
+        self.close_requested = true;
+        self.close_forced = false;
+    }
+    fn request_close_forced(&mut self, forced: bool) {
+        self.close_requested = true;
+        self.close_forced = forced;
+    }
+}
+
+impl VimHost for TckHostRo {
+    fn viewport(&self) -> (usize, usize) {
+        (0, 24)
+    }
+    fn scroll_to_line(&mut self, line: usize) {
+        self.scrolled_to.push(line);
+    }
+    fn clipboard_write(&mut self, text: &str) {
+        self.clipboard = Some(text.to_owned());
+    }
+    fn clipboard_read(&self) -> Option<String> {
+        None
+    }
+    fn set_search_highlights(&mut self, matches: &[Range<usize>], current: Option<Range<usize>>) {
+        self.highlights = matches.to_vec();
+        self.current_highlight = current;
+    }
+    fn begin_undo_group(&mut self, _: u64, _: usize) {}
+    fn undo(&mut self) -> Option<usize> {
+        None
+    }
+    fn redo(&mut self) -> Option<usize> {
+        None
+    }
+    fn changed(&mut self) {}
+    fn bell(&mut self) {
+        self.bells += 1;
+    }
+    fn status_message(&mut self, message: &str) {
+        self.statuses.push(message.to_owned());
+    }
+    fn request_close(&mut self) {
+        self.close_requested = true;
+        self.close_forced = false;
+    }
+    fn request_close_forced(&mut self, forced: bool) {
+        self.close_requested = true;
+        self.close_forced = forced;
+    }
 }
 
 fn feed(vim: &mut VimState, buf: &mut dyn VimBufferMut, host: &mut dyn VimHost, keys: &str) {
@@ -460,5 +771,71 @@ mod tests {
         let mut host = TckHost;
         engine_smoke_contract(&mut buf, &mut host).unwrap();
         assert_eq!(buf.0, "gammax\nlpha\nbeta\n");
+    }
+
+    /// 只读宿主的最小形态：`impl VimBuffer` + **零方法**的 `VimBufferMut`。
+    /// 契约必须在这种"什么都写不了"的实现上也通过。
+    struct RoBuf(&'static str);
+
+    impl VimBuffer for RoBuf {
+        fn len(&self) -> usize {
+            TckStrBuf(self.0.to_owned()).len()
+        }
+        fn line_count(&self) -> usize {
+            TckStrBuf(self.0.to_owned()).line_count()
+        }
+        fn char_at(&self, offset: usize) -> Option<char> {
+            TckStrBuf(self.0.to_owned()).char_at(offset)
+        }
+        fn prev_char_offset(&self, offset: usize) -> Option<usize> {
+            TckStrBuf(self.0.to_owned()).prev_char_offset(offset)
+        }
+        fn line_range(&self, line: usize) -> Range<usize> {
+            TckStrBuf(self.0.to_owned()).line_range(line)
+        }
+        fn offset_to_line(&self, offset: usize) -> usize {
+            TckStrBuf(self.0.to_owned()).offset_to_line(offset)
+        }
+        fn slice(&self, range: Range<usize>) -> String {
+            TckStrBuf(self.0.to_owned()).slice(range)
+        }
+    }
+
+    impl VimBufferMut for RoBuf {}
+
+    #[test]
+    fn readonly_contract_passes_a_write_refusing_buffer() {
+        // an EMPTY `impl VimBufferMut` — the whole point of P1-A
+        let mut buf = RoBuf(READONLY_PROBE_TEXT);
+        readonly_contract(&mut buf).unwrap();
+        assert_eq!(buf.slice(0..buf.len()), READONLY_PROBE_TEXT);
+    }
+
+    #[test]
+    fn readonly_pipeline_contract_passes_the_reference_impl() {
+        let buf = TckStrBuf::from_text(READONLY_PROBE_TEXT);
+        readonly_pipeline_contract(&buf).unwrap();
+    }
+
+    /// A 步的安全网：宿主忘了 `set_modifiable(false)`，只有写原语在拒绝。
+    /// 这时改动仍然一件事都没发生，而且必须上报 E21（不是静默 no-op）。
+    #[test]
+    fn write_primitive_refusal_reports_e21_even_with_modifiable_on() {
+        let mut buf = RoBuf(READONLY_PROBE_TEXT);
+        let mut host = TckHostRo::default();
+        let mut vim = VimState::new(); // 'modifiable' stays ON
+        {
+            let mut ctx = Ctx {
+                buf: &mut buf,
+                host: &mut host,
+            };
+            vim.handle_key(&mut ctx, Key::parse("x"));
+        }
+        assert_eq!(buf.slice(0..buf.len()), READONLY_PROBE_TEXT);
+        assert!(
+            host.statuses.iter().any(|s| s.contains("E21")),
+            "写原语拒绝时必须上报 E21，收到 {:?}",
+            host.statuses
+        );
     }
 }

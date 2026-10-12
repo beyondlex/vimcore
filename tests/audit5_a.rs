@@ -473,7 +473,8 @@ fn cmdline_ctrl_w_deletes_alnum_word_only() {
 // 的 parse_reg_count 用 usize 解析，20 位数字溢出 → E488 尾随垃圾，整条拒绝。
 //
 // 复现：['l0','l1','l2','l3','l4']，`:2y 77777777777777777777`。
-// vim 9.1："= "l1\nl2\nl3\nl4\n"、无消息（u16）。
+// vim 9.1："= "l1\nl2\nl3\nl4\n"、报 "4 lines yanked"（钳到 4 行 > report
+// 阈值 2；审计原稿记「无消息」是漏看 op_yank 的报告，重测更正）。
 // 引擎：E488: Trailing characters: 77777777777777777777，寄存器不动。
 #[test]
 fn huge_yank_count_clamps_silently() {
@@ -486,8 +487,9 @@ fn huge_yank_count_clamps_silently() {
         "vim 9.1: 超大 count 钳到缓冲末尾照常 yank"
     );
     assert!(
-        f.host.statuses.is_empty(),
-        "vim 9.1: 钳制执行无任何报文；实际 statuses = {:?}",
+        f.host.statuses.iter().any(|s| s.contains("4 lines yanked")),
+        "vim 9.1: 钳到 4 行 > report 阈值，报 '4 lines yanked'（oracle hugey）；\
+         实际 statuses = {:?}",
         f.host.statuses
     );
 }

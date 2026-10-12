@@ -242,6 +242,18 @@ fn marks_command_lists_named_and_special_marks() {
     f.feed(["m", "a", "G"]);
     ex(&mut f, "marks");
     let joined = f.host.statuses.join("\n");
-    assert!(joined.contains("line 1"), "named mark with 1-based line");
+    // vim 9.1（oracle redir）：表头 + ` a      1    0 alpha`（1 基行号）
+    assert!(
+        joined.contains("mark line  col file/text"),
+        "title row: {joined}"
+    );
     assert!(joined.contains("alpha"), "mark line content shown");
+    assert!(
+        f.host
+            .statuses
+            .iter()
+            .any(|s| s.starts_with(" a") && s.contains('1')),
+        "named mark row with 1-based line: {:?}",
+        f.host.statuses
+    );
 }

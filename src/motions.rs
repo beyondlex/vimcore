@@ -223,7 +223,27 @@ impl Motion {
     /// (an absent count arrives as 1). Never moves the cursor — callers
     /// decide — but `SearchNext` may re-publish highlights as a side
     /// effect, so this takes `&mut VimState`.
+    ///
+    /// A host with a PROJECTED view of the buffer (folds, a diff viewer's
+    /// synthetic rows) answers first through [`crate::host::MotionHook`]:
+    /// `Some(result)` wins over everything below, which is how `j`/`k` walk
+    /// visible rows and `]c`/`[c` land on chunk boundaries without the
+    /// engine ever learning what a fold is. Operator-pending and visual
+    /// extension both resolve their motion here, so a hook covers them for
+    /// free.
     pub fn target(&self, vim: &mut VimState, ctx: &mut Ctx, count: usize) -> MotionResult {
+        let count = count.max(1);
+        if let Some(hook) = ctx.host.motion_hook() {
+            let buf: &dyn VimBuffer = &*ctx.buf;
+            if let Some(result) = hook.intercept_motion(vim, buf, *self, count) {
+                return result;
+            }
+        }
+        self.target_builtin(vim, ctx, count)
+    }
+
+    /// The built-in implementation, after the host hook declined.
+    fn target_builtin(&self, vim: &mut VimState, ctx: &mut Ctx, count: usize) -> MotionResult {
         let buf = &*ctx.buf;
         let count = count.max(1);
         match *self {

@@ -56,11 +56,13 @@ impl VimBuffer for B {
     }
 }
 impl VimBufferMut for B {
-    fn insert_text(&mut self, o: usize, t: &str) {
-        self.0.borrow_mut().insert_str(o, t)
+    fn insert_text(&mut self, o: usize, t: &str) -> bool {
+        self.0.borrow_mut().insert_str(o, t);
+        true
     }
-    fn delete_range(&mut self, r: Range<usize>) {
-        self.0.borrow_mut().replace_range(r, "")
+    fn delete_range(&mut self, r: Range<usize>) -> bool {
+        self.0.borrow_mut().replace_range(r, "");
+        true
     }
 }
 
@@ -119,15 +121,17 @@ impl VimBuffer for R {
     }
 }
 impl VimBufferMut for R {
-    fn insert_text(&mut self, o: usize, t: &str) {
+    fn insert_text(&mut self, o: usize, t: &str) -> bool {
         let mut rope = self.0.borrow_mut();
         let ci = rope.byte_to_char(o);
         rope.insert(ci, t);
+        true
     }
-    fn delete_range(&mut self, r: Range<usize>) {
+    fn delete_range(&mut self, r: Range<usize>) -> bool {
         let mut rope = self.0.borrow_mut();
         let (s, e) = (rope.byte_to_char(r.start), rope.byte_to_char(r.end));
         rope.remove(s..e);
+        true
     }
 }
 #[derive(Default)]

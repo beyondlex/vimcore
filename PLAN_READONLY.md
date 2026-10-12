@@ -187,3 +187,18 @@ fn intercept_motion(
 
 M1–M3 完成后 alacer 即可迁移（用 A 步兼容层 + 拦截点即可满足 diff view
 全部需求）；M4 是 API 洁癖步，不阻塞消费方。
+
+## 8. 实施状态（2026-10-12）
+
+| 里程碑 | 状态 | 落地 |
+|---|---|---|
+| M1 | ✅ | `VimBufferMut` 写原语返回 `bool` 且默认拒绝；`VimState::modifiable`；E21 五处闸门；`:set [no]ma` |
+| M2 | ✅ | `tck::readonly_contract` / `tck::readonly_pipeline_contract`；`tests/readonly_pipeline.rs`（RW/RO 等价回放 + panic-on-write fuzz） |
+| M3 | ✅ | `MotionHook` + `VimHost(Ro)::motion_hook()`，插入点 `Motion::target` |
+| M4 | ✅ | `VimHostRo` / `CtxRo` / `handle_key_ro`（`RoHost` + `RoBuffer` 适配器，主管线零改动） |
+| M5 | ⏳ 跨仓 | gpui-vim `VimEditorRo` + alacer diff view 迁移（不在本仓） |
+
+版本随 M1 的源级破坏（写原语签名）与 M4 的 0.2 API 演进提到 **0.2.0**。
+
+实现相对本文的两处有意偏离（`VimHost` 不做 `VimHostRo` 的 supertrait、
+缓冲区用适配器而非 `BufferRef` 枚举）已连同理由记入 `NOTES.md`。

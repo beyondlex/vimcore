@@ -15,6 +15,22 @@ impl VimState {
     pub(crate) fn insert_key(&mut self, ctx: &mut Ctx, key: Key) -> ProcessOutcome {
         // finish a pending <C-r>{register}
         if self.insert_register_pending {
+            // i_CTRL-R CTRL-R / CTRL-O / CTRL-P literal forms (edit.c ins_reg):
+            // the ctrl key is followed by ANOTHER key that names the register,
+            // and the register is inserted literally. Keep waiting for the
+            // register name and remember the literal spelling.
+            if self.insert_register_literal.is_none()
+                && (key == Key::ctrl_char('r')
+                    || key == Key::ctrl_char('o')
+                    || key == Key::ctrl_char('p'))
+            {
+                self.insert_register_literal = match key.kind {
+                    KeyKind::Char(c) => Some(c),
+                    _ => Some('r'),
+                };
+                return ProcessOutcome::Consumed;
+            }
+            let literal = self.insert_register_literal.take();
             self.insert_register_pending = false;
             if let Some(name) = key.printable_char() {
                 if name == crate::registers::EXPRESSION {
@@ -28,8 +44,10 @@ impl VimState {
                 }
                 if let Some(data) = self.registers.get_for_paste(name, ctx.host) {
                     // `".` stores REAL BACKSPACES (\x08, audit D7c) — the
-                    // replay must EXECUTE them, not paste the marker byte
-                    if name == crate::registers::LAST_INSERT {
+                    // replay must EXECUTE them, not paste the marker byte.
+                    // The LITERAL forms (C-r C-r/C-o/C-p) insert the raw text
+                    // instead (edit.c insert_reg's `literally`).
+                    if name == crate::registers::LAST_INSERT && literal.is_none() {
                         self.insert_replay_text(ctx, &data.text);
                     } else {
                         self.insert_text_at_cursor(ctx, &data.text);
@@ -59,7 +77,7 @@ impl VimState {
             // Single + a numeric prefix letter starts the code collector;
             // the prefix letter itself is CONSUMED (it is not a digit of
             // the code — re-feeding it emitted a NUL, audit H2)
-            match state {
+            return match state {
                 QuotePending::Single => {
                     if let Some(c) = key.printable_char() {
                         match c {
@@ -97,13 +115,10 @@ impl VimState {
                             _ => {}
                         }
                     }
-                    self.insert_quote_step(ctx, state, key);
+                    self.insert_quote_step(ctx, state, key)
                 }
-                state => {
-                    self.insert_quote_step(ctx, state, key);
-                }
+                state => self.insert_quote_step(ctx, state, key),
             }
-            return ProcessOutcome::Consumed;
         }
         if self.insert_digraph_first.is_some() {
             let Some(c) = key.printable_char() else {
@@ -329,30 +344,26 @@ impl VimState {
         ProcessOutcome::Unknown
     }
 
-    /// One key inside a pending `i_CTRL-V`: returns `true` when the key
-    /// RESOLVED the quote (the char was inserted), `false` when it was
-    /// consumed as another digit of a numeric code.
-    fn insert_quote_step(&mut self, ctx: &mut Ctx, state: QuotePending, key: Key) -> bool {
+    /// One key inside a pending `i_CTRL-V`. Mirrors vim's `get_literal`
+    /// (edit.c): a numeric code ends at a non-digit terminator, which is
+    /// then UNGETC'd and processed normally (the code's value is still
+    /// inserted first). The i==0 case ("no number entered") inserts the
+    /// terminator character itself, and a completed code (max digits)
+    /// consumes the last digit.
+    fn insert_quote_step(&mut self, ctx: &mut Ctx, state: QuotePending, key: Key) -> ProcessOutcome {
         match state {
             QuotePending::Single => {
                 let c = self.quote_key_char(key);
                 self.insert_text_at_cursor(ctx, &c);
-                true
+                ProcessOutcome::Consumed
             }
             QuotePending::Radix {
                 base,
                 max_digits,
                 mut buffer,
             } => {
-                // an incomplete numeric quote CANCELS on Esc and the Esc
-                // still exits insert mode (audit D6 — the old code parsed
-                // the partial digits, inserting a NUL for `0`, and ate the
-                // Esc)
-                if key == Key::escape() || key == Key::ctrl_char('[') {
-                    self.exit_insert(ctx);
-                    return true;
-                }
-                if let Some(d) = key.printable_char().filter(|c| c.is_digit(base)) {
+                let terminator = key.printable_char();
+                if let Some(d) = terminator.filter(|c| c.is_digit(base)) {
                     buffer.push(d);
                     if buffer.chars().count() < max_digits {
                         self.insert_quote = Some(QuotePending::Radix {
@@ -360,40 +371,80 @@ impl VimState {
                             max_digits,
                             buffer,
                         });
-                        return false;
+                        return ProcessOutcome::Consumed;
                     }
+                    let mut value = u32::from_str_radix(&buffer, base).unwrap_or(0);
+                    // get_literal clamps a non-unicode value to 0-255
+                    // (`C-v 300` inserts 255); a 0 value is the NUL byte.
+                    if value > 255 {
+                        value = 255;
+                    }
+                    let c = char::from_u32(value).unwrap_or('\0');
+                    self.insert_text_at_cursor(ctx, &c.to_string());
+                    return ProcessOutcome::Consumed;
                 }
-                let value = u32::from_str_radix(&buffer, base).unwrap_or(0);
-                if let Some(c) = char::from_u32(value) {
-                    let s = c.to_string();
-                    self.insert_text_at_cursor(ctx, &s);
+                if buffer.is_empty() {
+                    // i == 0: "the character is dealt with in the normal way"
+                    // — insert the terminator itself (`C-v x g` → 'g';
+                    // `C-v x <Esc>` → a literal ESC byte, get_literal's
+                    // `cc = nc` arm).
+                    let text = self.quote_key_char(key);
+                    self.insert_text_at_cursor(ctx, &text);
+                    return ProcessOutcome::Consumed;
                 }
-                true
+                let mut value = u32::from_str_radix(&buffer, base).unwrap_or(0);
+                if value > 255 {
+                    value = 255;
+                }
+                let c = char::from_u32(value).unwrap_or('\0');
+                self.insert_text_at_cursor(ctx, &c.to_string());
+                self.finish_quote_terminator(ctx, key)
             }
             QuotePending::Hex {
                 max_digits,
                 mut buffer,
             } => {
-                // incomplete hex quote: Esc cancels and exits (audit D6)
-                if key == Key::escape() || key == Key::ctrl_char('[') {
-                    self.exit_insert(ctx);
-                    return true;
-                }
-                if let Some(d) = key.printable_char().filter(|c| c.is_ascii_hexdigit()) {
+                let terminator = key.printable_char();
+                if let Some(d) = terminator.filter(|c| c.is_ascii_hexdigit()) {
                     buffer.push(d);
                     if buffer.chars().count() < max_digits {
                         self.insert_quote = Some(QuotePending::Hex { max_digits, buffer });
-                        return false;
+                        return ProcessOutcome::Consumed;
                     }
+                    let value = u32::from_str_radix(&buffer, 16).unwrap_or(0);
+                    let c = char::from_u32(value).unwrap_or('\0');
+                    self.insert_text_at_cursor(ctx, &c.to_string());
+                    return ProcessOutcome::Consumed;
                 }
+                if buffer.is_empty() {
+                    // i == 0: the terminator is inserted as-is (`C-v x g`
+                    // → 'g'; `C-v x <Esc>` → a literal ESC byte)
+                    let text = self.quote_key_char(key);
+                    self.insert_text_at_cursor(ctx, &text);
+                    return ProcessOutcome::Consumed;
+                }
+                // hex (max 2 digits) tops out at 255; unicode (u/U, 4/8
+                // digits) is unclamped. A 0 value is the NUL byte.
                 let value = u32::from_str_radix(&buffer, 16).unwrap_or(0);
-                if let Some(c) = char::from_u32(value) {
-                    let s = c.to_string();
-                    self.insert_text_at_cursor(ctx, &s);
-                }
-                true
+                let c = char::from_u32(value).unwrap_or('\0');
+                self.insert_text_at_cursor(ctx, &c.to_string());
+                self.finish_quote_terminator(ctx, key)
             }
         }
+    }
+
+    /// The terminator of a completed `i_CTRL-V` numeric code: vim ungetc's it
+    /// and processes it normally. Esc / `<C-[>` exit insert; a printable is
+    /// left to the host (returned Unknown so the host types it).
+    fn finish_quote_terminator(&mut self, ctx: &mut Ctx, key: Key) -> ProcessOutcome {
+        if key == Key::escape() || key == Key::ctrl_char('[') {
+            self.exit_insert(ctx);
+            return ProcessOutcome::Consumed;
+        }
+        if key.printable_char().is_some() {
+            return ProcessOutcome::Unknown;
+        }
+        ProcessOutcome::Consumed
     }
 
     /// The literal char a quoted key produces: control chords map to their
@@ -757,19 +808,26 @@ impl VimState {
     /// screen column. `0<C-d>` (the `0` typed first on this line, not yet
     /// more text) removes ALL indent and un-types the `0`.
     fn insert_shift_indent(&mut self, ctx: &mut Ctx, dir: i64) {
-        // `0<C-d>`: the typed "0" comes out of the line first (it is a
-        // command character, not text — vim 9.1 oracle `i0<C-d><Esc>` leaves
-        // "abc" on "        abc", audit D2b), and the indent is SET to 0
-        // (vim ins_shift's INDENT_SET branch; oracle: `i0<C-d>` on an
-        // 8-space indent leaves "foo", not the 4 the old `old-sw` produced)
+        // `0<C-d>` / `^<C-d>`: the typed "0" or "^" comes out of the line
+        // first (it is a command character, not text — vim 9.1 oracle
+        // `i0<C-d><Esc>` leaves "abc" on "        abc", audit D2b), and the
+        // indent is SET to 0 (vim ins_shift's INDENT_SET branch — edit.c
+        // ins_shift accepts `lastc == '0' || lastc == '^'`; oracle: `i0<C-d>`
+        // on an 8-space indent leaves "foo", not the 4 the old `old-sw`
+        // produced)
         let at = self.cursor.offset;
         let line = ctx.buf.offset_to_line(at);
         let typed_zero = self.insert_typed_start.is_some_and(|t| {
             // a host text swap can leave the typing anchor PAST the cursor
-            // (whole line deleted under the session): only a `0` strictly
+            // (whole line deleted under the session): only a `0`/`^` strictly
             // before the cursor qualifies, and the slice needs the guard
             // anyway (fuzz round 7: slice(22..0) panic)
-            t < at && ctx.buf.offset_to_line(t) == line && ctx.buf.slice(t..at) == "0"
+            if t < at && ctx.buf.offset_to_line(t) == line {
+                let typed = ctx.buf.slice(t..at);
+                typed == "0" || typed == "^"
+            } else {
+                false
+            }
         });
         let mut force_zero = false;
         if dir < 0 && typed_zero {

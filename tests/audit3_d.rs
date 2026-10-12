@@ -181,13 +181,16 @@ fn r_mode_count_repeat_survives_backspace() {
 
 // ------------------------------------------------ 插入 <C-v> 数字（oracle E4）
 
-/// **发现 6（P3）**：`i<C-v>0` 后按 Esc：vim 把不完整的数字输入整个取消——
-/// 不插入任何字符、Esc 照常退出插入模式（oracle E4：`z` 上
-/// `i<C-v>0<Esc>:wq` 后缓冲仍 "z"、:wq 已执行=已退出 insert）；引擎把 Esc
-/// 当数字串终结符、按值 0 解析出 NUL 字符插进缓冲，且 Esc 被消费后**仍留在
-/// 插入模式**。
+/// **发现 6（P3，audit6 复验修正）**：`i<C-v>0` 后按 Esc。
+///
+/// 原期望（"取消数字输入、不插 NUL"）**是错的**——它误读了 oracle。9.1 权威
+/// oracle 复核（`edit.c:get_literal`：`i==1, cc==0` 走 `if (cc == 0) cc = '\n'`
+/// → 返回 NUL；终结键 ESC 被 `vungetc` 退回、随后照常退出插入模式）：
+///   `printf 'z\n'` → 键 `i\x160\x1b:call writefile(getline(1,"$"),out)\r:wq\r`
+///   → `od -c out` = `\0 z \n`（NUL 插在 'z' 之前），`:wq` 执行 = 已退出 insert。
+/// 引擎修复后与此一致：插入 `\0` 且 Esc 退出插入模式。
 #[test]
-fn cv_zero_then_esc_cancels_and_exits_insert() {
+fn cv_zero_then_esc_inserts_nul_and_exits_insert() {
     let mut f = Fixture::at("z\n", 0, 0);
     f.feed(["i"]);
     f.feed_raw(Key::ctrl_char('v'));
@@ -196,12 +199,12 @@ fn cv_zero_then_esc_cancels_and_exits_insert() {
     f.feed(["<Esc>"]);
     assert_eq!(
         f.text(),
-        "z\n",
-        "vim 9.1: <C-v>0<Esc> 取消数字输入，不插 NUL；引擎插入 \\0"
+        "\0z\n",
+        "vim 9.1: <C-v>0<Esc> 插入 NUL（内部存为 NL）后再退出插入"
     );
     assert!(
         matches!(f.vim.mode(), Mode::Normal),
-        "vim 9.1: Esc 退出插入模式；引擎把 Esc 吃进数字收集器仍留在 insert"
+        "vim 9.1: 终结的 Esc 照常退出插入模式"
     );
 }
 

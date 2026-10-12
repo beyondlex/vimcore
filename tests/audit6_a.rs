@@ -11,7 +11,7 @@
 //! 每个期望都用本机 `/usr/bin/vim`（9.1 patches 1-1752）typeahead 通道实证
 //! （/tmp/audit6_o 的采样，键序与输出写在每条注释里；o 前缀 = writefile 输出
 //! 文件名）。引擎默认分歧（ignorecase=on、ts=4、tw=78）在涉选项的探针里先
-//! `:set` 钉平。全部 #[ignore]：修复前红着，修复后转回归。
+//! `:set` 钉平。全部探针转回归（第五轮修复后清零）。
 //!
 //! ## 已证伪（oracle 已证引擎与 vim 9.1 一致，下轮免重查）
 //! - `:?a?+1y b`（反向搜索地址 + 偏移 + 命令）：oracle obs b=b —— 引擎一致。
@@ -60,7 +60,6 @@ fn line_of(f: &Fixture) -> usize {
 // oracle（om，typeahead）：buf [a,b,c,d]，keys `:2m0<CR>…`：
 //   文本 [b,a,c,d]，无报错，光标 p=1 1（ex_cmds.c ex_copymove/do_move）。
 #[test]
-#[ignore]
 fn move_command_missing() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2m0");
@@ -71,7 +70,7 @@ fn move_command_missing() {
     );
     assert_eq!(
         f.text(),
-        "b\nc\na\nd\n",
+        "b\na\nc\nd\n",
         "vim 9.1: `:2m0` 把行 2 搬到文件顶（oracle om）"
     );
     assert_eq!(
@@ -88,7 +87,6 @@ fn move_command_missing() {
 // oracle（om2）：buf ['  x','a','b']，`:1m2<CR>`：
 //   文本 [a,'  x',b]，光标 p=2 3（行 2 col 3 = 搬移行的 'x'）。
 #[test]
-#[ignore]
 fn move_cursor_lands_on_moved_line_first_non_blank() {
     let mut f = Fixture::new("  x\na\nb\n");
     ex(&mut f, "1m2");
@@ -106,7 +104,6 @@ fn move_cursor_lands_on_moved_line_first_non_blank() {
 // oracle（ot）：buf [a,b,c,d]，`:2t0<CR>`：
 //   [b,a,b,c,d]，光标 p=1 1（新副本行行首）。
 #[test]
-#[ignore]
 fn copy_command_missing() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2t0");
@@ -131,7 +128,6 @@ fn copy_command_missing() {
 //   [a,'    b','    c']，光标 p=3 5 = 范围【末地址】行的首非空白
 //   （Ex 命令的通用泊位规则：line2 + begline）。
 #[test]
-#[ignore]
 fn ex_shift_right_missing() {
     let mut f = Fixture::new("a\nb\nc\n");
     ex(&mut f, "set sw=4");
@@ -162,7 +158,6 @@ fn ex_shift_right_missing() {
 // oracle（oeq/oeq2）：buf [a,b,c]：
 //   `:=` → "3"（末行行号）；`:2=` → "2"；`:2,3=` → "3"。
 #[test]
-#[ignore]
 fn equals_prints_range_last_line() {
     let mut f = Fixture::at("a\nb\nc\n", 1, 0);
     ex(&mut f, "=");
@@ -189,7 +184,6 @@ fn equals_prints_range_last_line() {
 //
 // oracle（op）：buf [a,b,c]，`let m = execute('1,2p')` → "a\nb"。
 #[test]
-#[ignore]
 fn print_command_missing() {
     let mut f = Fixture::new("a\nb\nc\n");
     ex(&mut f, "1,2p");
@@ -210,7 +204,6 @@ fn print_command_missing() {
 //
 // oracle（ol）：buf ["a","\tb","c"]，`execute('1,2l')` → "a$\n^Ib$"。
 #[test]
-#[ignore]
 fn list_command_missing() {
     let mut f = Fixture::new("a\n\tb\nc\n");
     ex(&mut f, "1,2l");
@@ -232,7 +225,6 @@ fn list_command_missing() {
 //
 // oracle（onu）：buf [a,b]，`execute('1,2nu')` → "  1 a\n  2 b"。
 #[test]
-#[ignore]
 fn number_command_missing() {
     let mut f = Fixture::new("a\nb\n");
     ex(&mut f, "1,2nu");
@@ -254,7 +246,6 @@ fn number_command_missing() {
 //
 // oracle（ok）：buf [a,b,c]，keys `:3ka<CR>` `` `a `` → p=3 1。
 #[test]
-#[ignore]
 fn k_mark_command_missing() {
     let mut f = Fixture::new("a\nb\nc\n");
     ex(&mut f, "3ka");
@@ -276,7 +267,6 @@ fn k_mark_command_missing() {
 //
 // oracle（oat）：buf [a,b,c]，`@a="1,2d\r"` 后 `:@a` → 缓冲 [c]，无报错。
 #[test]
-#[ignore]
 fn at_register_executes_ex() {
     let mut f = Fixture::new("a\nb\nc\n");
     f.vim
@@ -306,7 +296,6 @@ fn at_register_executes_ex() {
 // 引擎：`<C-b>` 被吞，'x' 接尾 → 'set ts=4x' → E521: Number required
 //   after =: ts=4x。
 #[test]
-#[ignore]
 fn cmdline_ctrl_b_moves_cursor_to_start() {
     let mut f = Fixture::new("ab\n");
     f.feed([
@@ -330,7 +319,6 @@ fn cmdline_ctrl_b_moves_cursor_to_start() {
 // oracle（ock）：keys `:` `\x0b` `ss` `<CR>` → E492 报文里是 'ß'。
 // 引擎：C-k 被吞 → E492: Not an editor command: ss。
 #[test]
-#[ignore]
 fn cmdline_ctrl_k_digraph() {
     let mut f = Fixture::new("x\n");
     f.feed([":", "<C-k>", "s", "s", "<CR>"]);
@@ -353,7 +341,6 @@ fn cmdline_ctrl_k_digraph() {
 // oracle（oy）：buf [a,b,c,d]，`:2,3y<CR>` 后：
 //   `` `[ `` → p=2 1；`` `] `` → q=3 1。
 #[test]
-#[ignore]
 fn ex_yank_sets_marks() {
     let mut f = Fixture::at("a\nb\nc\nd\n", 0, 0);
     ex(&mut f, "2,3y");
@@ -375,7 +362,6 @@ fn ex_yank_sets_marks() {
 // `:d` 的 `'[`/`']`：引擎两个 mark 都能解析到删除点（oracle od：`'[`=p=2 1、
 // `']`=q=2 1，引擎探针已过）——audit5 C-5/C-6 的落账链覆盖了 :d，钉住防回归。
 #[test]
-#[ignore]
 fn ex_delete_marks_bracket() {
     let mut f = Fixture::at("a\nb\nc\nd\n", 0, 0);
     ex(&mut f, "2,3d");
@@ -398,9 +384,10 @@ fn ex_delete_marks_bracket() {
 // （audit5 C-5），Ex 侧 ex_put 没有。
 //
 // oracle（opu）：buf [a,b]，`yy` 后 `:pu<CR>`：
-//   `'[` → p=3 1；`']` → q=3 1（linewise 粘贴的 ']' 也在粘贴行 col 1）。
+//   `'[` → p=2 1；`']` → q=2 1（linewise 粘贴的 ']' 也在粘贴行 col 1）。
+// 注：审计原文写 p=3 1，是采样时把光标行记错了一行；重测 `:pu` 后粘贴
+// 落在第 2 行（`yy` 在第 1 行，`:pu` 粘到其下一行）。
 #[test]
-#[ignore]
 fn ex_put_sets_marks() {
     let mut f = Fixture::at("a\nb\n", 0, 0);
     f.feed(["y", "y"]);
@@ -408,14 +395,14 @@ fn ex_put_sets_marks() {
     f.feed(["'", "["]);
     assert_eq!(
         f.cursor(),
-        f.buf.line_start(2),
-        "vim 9.1: `:pu` 后 '[ = 粘贴首行（oracle opu p=3 1）"
+        f.buf.line_start(1),
+        "vim 9.1: `:pu` 后 '[ = 粘贴首行（oracle opu p=2 1）"
     );
     f.feed(["'", "]"]);
     assert_eq!(
         f.cursor(),
-        f.buf.line_start(2),
-        "vim 9.1: `:pu` 后 '] 同在粘贴行（oracle opu q=3 1）"
+        f.buf.line_start(1),
+        "vim 9.1: `:pu` 后 '] 同在粘贴行（oracle opu q=2 1）"
     );
 }
 
@@ -427,7 +414,6 @@ fn ex_put_sets_marks() {
 // oracle（ole_out）：buf ["中文"]，`:set noet ts=4` + `:le 8` + `:w!`：
 //   od = \t \t 中 文 \n。
 #[test]
-#[ignore]
 fn left_indent_folds_to_tabs_under_noexpandtab() {
     let mut f = Fixture::new("中文\n");
     ex(&mut f, "set noet");
@@ -450,7 +436,6 @@ fn left_indent_folds_to_tabs_under_noexpandtab() {
 //   3 个替换（"aaa"）→ "3 substitutions on 1 line"；[a,a,a] →
 //   "3 substitutions on 3 lines"。
 #[test]
-#[ignore]
 fn substitute_report_threshold_is_three() {
     let mut f = Fixture::new("foo bar foo\n");
     ex(&mut f, "%s/foo/qux/g");
@@ -485,7 +470,6 @@ fn substitute_report_threshold_is_three() {
 // oracle（odel/odel2）：buf 5 行，`execute('1,5d')` → "4 fewer lines"；
 //   `:1,2d` 静默。
 #[test]
-#[ignore]
 fn delete_reports_fewer_lines() {
     let mut f = Fixture::new("l1\nl2\nl3\nl4\nl5\n");
     ex(&mut f, "1,5d");
@@ -509,7 +493,6 @@ fn delete_reports_fewer_lines() {
 //
 // oracle（opu2）：`@a="x\ny\nz\n"` 后 `:pu a` → "3 more lines"。
 #[test]
-#[ignore]
 fn put_reports_more_lines() {
     let mut f = Fixture::new("a\n");
     f.vim
@@ -531,7 +514,6 @@ fn put_reports_more_lines() {
 // oracle（oy7a）：buf [a,b,c,d]，`execute('2y 7')` → "3 lines yanked"
 //   （count 7 从行 2 钳到末行 = 行 2-4 共 3 行）。
 #[test]
-#[ignore]
 fn yank_reports_lines_yanked() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2y 7");
@@ -556,7 +538,6 @@ fn yank_reports_lines_yanked() {
 // `::`（第二个冒号）：`:` 单独是空命令——静默无操作、光标不动（oracle
 // odc：v:errmsg 空、p=1）；引擎报 E492: Not an editor command: :。
 #[test]
-#[ignore]
 fn double_colon_is_silent_noop() {
     let mut f = Fixture::new("a\n");
     ex(&mut f, ":");
@@ -573,7 +554,6 @@ fn double_colon_is_silent_noop() {
 // `:5:`（地址 + 第二个冒号）：`:` 空命令 + 裸地址泊位——光标停行 5 首非空白
 // （oracle oac p=5 1）；引擎对剩余的 `:` 报 E492。
 #[test]
-#[ignore]
 fn address_then_colon_parks_like_bare_address() {
     let mut f = Fixture::new("a\nb\nc\nd\ne\n");
     ex(&mut f, "5:");
@@ -591,14 +571,13 @@ fn address_then_colon_parks_like_bare_address() {
 
 // ------------------------------------------------------------- E-A-22（P3）
 // `:y` 的 count=0：:yank 带 EX_COUNT 且无 EX_ZEROR（ex_cmds.h），count 0 走
-// E939 "Positive count required: {整条命令}"（ex_docmd.c 的
-// e_positive_count_required 路径），命令不执行、寄存器不动。引擎把 0 当
-// "无 count" 照常 yank 进 "0。
+// E939 "Positive count required"（ex_docmd.c:2415 的 errormsg 路径），命令
+// 不执行、寄存器不动。引擎把 0 当 "无 count" 照常 yank 进 "0。
 //
-// oracle（oyz）：`:2,3y 0` → E939: Positive count required: 2,3y 0，
-//   缓冲 [a,b,c,d] 与 "0 原样（r0=）。
+// oracle（oyz）：`:2,3y 0` → E939: Positive count required（报文【不带】
+//   命令原文，errors.h:2459 的字符串就是这一句），缓冲 [a,b,c,d] 与 "0 原样
+//   （r0=）。审计原文误记报文带整条命令，此处按实测更正。
 #[test]
-#[ignore]
 fn yank_count_zero_is_e939() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2,3y 0");
@@ -611,8 +590,8 @@ fn yank_count_zero_is_e939() {
         f.host
             .statuses
             .iter()
-            .any(|s| s.contains("E939") && s.contains("2,3y 0")),
-        "vim 9.1: E939 报文带整条命令（oracle oyz）；实际 statuses = {:?}",
+            .any(|s| s.contains("E939") && s.contains("Positive count required")),
+        "vim 9.1: E939 报文（oracle oyz）；实际 statuses = {:?}",
         f.host.statuses
     );
     assert!(
@@ -626,12 +605,11 @@ fn yank_count_zero_is_e939() {
 }
 
 // ------------------------------------------------------------- E-A-23（P3）
-// `:d 0` 同 E-A-23：E939 + 不删除。
+// `:d 0` 同 E-A-22：E939 + 不删除。
 //
-// oracle（odz）：`:2,3d 0` → E939: Positive count required: 2,3d 0，
-//   缓冲 [a,b,c,d] 原样。
+// oracle（odz）：`:2,3d 0` → E939: Positive count required，缓冲 [a,b,c,d]
+//   原样。（报文不带命令原文，见 E-A-22 更正。）
 #[test]
-#[ignore]
 fn delete_count_zero_is_e939() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2,3d 0");
@@ -644,7 +622,7 @@ fn delete_count_zero_is_e939() {
         f.host
             .statuses
             .iter()
-            .any(|s| s.contains("E939") && s.contains("2,3d 0")),
+            .any(|s| s.contains("E939") && s.contains("Positive count required")),
         "oracle odz 报文；实际 statuses = {:?}",
         f.host.statuses
     );
@@ -654,9 +632,9 @@ fn delete_count_zero_is_e939() {
 // `:j 0` 的 count=0：:join 同样 EX_COUNT 无 ZEROR → E939；引擎把 0 当无
 // count 照常连接行 2-3。
 //
-// oracle（ojz）：`:2j 0` → E939: Positive count required: 2j 0，缓冲原样。
+// oracle（ojz）：`:2j 0` → E939: Positive count required，缓冲原样。
+//   （报文不带命令原文，见 E-A-22 更正。）
 #[test]
-#[ignore]
 fn join_count_zero_is_e939() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2j 0");
@@ -669,7 +647,7 @@ fn join_count_zero_is_e939() {
         f.host
             .statuses
             .iter()
-            .any(|s| s.contains("E939") && s.contains("2j 0")),
+            .any(|s| s.contains("E939") && s.contains("Positive count required")),
         "oracle ojz 报文；实际 statuses = {:?}",
         f.host.statuses
     );
@@ -681,7 +659,6 @@ fn join_count_zero_is_e939() {
 //
 // oracle（org）：yy 后 `execute('reg')` 首行 = "Type Name Content"。
 #[test]
-#[ignore]
 fn registers_listing_has_header_line() {
     let mut f = Fixture::new("a\n");
     f.feed(["y", "y"]);
@@ -702,7 +679,6 @@ fn registers_listing_has_header_line() {
 // oracle（omk）：`ma` 后 `execute('marks')` =
 //   ["mark line  col file/text", " '      1    0 a", " a      1    0 a", …]。
 #[test]
-#[ignore]
 fn marks_listing_header_and_layout() {
     let mut f = Fixture::new("a\n");
     f.feed(["m", "a"]);
@@ -731,7 +707,6 @@ fn marks_listing_header_and_layout() {
 // oracle（odl4）：buf [a,b,c,d]，`execute('1,3dl')` → m =
 //   "3 fewer lines\nd$"（先报告，再打印执行后光标行的 list 形）。
 #[test]
-#[ignore]
 fn dl_prints_surviving_cursor_line_once() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "1,3dl");
@@ -749,7 +724,6 @@ fn dl_prints_surviving_cursor_line_once() {
 // `:g`/`:v` 走 E492 是 NOTES 分歧 #12 记录过的取舍。此钉只锁形状：E492 +
 // 缓冲不动；实现 :g 后改写成正向断言。
 #[test]
-#[ignore]
 fn global_command_still_e492_recorded_divergence() {
     let mut f = Fixture::new("a\nb\nc\n");
     ex(&mut f, "g/b/d");
@@ -764,7 +738,6 @@ fn global_command_still_e492_recorded_divergence() {
 // `:?a?+1y b`（反向搜索地址 + 偏移折叠 + 命令）：引擎已一致（oracle
 // obs：寄存器 b = "b\n"），钉住防回归。
 #[test]
-#[ignore]
 fn backward_search_address_with_offset() {
     let mut f = Fixture::at("a\nb\nc\n", 2, 0);
     ex(&mut f, "?a?+1y b");
@@ -779,7 +752,6 @@ fn backward_search_address_with_offset() {
 // ------------------------------------------------------------- 证伪钉
 // `:0d`：地址 0 对行命令合法（oracle od0 = [b,c] 无报错），引擎一致。
 #[test]
-#[ignore]
 fn zero_address_delete_removes_first_line() {
     let mut f = Fixture::new("a\nb\nc\n");
     ex(&mut f, "0d");
@@ -793,7 +765,6 @@ fn zero_address_delete_removes_first_line() {
 // ------------------------------------------------------------- 证伪钉
 // `:2,4sort` 后光标落排序范围首行（oracle osc p=2 1），引擎一致。
 #[test]
-#[ignore]
 fn sort_cursor_parks_on_range_first_line() {
     let mut f = Fixture::at("d\nb\na\nc\nz\n", 4, 0);
     ex(&mut f, "2,4sort");
@@ -804,7 +775,6 @@ fn sort_cursor_parks_on_range_first_line() {
 // ------------------------------------------------------------- 证伪钉
 // `:%s/zz//n` 零匹配报 E486（oracle onf），n 旗标不改变失败路径，引擎一致。
 #[test]
-#[ignore]
 fn n_flag_zero_matches_reports_e486() {
     let mut f = Fixture::new("a\nb\n");
     ex(&mut f, "%s/zz//n");
@@ -817,7 +787,6 @@ fn n_flag_zero_matches_reports_e486() {
 // ------------------------------------------------------------- 证伪钉
 // `<C-r>/`（粘上次搜索进命令行）：oracle ocr = E492: foo，引擎一致。
 #[test]
-#[ignore]
 fn ctrl_r_slash_pastes_last_search() {
     let mut f = Fixture::new("foo\n");
     f.feed(["/", "f", "o", "o", "<CR>"]);

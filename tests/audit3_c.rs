@@ -299,16 +299,18 @@ fn c14_block_lt_moves_cursor_to_first_non_blank() {
 //
 // 复现：buffer "\tab\nabcdef\n"、(0,0)，按键 <C-v> l j d。（引擎默认 ts=4，
 // oracle 以 `:set ts=4` 对齐。）
-//   vim 9.1（oracle r5，两次复跑一致）：块的右缘按 TAB 展开后的虚列计
-//   → 第 1 行只删 'a'（TAB 幸存）、第 2 行删 "ef" → "\t\nabcd\n"。
-//   引擎：span_from_visual_block / block_row_range 全走 ts=1 的
-//   display_column / char_display_width（src/ops.rs ~478、~396；audit2 A1
-//   只修了 `|`/j/k 的落点函数）→ 块读成 col 0..2 → 第 1 行删 "\ta"、
-//   第 2 行删 "ab" → "b\ncdef\n"。
-//   （vim 对压在 TAB 上的块缘的确切取整规则未在本次审计内完全逆向，但
-//   oracle 的期望文本稳定可复现；引擎侧的 ts=1 模型与它必然分歧。）
+//
+// 修正（audit6 复验）：本用例的原期望 "\t\nabcd\n" 是**错的**——它来自对
+// oracle 的误读，当时也自认"TAB 块缘取整规则未完全逆向"。9.1 权威 oracle
+// 复核（ts=4，ad-hoc PTY/typeahead 各一次，`getreg` 佐证）：
+//   `\tab\nabcdef\n` + `<C-v>ljd` → 缓冲区 "b\nf\n"，
+//   `"` 寄存器 = blockwise 宽 5、内容 "\\ta\nabcde"。
+//   即块 = 显示列 [0,4]：第 1 行覆盖 TAB(列0-3)+'a'(列4) → 删 "\\ta" 留 "b"；
+//   第 2 行覆盖 "abcde" → 留 "f"。块左缘就是锚点的显示列（TAB 的**起点** 0），
+//   并非"吸附到 TAB 末端"。引擎的 TAB 特判分支据此删除，块列统一走
+//   `display_column_with(ts)`（含 `l`/`h` 的虚列推进按字符显示宽度）。
 #[test]
 fn c15_block_columns_count_tab_as_one_cell() {
     let f = edit("\tab\nabcdef\n", 0, 0, &["<C-v>", "l", "j", "d"]);
-    assert_eq!(f.text(), "\t\nabcd\n", "vim 9.1: 块缘按 tabstop 虚列计（TAB 幸存）");
+    assert_eq!(f.text(), "b\nf\n", "vim 9.1: 块缘按 tabstop 虚列计（块=[0,4]）");
 }

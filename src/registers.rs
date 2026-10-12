@@ -237,13 +237,21 @@ impl Registers {
         self.last = Some(register);
     }
 
-    /// Uppercase-register append: concatenate onto the lowercase register.
-    /// Either side linewise makes the result linewise (text re-joined on
-    /// line boundaries); same-kind appends concatenate byte for byte.
+    /// Uppercase-register append: concatenate onto the lowercase register
+    /// with vim's op_yank line model (register.c: `y_regs[n] = y_regs[n-1]`
+    /// style block merge). The result TYPE is the NEW type when the new
+    /// piece is LINEWISE, otherwise it is the OLD register's type (a block
+    /// yank appended to a charwise register stays charwise — vim's
+    /// `curr->y_type` is only overridden by a linewise new piece). When the
+    /// result type is CHARWISE the old last line and the new first line are
+    /// string-CONCATENATED (no separator, unless `cpo` has 'J'); otherwise
+    /// the new lines are appended as separate lines. 9.1 oracle:
+    ///   charwise "foo" + blockwise "a\nc" → charwise "fooa\nc"
+    ///   blockwise "a\nc" + charwise "zz"  → blockwise "a\nc\nzz"
     ///
-    /// The UNNAMED register points at the NEW piece, not the merged result
-    /// (vim: `"Add` then `p` pastes only the just-deleted text — audit C8;
-    /// routing through [`Self::store`] re-pointed `last` at the merge).
+    /// The UNNAMED register points at the NEW piece for a delete append and
+    /// at the MERGED register for a yank append (vim's deliberate asymmetry —
+    /// audit C8).
     fn append_to_named(
         &mut self,
         name: char,
@@ -254,18 +262,28 @@ impl Registers {
         let lower = name.to_ascii_lowercase();
         let (merged, merged_kind) = match self.named.get(&lower) {
             Some(existing) => {
-                let mut kind = kind;
-                let mut text = text.clone();
-                if existing.kind == RegisterKind::Linewise || kind == RegisterKind::Linewise {
-                    kind = RegisterKind::Linewise;
-                    if !existing.text.ends_with('\n') {
-                        text.insert(0, '\n');
-                    }
-                    if !text.ends_with('\n') {
-                        text.push('\n');
-                    }
+                // linewise on the NEW side wins; otherwise the old type
+                // survives (op_yank only overrides on `yanktype == MLINE`)
+                let result_kind = if kind == RegisterKind::Linewise {
+                    RegisterKind::Linewise
+                } else {
+                    existing.kind
+                };
+                let mut old_lines = split_register_lines(&existing.text, existing.kind);
+                let new_lines = split_register_lines(&text, kind);
+                if result_kind == RegisterKind::Charwise && !old_lines.is_empty() {
+                    // concat the old last line with the new first line
+                    let last = old_lines.pop().unwrap();
+                    let first = new_lines.first().cloned().unwrap_or_default();
+                    old_lines.push(format!("{last}{first}"));
+                    old_lines.extend(new_lines.iter().skip(1).cloned());
+                } else {
+                    old_lines.extend(new_lines.iter().cloned());
                 }
-                (format!("{}{}", existing.text, text), kind)
+                (
+                    join_register_lines(&old_lines, result_kind),
+                    result_kind,
+                )
             }
             None => (text.clone(), kind),
         };
@@ -347,15 +365,46 @@ impl Registers {
         }
     }
 
-    /// shift 1..8 -> 2..9, then the caller records into "1
+    /// shift 1..8 -> 2..9, then the caller records into "1. vim's
+    /// shift_delete_registers copies the WHOLE slot unconditionally
+    /// (`y_regs[n] = y_regs[n-1]`): an empty source CLEARS the destination
+    /// (register.c:1024). The old `if let Some` left a nonexistent source
+    /// slot untouched, so a recorded macro in "2 survived a `dd` (audit
+    /// E-C-2 — `q2xq` then `dd` then `"2p` must paste nothing).
     fn shift_numbered_ring(&mut self) {
         for i in (2..=9usize).rev() {
             let from = char::from(b'0' + (i - 1) as u8);
             let to = char::from(b'0' + i as u8);
-            if let Some(r) = self.named.get(&from) {
-                let r = r.clone();
-                self.named.insert(to, r);
+            match self.named.get(&from).cloned() {
+                Some(r) => {
+                    self.named.insert(to, r);
+                }
+                None => {
+                    self.named.remove(&to);
+                }
             }
         }
     }
+}
+
+/// Split a register's text into vim's `y_array` line model: a linewise
+/// register carries a trailing `\n` that is a terminator, not an extra empty
+/// line.
+fn split_register_lines(text: &str, kind: RegisterKind) -> Vec<String> {
+    if kind == RegisterKind::Linewise {
+        let body = text.strip_suffix('\n').unwrap_or(text);
+        body.split('\n').map(|s| s.to_owned()).collect()
+    } else {
+        text.split('\n').map(|s| s.to_owned()).collect()
+    }
+}
+
+/// Re-join register lines the way the register stores them (linewise keeps
+/// the trailing terminator).
+fn join_register_lines(lines: &[String], kind: RegisterKind) -> String {
+    let mut out = lines.join("\n");
+    if kind == RegisterKind::Linewise && !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }

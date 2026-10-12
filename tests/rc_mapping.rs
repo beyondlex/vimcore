@@ -30,11 +30,13 @@ impl VimBuffer for B {
     }
 }
 impl VimBufferMut for B {
-    fn insert_text(&mut self, o: usize, t: &str) {
-        self.0.insert_str(o, t)
+    fn insert_text(&mut self, o: usize, t: &str) -> bool {
+        self.0.insert_str(o, t);
+        true
     }
-    fn delete_range(&mut self, r: std::ops::Range<usize>) {
+    fn delete_range(&mut self, r: std::ops::Range<usize>) -> bool {
         let _ = self.0.drain(r);
+        true
     }
 }
 

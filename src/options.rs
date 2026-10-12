@@ -156,23 +156,50 @@ impl Options {
     /// Errors carry vim's message: `ts=0` is E487 "Argument must be
     /// positive" (audit5 A-13 — the engine silently accepted tabstop=0 and
     /// every column computation then leaned on `.max(1)`), and a tabstop
-    /// past the cap is E474 "Invalid argument" instead of a silent clamp to
-    /// another value (audit5 A-14). `sw=0`/`tw=0` stay legal like vim.
+    /// past its ceiling is E474 "Invalid argument" instead of a silent clamp
+    /// to another value (audit5 A-14). `sw=0`/`tw=0` stay legal like vim.
+    ///
+    /// Parsing follows vim's `do_set` grammar exactly: an optional leading
+    /// `-` then digits, with the WHOLE string consumed — so a leading `+`
+    /// (`:set ts=+4`) or any other stray byte is E521, not a silently
+    /// accepted value (the old `parse::<usize>` read `+4` as `4`). A NEGATIVE
+    /// value is E487 "must be positive" for every one of these options
+    /// (9.1 probes: `:set sw=-1`/`tw=-1`/`so=-1` all E487, and `-0` counts as
+    /// 0, so `:set ts=-0` E487s while `:set sw=-0` is accepted). The message
+    /// quotes the name AS TYPED (alias or canonical), like vim
+    /// (`:set tabstop=-1` → "tabstop=-1", `:set ts=-1` → "ts=-1").
     pub fn set_value(&mut self, name: &str, value: &str) -> Result<(), String> {
         const MAX_OPTION_VALUE: usize = 1_000_000;
+        // vim's real ceiling for 'tabstop' is 9999 (E474 past it: 9.1 probe
+        // `:set ts=10000`); the other numeric options accept very large
+        // values, so the engine keeps its own 1e6 safety cap for them
+        // (documented divergence — no allocation rides on those).
+        const MAX_TABSTOP: usize = 9999;
         let Some(canon) = canonical_value(name) else {
             return Err(format!("E518: Unknown option: {name}"));
         };
-        // every numeric option is a usize today, so one parse serves all
-        let Ok(v) = value.parse::<usize>() else {
+        // optional sign then digits, whole string: `+4`/`4x`/`4.5`/`` → E521
+        let digits = value.strip_prefix('-').unwrap_or(value);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!("E521: Number required after =: {name}={value}"));
+        }
+        // saturate an overflowing digit string on the correct SIDE of zero:
+        // vim reports E487 for a huge negative and E474 for a huge positive
+        let n: i64 = if value.starts_with('-') {
+            value.parse::<i64>().unwrap_or(i64::MIN)
+        } else {
+            value.parse::<i64>().unwrap_or(i64::MAX)
         };
+        if n < 0 {
+            return Err(format!("E487: Argument must be positive: {name}={value}"));
+        }
+        let v = n as usize;
         if canon == "tabstop" {
             if v == 0 {
-                return Err(format!("E487: Argument must be positive: ts={value}"));
+                return Err(format!("E487: Argument must be positive: {name}={value}"));
             }
-            if v > MAX_OPTION_VALUE {
-                return Err(format!("E474: Invalid argument: ts={value}"));
+            if v > MAX_TABSTOP {
+                return Err(format!("E474: Invalid argument: {name}={value}"));
             }
         }
         let v = v.min(MAX_OPTION_VALUE);

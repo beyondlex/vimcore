@@ -5,6 +5,117 @@
 体验备注。以现实代码逻辑为准；README 与 `src/lib.rs` 的分层图是宿主
 无关措辞。
 
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、只读管线（PLAN_READONLY P1/P2：M1–M4，2026-10-12，`tests/readonly_pipeline.rs` 9 例 + `src/tck.rs` 5 例）
+
+第一个真实消费方是 alacer 的 diff view（只读 diff 浏览器：双窗格 + unified
+合成行投影 + 折叠），它此前带了一个几百行的手写只读 vim。本轮把
+`PLAN_READONLY.md` 的 M1–M4 落地（M5 的 gpui-vim `VimEditorRo` 与 alacer
+迁移是跨仓工作，不在这里）。
+
+### 语义（vim 9.1 oracle 实证：`/usr/bin/vim -Nu NONE -N -s`，逐命令采样）
+
+`:set nomodifiable` 下：
+
+| 键 / 命令 | 结果 |
+|---|---|
+| `x` `dw` `dd` `p` `J` `rZ` `~` `o` `O` `C` `S` `gUiw` `>G` `u` | **E21** |
+| `:s/a/b/` `:d` `:j` `:1m2` `:pu` `:retab` `:ce` `:t 2` `:co 2` `:normal x` | **E21** |
+| `yiw` `yy` `mA` `q` `ZZ` `:y` `:q` | **无 E21**（合法） |
+
+E21 原文（照抄）：`E21: Cannot make changes, 'modifiable' is off`。
+
+两条由此定下来的实现选择：
+
+1. **算子在"执行点"拒绝，不在"按下时"拒绝**。vim 的 `d` 只是静默挂起，
+   E21 随 motion 一起到，所以 `dw` 之后光标必须留在原地。实现落在
+   `complete_operator_with_span` / `apply_visual_operator` /
+   `apply_block_operator`，而不是 `execute_command` 的 `CmdKind::Operator`
+   分支（`is_edit()` 对 `Operator` 的判定只服务于可视模式那三条路径）。
+2. **`u` / `<C-r>` 也是编辑**，按 E21 拒绝（不是"无历史就响铃"）。
+
+### 落地的 API
+
+- `VimBufferMut::insert_text/delete_range/replace_range` 改返回 `bool`，
+  **默认 `false`**（拒绝）。只读宿主的接入成本因此变成
+  `impl VimBufferMut for X {}`（零方法）+ `vim.set_modifiable(false)`。
+  **源级破坏**：已实现的编辑宿主要加 `-> true`（机械替换）。本机 5 处实现
+  已改。
+- `VimState::set_modifiable` / `is_modifiable`，`:set [no|inv]ma[?|!|&]`
+  走 `ex_set` 的旁路（`'modifiable'` 是引擎状态，不在 `Options` 里）。
+- E21 在四个层面拦：`execute_command` 的 `is_edit()` 前置、三个算子执行
+  点、visual-block 的 `I`/`A` 直派分支、Ex 分发的
+  `ex_command_is_edit()`；写原语返回 `false` 时再兜一次（宿主忘了
+  `set_modifiable(false)` 也不会静默 no-op）。
+- `MotionHook`（独立 opt-in trait）+ `VimHost(Ro)::motion_hook()` 取用器
+  （默认 `None`），插入点在最外层的 `Motion::target`。
+- `VimHostRo` + `CtxRo` + `VimState::handle_key_ro`。
+
+### 与 PLAN_READONLY 的两处有意偏离（都记在这里）
+
+1. **`VimHost` 不是 `VimHostRo` 的 supertrait**。计划写的是
+   `VimHost: VimHostRo` + "编辑宿主零迁移"，但 supertrait 会逼每个已存在的
+   编辑宿主多写一个 `impl VimHostRo for X {}` 块（不是零迁移），而把
+   `viewport` 之类给默认值又会让漏写的宿主静默拿到错的视口。改成
+   **`RoHost` 适配器**：`VimHostRo` 是独立 trait，`VimHost` 一个方法都没少，
+   `handle_key_ro` 在调用处把 `VimHostRo` 适配成 `VimHost`。
+2. **缓冲区同样走适配器（`RoBuffer`）而不是计划里的 `BufferRef` 枚举**。
+   枚举方案要改 `ctx.buf` 的 589 处引用（`state.rs` 274 + `cmdline.rs` 153 +
+   `ops.rs` 124 + …），风险与收益不成比例；`RoBuffer<'a>` 把
+   `&dyn VimBuffer` 包装成 `VimBufferMut`（写原语走默认拒绝），`handle_key_ro`
+   在调用处构造，主管线一行没动——"不复制 6.4k 行 state.rs"这个目标一样
+   达成，且是零改动达成。
+
+`handle_key_ro` 在调用期间把 `modifiable` 强制置 false 并在返回时还原
+（宿主若自己在别处置过，不会被这次调用吃掉）。
+
+### 测试
+
+- `src/tck.rs`：`readonly_contract`（A 步形态，缓冲用 `&mut impl VimBufferMut`）
+  与 `readonly_pipeline_contract`（B 步形态，缓冲是 `&dyn VimBuffer`——
+  **改动在构造上不可能**）。共 41 条编辑键位断言 E21 + 缓冲逐字节不变 +
+  拒绝后 motion/搜索/标记/yank 仍正常；10 条查看键位断言**不得**报 E21。
+- `tests/readonly_pipeline.rs`：RO 查看能力、E21 拒绝、RW/RO 逐键等价回放
+  （22 条查看键序，比对光标/模式/寄存器/高亮）、`MotionHook` 四条
+  （普通移动 / 算子待决 `dj` / 可视扩展 `vj` / 未被接管时回落内建）、
+  `:set noma` 往返。
+- **fuzz RO 配置**：8 seeds × 20 轮 × 60 步，缓冲的写原语是 `panic!`，
+  同一键流同时喂 A 步（`handle_key` + `set_modifiable(false)`）与 B 步
+  （`handle_key_ro`），并断言两者每一步光标相同。任何一次漏过 E21 闸门
+  立刻红——这是"闸门全集"的强断言。
+
+## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第三十六轮：fuzz round36 的内存爆与两条无限展开收口（2026-10-11，`tests/parity_round36.rs` 5 例）
+
+现场：`target/debug/deps/fuzz_round36` 跑起来 RSS 40 秒内 5 GB → 9.4 GB、
+`footprint` 53.1 GB，`sample` 的热帧是 `VecDeque::truncate`（即安全阀撞车后
+`pending_keys.clear()` 才第一次被执行）。不是"调试二进制大"——文件只有
+4 MB，是运行时把重放队列吃穿了。收口后同一 target 峰值 8 MB、108 秒跑完。
+
+修复（语义类均先走 vim 9.1 实证；expect PTY，`:let`+`reg_recording()`
+采样 2026-10-11）：
+
+| # | 症状 → 规则 |
+|---|---|
+| R36-1 | 播放中的 `q` 会开/关录制并吞字符参数 → vim `nv_record` 的门槛是 `reg_executing == 0`（`src/normal.c:7264`）：寄存器执行期间 `q` **完全惰性**——不开、不关、也不吃寄存器名。新增 `VimState::reg_executing`，`MacroPlay` 处置位，安全阀/`replay_error`/队列排空三处复位 |
+| R36-2 | 被 `@` 播出的键照常进入正在录制的宏 → vim 重放走 `ins_typebuf(..., nottyped = TRUE)`，`gotchars()`（`src/getchar.c:1418`）只录 `nottyped == FALSE` 的键。`record_key`/`unrecord_key`/`record_typed_text`/cmdline 录制四处按 `reg_executing.is_none()` 收口；`.`/redo 那条录制**不受影响**（实证 `qa@cxq` → `"a` 是 `@cx` 三步，而重放照常执行） |
+| R36-3 | 重放预算按每次调用全额 `MAX_PIPELINE_STEPS` 预展开 → 自播放寄存器（`"a` == `@a`）每个被消费的 `@` 又推 10 万键，生产远快于消费。改为按**队列余量** `room = MAX_PIPELINE_STEPS - pending_keys.len()`，超出即提前停止播放，而不是走到丢一切的守卫 |
+| R36-4 | `:@` 的寄存器内容又是一条 `:@…` → `execute_ex ↔ ex_at` 无限互递归，`fuzz_round17` `has overflowed its stack`（**注**：这条在 round36 之前就在，A/B 对照过 HEAD 工作树不复现，属未提交改动引入）。vim 的收口在 `do_cmdline()`：`call_depth >= 200` → `emsg("E169: Command too recursive")` + `return FAIL`（`src/ex_docmd.c:707-737`）。引擎按同一门槛加 `ex_depth` 计数与 `MAX_EX_DEPTH = 200`，`execute_ex` 拆成守卫 + `execute_ex_inner`。实证：`:let @b='@b'` + `:@b` → 屏幕 `E169: Command too recursive`、`v:errmsg` 同文、缓冲不动 |
+
+### 新增已知分歧（有意留账，接入方需知）
+
+- **`:@` 内容不剥前导冒号**：vim 的 `do_one_cmd()` 开头 "Skip ':' and any
+  white space"（`src/ex_docmd.c:2007-2012`），`:let @a=':echo 7'` + `:@a`
+  真打印 `7`（PTY 实证，`v:errmsg` 空）；引擎把整行当命令名 → `E492`。
+  与本轮三条收口无关，改动面在 `execute_ex_inner` 的分发前缀，留作独立
+  修复项。
+- **安全阀没有报文**：引擎撞 `MAX_PIPELINE_STEPS` 时静默丢队列；vim 是
+  typebuf 满 → `E74: Command too complex`。守卫数的是**被消费的键**，
+  所以 `1000000@a` 这类显式长播放即便不自递归也会被截断且无提示。
+
+### 悬而未决
+
+- `enqueue_replay` 的提前停止会让超长宏**部分播放**（vim 是 E74 后整条
+  不播）。差异只在被截断的尾段，fuzz 侧目前只要求"收口且缓冲不越界"。
+
 ## 〇⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺⁺、第三十五轮：独立审计（七）A 域收口——audit8 对拍表转断言 + Ex/`:s`/`:set`/插入缩进 7 项修复（2026-10-10，`tests/audit8_a.rs` 162 例）
 
 素材是纯黑盒对拍：161 个（初始缓冲, **原始按键字节**）形状同一份喂引擎

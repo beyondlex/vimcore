@@ -356,7 +356,7 @@ fn ex_substitute_trailing_count() {
     assert_eq!(f.text(), "XXX\nXXX\n", "g flag + count combine");
 }
 
-/// `:s` 的报告格式对齐 vim：恰好 1 处替换静默；多条读
+/// `:s` 的报告格式对齐 vim：替换数 ≤ 'report'（默认 2）时静默；3+ 读
 /// "{n} substitutions on {m} lines"（单数 line）。
 #[test]
 fn substitute_report_format_matches_vim() {
@@ -365,11 +365,12 @@ fn substitute_report_format_matches_vim() {
     f.feed([":", "s", "/", "a", "/", "X", "/", "<CR>"]);
     assert_eq!(f.text(), "Xaa\n");
     assert_eq!(f.host.statuses, Vec::<String>::new(), "single sub is silent");
-    // 同一行 2 处（g 旗标）= "on 1 line" 单数
+    // 同一行 2 处（g 旗标）≤ report 阈值 = 静默（oracle osr2）
     let mut f = Fixture::new("aa\n");
     f.feed([":", "s", "/", "a", "/", "X", "/", "g", "<CR>"]);
-    assert_eq!(f.host.statuses, ["2 substitutions on 1 line"]);
-    // 跨行 = "on N lines"
+    assert_eq!(f.text(), "XX\n");
+    assert_eq!(f.host.statuses, Vec::<String>::new(), "2 subs is silent");
+    // 跨行 3 处 = "on N lines"
     let mut f = Fixture::new("a1\na2\na3\n");
     f.feed([":", "1", ",", "3", "s", "/", "a", "/", "X", "/", "<CR>"]);
     assert_eq!(f.host.statuses, ["3 substitutions on 3 lines"]);

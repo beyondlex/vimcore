@@ -23,6 +23,12 @@
 //! │ host traits: VimBuffer(Mut) + VimHost        │  implemented by your
 //! └──────────────────────────────────────────────┘  buffer + widget
 //! ```
+//!
+//! A VIEWING host (diff viewer, log pager) implements only [`buffer::VimBuffer`]
+//! and [`host::VimHostRo`] and drives [`state::VimState::handle_key_ro`]: the
+//! full motion / text-object / search / mark / scroll / yank surface works,
+//! and editing commands are refused with vim's `E21` instead of needing a
+//! writable buffer that does not exist. See `PLAN_READONLY.md`.
 
 pub mod buffer;
 pub mod cmdline;
@@ -44,13 +50,17 @@ pub mod tables;
 pub mod tck;
 pub mod word;
 
-pub use buffer::{VimBuffer, VimBufferMut};
-pub use host::VimHost;
+pub use buffer::{RoBuffer, VimBuffer, VimBufferMut};
+pub use host::{MotionHook, RoHost, VimHost, VimHostRo};
 pub use key::{Key, KeyKind, Modifiers};
 pub use keymap::ModeClass;
 pub use mode::{Mode, VisualKind};
-pub use motions::Motion;
+pub use motions::{Motion, MotionKind, MotionResult};
 pub use objects::TextObject;
 pub use ops::Operator;
 pub use registers::RegisterKind;
-pub use state::{Ctx, KeyResult, VimState};
+pub use state::{Ctx, CtxRo, KeyResult, VimState};
+
+/// vim's `E21` — the message [`VimState`] reports when an edit is refused
+/// because `'modifiable'` is off ([`VimState::set_modifiable`]).
+pub use state::E21_MODIFIABLE_OFF;

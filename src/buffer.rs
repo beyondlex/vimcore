@@ -124,17 +124,116 @@ pub trait VimBuffer {
     }
 }
 
-/// Mutating text access. Every engine edit funnels through the two required
-/// methods, which keeps the undo transaction boundary visible to the host.
+/// Mutating text access. Every engine edit funnels through the two write
+/// primitives, which keeps the undo transaction boundary visible to the host.
+///
+/// Both primitives are **optional**: the default refuses (`false`), so a
+/// read-only host (a diff viewer, a log pager) joins the engine with an EMPTY
+/// impl and lets the engine's `'modifiable'` gate report vim's `E21` instead
+/// of having to fake the edit path (PLAN_READONLY P1-A).
+///
+/// A host that accepts edits returns `true` and performs the mutation; a
+/// `false` return means "nothing happened" and the engine leaves every stored
+/// offset (marks, jumplist, changelist) alone.
 pub trait VimBufferMut: VimBuffer {
-    fn insert_text(&mut self, offset: usize, text: &str);
-    fn delete_range(&mut self, range: Range<usize>);
+    /// Insert `text` at `offset`; `false` = refused, nothing was written.
+    fn insert_text(&mut self, offset: usize, text: &str) -> bool {
+        let _ = (offset, text);
+        false
+    }
 
-    fn replace_range(&mut self, range: Range<usize>, text: &str) {
-        self.delete_range(range.clone());
-        self.insert_text(range.start, text);
+    /// Delete `range`; `false` = refused, nothing was removed.
+    fn delete_range(&mut self, range: Range<usize>) -> bool {
+        let _ = range;
+        false
+    }
+
+    /// [`VimBufferMut::delete_range`] + [`VimBufferMut::insert_text`]. Hosts
+    /// that model edits atomically should override this one: the default is
+    /// two separate steps and a refused insert leaves the deletion applied.
+    fn replace_range(&mut self, range: Range<usize>, text: &str) -> bool {
+        if !self.delete_range(range.clone()) {
+            return false;
+        }
+        self.insert_text(range.start, text)
     }
 }
+
+/// The read-only entry point of the pipeline: a `&dyn VimBuffer` dressed up
+/// as a [`VimBufferMut`] whose write primitives always refuse.
+///
+/// This is what lets [`crate::state::VimState::handle_key_ro`] reuse the ONE
+/// key pipeline instead of carrying a second 6k-line copy of it: the main
+/// pipeline asks for `&mut dyn VimBufferMut`, and this adapter answers with a
+/// read-only view. `'modifiable' = off` (enforced by `handle_key_ro`) is the
+/// first line of defence; the refusing primitives are the second — any write
+/// that slips past the gate still cannot reach the host's text.
+pub struct RoBuffer<'a> {
+    buf: &'a dyn VimBuffer,
+}
+
+impl<'a> RoBuffer<'a> {
+    pub fn new(buf: &'a dyn VimBuffer) -> Self {
+        RoBuffer { buf }
+    }
+}
+
+// Forwarding (not just the required six): a host may override any provided
+// helper (`first_non_blank`, `line_indent`, …) with a cheaper implementation,
+// and the adapter must not silently fall back to the generic default.
+impl VimBuffer for RoBuffer<'_> {
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+    fn line_count(&self) -> usize {
+        self.buf.line_count()
+    }
+    fn char_at(&self, offset: usize) -> Option<char> {
+        self.buf.char_at(offset)
+    }
+    fn prev_char_offset(&self, offset: usize) -> Option<usize> {
+        self.buf.prev_char_offset(offset)
+    }
+    fn line_range(&self, line: usize) -> Range<usize> {
+        self.buf.line_range(line)
+    }
+    fn offset_to_line(&self, offset: usize) -> usize {
+        self.buf.offset_to_line(offset)
+    }
+    fn slice(&self, range: Range<usize>) -> String {
+        self.buf.slice(range)
+    }
+    fn line_start(&self, line: usize) -> usize {
+        self.buf.line_start(line)
+    }
+    fn line_end(&self, line: usize) -> usize {
+        self.buf.line_end(line)
+    }
+    fn line_content(&self, line: usize) -> String {
+        self.buf.line_content(line)
+    }
+    fn next_char_offset(&self, offset: usize) -> Option<usize> {
+        self.buf.next_char_offset(offset)
+    }
+    fn line_indent(&self, line: usize) -> (usize, bool) {
+        self.buf.line_indent(line)
+    }
+    fn first_non_blank(&self, line: usize) -> usize {
+        self.buf.first_non_blank(line)
+    }
+    fn at_line_end(&self, offset: usize) -> bool {
+        self.buf.at_line_end(offset)
+    }
+    fn line_is_blank(&self, line: usize) -> bool {
+        self.buf.line_is_blank(line)
+    }
+}
+
+// No methods on purpose: both write primitives keep their refusing default.
+impl VimBufferMut for RoBuffer<'_> {}
 
 // Clamp helpers: engine offsets are always char boundaries that stay inside
 // their line — every offset arriving from OUTSIDE the engine (a host click,

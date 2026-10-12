@@ -47,6 +47,34 @@ match vim.handle_key(&mut ctx, Key::parse("dd")) {
 引擎内部统一 UTF-8 字节偏移，渲染所需的全部状态（模式、光标、可视选区、
 搜索高亮）都可读。
 
+## 只读宿主（diff view / 日志 / 预览）
+
+纯查看类宿主拿不出 `VimBufferMut` 的写原语，但它们要的是同一台引擎的
+motion / text object / 搜索 / marks / 滚动。只读路径就是为此存在的：
+
+```rust,ignore
+use vimcore::buffer::VimBuffer;
+use vimcore::host::VimHostRo;
+use vimcore::state::{CtxRo, VimState};
+
+impl VimBuffer for MyView { /* 只读访问 */ }
+impl VimHostRo for MyHost { /* 视口 / 剪贴板写 / 高亮 / 状态消息 */ }
+
+let mut ctx = CtxRo { buf: &my_view, host: &mut my_host };
+vim.handle_key_ro(&mut ctx, key);
+```
+
+- 编辑类命令按 vim 的 **E21** 拒绝（响铃 + `E21: Cannot make changes,
+  'modifiable' is off`），不会 panic 也不会静默 no-op；
+- `y`（yank）、`m{a}`、搜索、`n`/`N`、滚动、`:q` 全部照常；
+- 只想用完整 `VimHost` 的宿主也能走兼容层：`impl VimBufferMut for X {}`
+  （零方法，写原语默认拒绝）+ `vim.set_modifiable(false)`；
+- 折叠 / 合成行投影这类"宿主自己的行模型"通过 `MotionHook` 接管个别
+  motion（`j`/`k` 走可见行、`]c` 跳 diff chunk），算子待决与可视扩展免费
+  获得，折叠概念不进引擎。
+
+细节与 vim 9.1 实证见 `PLAN_READONLY.md` 与 `NOTES.md` 的只读管线一节。
+
 ## 接入质量有测试下限（TCK）
 
 宿主在自己的 buffer / host 实现上跑引擎自带的契约测试，把「接入质量靠读
@@ -59,6 +87,13 @@ fn my_buffer_meets_engine_contract() {
     vimcore::tck::buffer_edit_contract(&mut buf).unwrap();
     let mut host = MyHost::default();
     vimcore::tck::engine_smoke_contract(&mut buf, &mut host).unwrap();
+}
+
+// 只读宿主：41 条编辑键位必须被 E21 拒绝且缓冲逐字节不变
+#[test]
+fn my_readonly_view_meets_engine_contract() {
+    let buf = MyView::new("alpha\nbeta\ngamma\n");
+    vimcore::tck::readonly_pipeline_contract(&buf).unwrap();
 }
 ```
 

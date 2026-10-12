@@ -275,9 +275,10 @@ fn substitute_full_spelling() {
     }
     f.feed(["<CR>"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "baa\nbba\n");
+    // vim 9.1（oracle）：2 次替换 ≤ 'report'(2) → 无计数反馈；且命令被识别
     assert!(
-        f.host.statuses.iter().any(|s| s.contains("substitution")),
-        "替换计数反馈仍在，实际 {:?}",
+        !f.host.statuses.iter().any(|s| s.contains("E492")),
+        "%substitute 是合法全拼：{:?}",
         f.host.statuses
     );
 }

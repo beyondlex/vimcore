@@ -132,7 +132,119 @@ pub enum CmdKind {
     Visual(VisualCmd),
 }
 
+impl Operator {
+    /// Whether this operator MUTATES the buffer. Only `y` does not — vim
+    /// lets a yank through with `'modifiable'` off (9.1 oracle: `yiw`/`yy`
+    /// under `:set nomodifiable` are silent no-ops on the text and report no
+    /// E21, while `dw`/`gUiw`/`>` do).
+    pub fn is_edit(self) -> bool {
+        !matches!(self, Operator::Yank)
+    }
+}
+
+impl NormalCmd {
+    /// [`Operator::is_edit`] for the direct-edit normal commands. The
+    /// read-only ones — yank, mark set/`` ` ``-jump, macro record/play,
+    /// scrolls, jumplist/changelist walks, `ga`/`g8`, `ZZ`/`ZQ` — stay legal
+    /// with `'modifiable'` off (vim 9.1 oracles: `mA` and `:q` report no
+    /// E21; `x`/`u`/`p`/`J`/`~`/`C`/`S` do).
+    pub fn is_edit(self) -> bool {
+        match self {
+            NormalCmd::DeleteCharForward
+            | NormalCmd::DeleteCharBackward
+            | NormalCmd::SubstituteChar
+            | NormalCmd::SubstituteLine
+            | NormalCmd::ChangeToEnd
+            | NormalCmd::DeleteToEnd
+            | NormalCmd::ReplaceChar
+            | NormalCmd::ToggleChar
+            | NormalCmd::PutAfter
+            | NormalCmd::PutBefore
+            | NormalCmd::PutAfterGp
+            | NormalCmd::PutBeforeGp
+            | NormalCmd::PasteIndent { .. }
+            | NormalCmd::Join
+            | NormalCmd::JoinLiteral
+            | NormalCmd::Undo
+            | NormalCmd::Redo
+            | NormalCmd::RepeatChange
+            | NormalCmd::IncrementNumber
+            | NormalCmd::DecrementNumber
+            | NormalCmd::RepeatSubstitute
+            | NormalCmd::RepeatSubstituteGlobal => true,
+            // vim's undo/redo are buffer changes too, so `u` is E21 — but the
+            // yank-line spelling, marks, macros and every read-only command
+            // below are not.
+            NormalCmd::LinewiseOp(op) => op.is_edit(),
+            NormalCmd::YankLine
+            | NormalCmd::MarkSet
+            | NormalCmd::RecordMacro
+            | NormalCmd::PlayMacro
+            | NormalCmd::JumpMark { .. }
+            | NormalCmd::ScrollCenter
+            | NormalCmd::ScrollTop
+            | NormalCmd::ScrollBottom
+            | NormalCmd::ScrollLines { .. }
+            | NormalCmd::RestoreVisual
+            | NormalCmd::JumpBackward
+            | NormalCmd::JumpForward
+            | NormalCmd::OlderChange
+            | NormalCmd::NewerChange
+            | NormalCmd::SelectMatch { .. }
+            | NormalCmd::WriteQuit
+            | NormalCmd::QuitNoSave
+            | NormalCmd::CharInfo
+            | NormalCmd::ByteInfo => false,
+        }
+    }
+}
+
+impl VisualCmd {
+    /// [`Operator::is_edit`] for visual-mode commands: joining, pasting over
+    /// the selection, `I`/`A`, `r{char}` and `g<C-a>` all mutate;
+    /// navigation (`o`/`O`, kind toggles, `zz`) and yank do not.
+    pub fn is_edit(self) -> bool {
+        match self {
+            VisualCmd::PutReplace
+            | VisualCmd::PutReplaceKeep
+            | VisualCmd::InsertAtSelection { .. }
+            | VisualCmd::SequentialIncrement
+            | VisualCmd::Join { .. }
+            | VisualCmd::ReplaceChar => true,
+            VisualCmd::LinewiseOp(op) => op.is_edit(),
+            VisualCmd::Exit
+            | VisualCmd::ToggleKind { .. }
+            | VisualCmd::SwapEnds
+            | VisualCmd::SwapEndsKeepCol
+            | VisualCmd::Scroll(_) => false,
+        }
+    }
+}
+
 impl CmdKind {
+    /// Whether this command MUTATES the buffer. With `'modifiable'` off the
+    /// engine refuses the whole set with `E21` at the command's execution
+    /// point instead of running it into a write primitive that cannot
+    /// succeed — and, just as importantly, before it can move the cursor or
+    /// drift any register (PLAN_READONLY P1-A).
+    ///
+    /// Motions, text objects and entering visual mode are never edits: they
+    /// only feed an operator, which is gated separately at
+    /// `complete_operator_with_span` / `apply_visual_operator` (vim's `d`
+    /// arms silently and the E21 arrives with the motion, so the cursor must
+    /// stay put — oracle: `dw` under `:set nomodifiable` does not move).
+    pub fn is_edit(self) -> bool {
+        match self {
+            CmdKind::Motion(_) | CmdKind::Object(_) | CmdKind::EnterVisual(_) => false,
+            CmdKind::Operator(op) => op.is_edit(),
+            // vim refuses the entry itself (`i` under `:set nomodifiable` is
+            // E21 before any keystroke reaches the session)
+            CmdKind::EnterInsert(_) => true,
+            CmdKind::Normal(cmd) => cmd.is_edit(),
+            CmdKind::Visual(cmd) => cmd.is_edit(),
+        }
+    }
+
     /// Commands that consume the next key as an argument.
     pub fn takes_char(self) -> bool {
         matches!(

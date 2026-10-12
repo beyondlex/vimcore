@@ -46,7 +46,6 @@ use vimcore::registers::{RegisterKind, UNNAMED};
 //   （\x16\x12\x0f = C-v 转义？不——-s 键文件里 \x12=C-r、\x0f=C-o 直接
 //   原始字节）→ ['foofoo']。
 #[test]
-#[ignore]
 fn insert_ctrl_r_literal_forms_paste_the_register() {
     let mut f = Fixture::new("foo\n");
     f.feed(["\"", "a", "y", "i", "w"]); // a = 'foo'
@@ -90,7 +89,6 @@ fn insert_ctrl_r_literal_forms_paste_the_register() {
 //   b'\x1bq2xqdd"2p:call writefile([getline(1,"$")],"out")\r:wq\r'
 //   → ['world']。
 #[test]
-#[ignore]
 fn ring_shift_clears_recorded_numbered_registers() {
     let mut f = Fixture::new("hello\nworld\n");
     f.feed(["q", "2", "x", "q"]); // "2 = 'x'（录制即执行）
@@ -109,27 +107,31 @@ fn ring_shift_clears_recorded_numbered_registers() {
 }
 
 // ---------------------------------------------------------------- E-C-3（P2）
-// `"A` 追加的**行模型**：vim 的追加是把新文本按「寄存器行」接到旧行序列
-// 尾（register.c op_yank 的 append 块），只在合并类型为 MCHAR 时把旧块
-// 末行与新块首行**字符串拼接**（cpo 无 'j'）。两条推论：
-// (a) 旧 charwise + 新 blockwise → 合并 charwise，行为 ['fooa','c']；
-// (b) 旧 blockwise + 新 charwise → 合并仍 blockwise，行为 ['a','c','zz']。
-// 引擎 append_to_named 是「整段文本拼接」（linewise 除外）：(a) kind 错成
-// Blockwise（粘贴走矩形模型）、(b) 行被并成 'a\nczz'（少一行）。
+// `"A` 追加的**行模型**：vim 的 op_yank 追加块（register.c:1287-1334）把
+// 新块的行接到旧行序列尾；**结果类型**在「新块是 linewise」时为 linewise，
+// 否则沿用**旧寄存器**的类型（`curr->y_type` 只被 linewise 新块覆盖）；
+// 仅当结果类型是 charwise 时把旧块末行与新块首行**字符串拼接**（cpo 无 'J'）。
+// 两条推论：
+// (a) 旧 charwise + 新 blockwise → 合并 charwise，['fooa','c']；
+// (b) 旧 blockwise + 新 charwise → 合并仍 blockwise，['a','c','ab']。
+// 引擎 append_to_named 原为「整段文本拼接 + 取新 kind」：(a) kind 错成
+// Blockwise、(b) 行被并成 'a\ncab'。
 //
+// oracle 通道：`"{reg}` 前缀放在 `<C-v>` **之前**在 9.1 下不生效
+// （实测 `"a<C-v>jy` 寄存器为空），必须**先进入可视再 `"ay`**。
 // oracle (a)：printf 'foo\nab\ncd\n' > b_ec3a; keys
-//   b'\x1b"ayiw\x16jy"Ay:call writefile([getregtype("a"),strtrans(getreg("a"))],"out")\r:wq\r'
+//   b'"ayiwj\x16j"Ay:call writefile([getregtype("a"),strtrans(getreg("a"))],"out")\r:wq\r'
 //   → 'v' 'fooa^@c'。
 // oracle (b)：printf 'ab\ncd\nzz\n' > b_ec3b; keys
-//   b'\x1b"a\x16jyyiw"Ay:call writefile([getregtype("a"),strtrans(getreg("a"))],"out")\r:wq\r'
-//   → "\x161"（CTRL-V 宽 1） 'a^@c^@zz'。
+//   b'\x16j"ayviw"Ay:call writefile([getregtype("a"),strtrans(getreg("a"))],"out")\r:wq\r'
+//   → "\x161"（CTRL-V 宽 1） 'a^@c^@ab'。
 #[test]
-#[ignore]
 fn uppercase_append_charwise_then_blockwise_stays_charwise() {
     let mut f = Fixture::new("foo\nab\ncd\n");
     f.feed(["\"", "a", "y", "i", "w"]); // a = 'foo' (charwise)
+    f.feed(["j"]); // 到第 2 行（块锚点）
     f.feed_raw(Key::ctrl_char('v'));
-    f.feed(["j", "y"]); // block 2×1: 'a'/'c'
+    f.feed(["j"]); // block 2×1: 'a'/'c'
     f.feed(["\"", "A", "y"]); // 追加块
     let r = f.vim.registers.get('a');
     assert_eq!(
@@ -145,19 +147,18 @@ fn uppercase_append_charwise_then_blockwise_stays_charwise() {
 }
 
 #[test]
-#[ignore]
 fn uppercase_append_blockwise_then_charwise_keeps_rows() {
     let mut f = Fixture::new("ab\ncd\nzz\n");
-    f.feed(["\"", "a"]);
     f.feed_raw(Key::ctrl_char('v'));
-    f.feed(["j", "y"]); // a = block 2×1: 'a'/'c'
-    f.feed(["y", "i", "w"]); // yank 'zz' 进 unnamed
-    f.feed(["\"", "A"]); // 追加 unnamed（charwise 'zz'）
+    f.feed(["j"]); // block 2×1: 'a'/'c'
+    f.feed(["\"", "a", "y"]); // a = block
+    f.feed(["v", "i", "w"]); // 选中 'ab'（charwise）
+    f.feed(["\"", "A", "y"]); // 追加 unnamed（charwise 'ab'）
     let r = f.vim.registers.get('a');
     assert_eq!(
         r.map(|r| (r.text.clone(), r.kind)),
-        Some(("a\nc\nzz".to_owned(), RegisterKind::Blockwise)),
-        "vim 9.1: 旧 blockwise + 新 charwise → 三行矩形 ['a','c','zz']（引擎并成 'a\\nczz' 两行）"
+        Some(("a\nc\nab".to_owned(), RegisterKind::Blockwise)),
+        "vim 9.1: 旧 blockwise + 新 charwise → 三行矩形 ['a','c','ab']（引擎并成 'a\\ncab' 两行）"
     );
 }
 
@@ -174,7 +175,6 @@ fn uppercase_append_blockwise_then_charwise_keeps_rows() {
 //   b'\x1bggvjyGviwp:call writefile([string(getpos("."))],"out")\r:wq\r'
 //   → [0,3,1,0]。
 #[test]
-#[ignore]
 fn visual_put_multiline_charwise_cursor_lands_on_first_char() {
     let mut f = Fixture::new("b\nc\nhello\n");
     f.feed(["g", "g", "v", "j", "y"]); // unnamed = 'b\nc'
@@ -196,7 +196,6 @@ fn visual_put_multiline_charwise_cursor_lands_on_first_char() {
 //   b'\x1bggvjyGviwP:call writefile([string(getpos("."))],"out")\r:wq\r'
 //   → [0,3,1,0]。
 #[test]
-#[ignore]
 fn visual_put_keep_multiline_charwise_cursor_lands_on_first_char() {
     let mut f = Fixture::new("b\nc\nhello\n");
     f.feed(["g", "g", "v", "j", "y"]);
@@ -216,18 +215,17 @@ fn visual_put_keep_multiline_charwise_cursor_lands_on_first_char() {
 // `max(选区行数, count)` → `Vj3J` 多接一行。
 //
 // 复现："a\nb\nc\nd\n" 上 `Vj3J`。
-// vim 9.1：'ab\nc\nd'（只接选中的两行）；引擎：'abc\nd'。
+// vim 9.1：'a b\nc\nd'（只接选中的两行，J 补一个空格）；引擎：'a b c\nd'。
 // oracle：printf 'a\nb\nc\nd\n' > b_ec6; keys
-//   b'\x1bVj3J:call writefile([getline(1,"$")],"out")\r:wq\r'
-//   → ['ab','c','d']。
+//   b'Vj3J:call writefile(getline(1,"$"),"out")\r:wq\r'
+//   → ['a b','c','d']（`VjJ` 同结果，count 被无视）。
 #[test]
-#[ignore]
 fn visual_join_ignores_the_typed_count() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     f.feed(["V", "j", "3", "J"]);
     assert_eq!(
         f.text(),
-        "ab\nc\nd\n",
+        "a b\nc\nd\n",
         "vim 9.1: 可视 J 的行数 = 选区行数，count 被无视"
     );
 }
@@ -245,7 +243,6 @@ fn visual_join_ignores_the_typed_count() {
 //   b'\x1b\x16y2G0gp:call writefile([string(getpos(".")).string(getline(1,"$"))],"out")\r:wq\r'
 //   → [0,2,3,0] ['ab','cad']。
 #[test]
-#[ignore]
 fn gp_blockwise_cursor_lands_after_the_pasted_block() {
     let mut f = Fixture::new("ab\ncd\n");
     f.feed_raw(Key::ctrl_char('v'));
@@ -263,10 +260,10 @@ fn gp_blockwise_cursor_lands_after_the_pasted_block() {
 // i_CTRL-V 十进制 >255 钳制：get_literal 的 `if (cc > 255 && unicode == 0)
 // cc = 255`——`C-v 300` 插入 'ÿ'（255）。引擎 char::from_u32(300) 得 U+012C。
 //
-// oracle：printf 'x\n' > b_ec8; keys b'\x1bi\x16300\x1b:call
-//   writefile([strtrans(getline(1))],"out")\r:wq\r' → 'xÿ'。
+// oracle：printf 'x\n' > b_ec8; keys b'i\x16300\x1b:call
+//   writefile(getline(1,"$"),"out")\r:wq\r' → ['ÿx']（'ÿ' 在 x **前**，`i`
+//   插在光标字符之前）。
 #[test]
-#[ignore]
 fn ctrl_v_decimal_value_clamps_at_255() {
     let mut f = Fixture::new("x\n");
     f.feed(["i"]);
@@ -275,22 +272,21 @@ fn ctrl_v_decimal_value_clamps_at_255() {
     f.feed(["<Esc>"]);
     assert_eq!(
         f.text(),
-        "x\u{ff}\n",
-        "vim 9.1: C-v 300 钳到 255（'ÿ'）；引擎插 U+012C"
+        "\u{ff}x\n",
+        "vim 9.1: C-v 300 钳到 255（'ÿ'，插在光标字符前）；引擎插 U+012C"
     );
 }
 
 // ---------------------------------------------------------------- E-C-9（P3）
-// C-v 数值 0 = 插入**换行**（get_literal：`if (cc == 0) cc = '\n'`——NUL
-// 内部存为 NL），且终结数字的非数字键 vungetc 照常处理：`A<C-v>0<Esc>`
-// 插出一个换行然后 Esc 正常退出插入。引擎把 0 当「未完成的数字串」，
-// Esc 只取消（D6 行为）——缓冲原样。
+// C-v 数值 0：get_literal 的 `if (cc == 0) cc = '\n'`——注释写明「NUL is
+// stored as NL」，即**插入 NUL 字节**（vim 内部用 NL 表示 NUL，:w 写出即
+// 0x00）。9.1 实证：`A<C-v>0<Esc>` 后 :w 得字节 'x' 0x00 '\n'（**不是**
+// 换行）。引擎把 0 当「未完成的数字串」取消——缓冲原样。
 //
-// oracle：printf 'x\n' > b_ec9; keys b'\x1bA\x160\x1b:call
-//   writefile([getline(1,"$")],"out")\r:wq\r' → ['x','']。
+// oracle：printf 'x\n' > b_ec9; keys b'A\x160\x1b:call
+//   writefile(getline(1,"$"),"out")\r:wq\r'，:w 后 od → 'x' \0 \n。
 #[test]
-#[ignore]
-fn ctrl_v_zero_value_inserts_a_line_break() {
+fn ctrl_v_zero_value_inserts_a_nul_byte() {
     let mut f = Fixture::new("x\n");
     f.feed(["A"]);
     f.feed_raw(Key::ctrl_char('v'));
@@ -298,8 +294,8 @@ fn ctrl_v_zero_value_inserts_a_line_break() {
     f.feed(["<Esc>"]);
     assert_eq!(
         f.text(),
-        "x\n\n",
-        "vim 9.1: C-v 0 的值为 0 → NL → 换行；引擎按未完成数字取消"
+        "x\0\n",
+        "vim 9.1: C-v 0 的值为 0 → NUL 字节（内部存为 NL）；引擎按未完成数字取消"
     );
 }
 
@@ -312,7 +308,6 @@ fn ctrl_v_zero_value_inserts_a_line_break() {
 // oracle：printf '' > b_ec10; keys b'\x1bi\x16xg\x1b:call
 //   writefile([strtrans(getline(1))],"out")\r:wq\r' → 'g'。
 #[test]
-#[ignore]
 fn ctrl_v_invalid_terminator_is_typed_normally() {
     let mut f = Fixture::new("");
     f.feed(["i"]);
@@ -334,14 +329,16 @@ fn ctrl_v_invalid_terminator_is_typed_normally() {
 //
 // 复现："      abc"（6 空格缩进）上 `:set sw=4` `I0<C-d><Esc>`。
 // vim 9.1：'abc'（全缩进移除）；引擎：'  abc'（只移一档 4 列）。
-// oracle：printf '      abc\n' > b_ec11; keys b'\x1b:set sw=4\rI0\x04\x1b:call
-//   writefile([getline(1)],"out")\r:wq\r' → 'abc'（\x04=C-d）。
+// 注意 `0` 是**文本输入**，须走 type_text（host IME 通道），feed 的
+// 可打印字符不会进缓冲——旧探针用 feed 导致引擎看不到 '0'。
+// oracle：printf '      abc\n' > b_ec11; keys b':set sw=4\rI0\x04\x1b:call
+//   writefile(getline(1),"out")\r:wq\r' → 'abc'（\x04=C-d）。
 #[test]
-#[ignore]
 fn zero_ctrl_d_removes_all_indent() {
     let mut f = Fixture::new("      abc\n");
     f.feed([":", "s", "e", "t", " ", "s", "w", "=", "4", "<CR>"]);
-    f.feed(["I", "0"]);
+    f.feed(["I"]);
+    f.type_text("0");
     f.feed_raw(Key::ctrl_char('d'));
     f.feed(["<Esc>"]);
     assert_eq!(
@@ -352,17 +349,18 @@ fn zero_ctrl_d_removes_all_indent() {
 }
 
 // ---------------------------------------------------------------- E-C-12（P3)
-// `^<C-d>`：移除**全部**缩进且光标列不动（edit.c 同臂的 '^' 分支），
-// '^' 本身不进缓冲。引擎把 '^' 当普通打字。
+// `^<C-d>`：移除**全部**缩进且光标列不动（edit.c ins_shift 的
+// `lastc == '0' || lastc == '^'` 分支：删掉 '^' 后 INDENT_SET 到 0），
+// '^' 本身不进缓冲。引擎只认 '0'，把 '^' 当普通打字。
 //
-// oracle：printf '      abc\n' > b_ec12; keys b'\x1b:set sw=4\rI^\x04\x1b:call
-//   writefile([getline(1)],"out")\r:wq\r' → 'abc'。
+// oracle：printf '      abc\n' > b_ec12; keys b':set sw=4\rI^\x04\x1b:call
+//   writefile(getline(1),"out")\r:wq\r' → 'abc'。
 #[test]
-#[ignore]
 fn caret_ctrl_d_removes_all_indent_without_typing_caret() {
     let mut f = Fixture::new("      abc\n");
     f.feed([":", "s", "e", "t", " ", "s", "w", "=", "4", "<CR>"]);
-    f.feed(["I", "^"]);
+    f.feed(["I"]);
+    f.type_text("^");
     f.feed_raw(Key::ctrl_char('d'));
     f.feed(["<Esc>"]);
     assert_eq!(
@@ -377,24 +375,29 @@ fn caret_ctrl_d_removes_all_indent_without_typing_caret() {
 // 含 ':'——都 `lastc = cap->nchar`）。引擎 MacroPlay 的 `:` 臂执行完不更新
 // last_macro_played，`@@` 重放的是更早的宏或响铃。
 //
-// 复现："a\na\n" 上 `qax<Esc>q`，`:s/a/z/<CR>`，`@:`，`@@`。
-// vim 9.1：@@ 重放 @: → 第二行未动（line1 'zz' 已无 'a'，E486），缓冲
-// 'zz\na'。引擎：@@ 重放宏 a → 'xzz\na'。
+// 复现："a\na\n" 上 `qai x<Esc>q`（宏 a = 'ix<Esc>'），`:s/a/z/<CR>`，
+// `@:`，`@@`。录制即执行，故录制后缓冲为 'xa\na'；`:s` → 'xz\na'。
+// vim 9.1：`@@` 重放 `@:`（nv_at 的 lastc 收 ':'）→ line1 无 'a'（E486），
+// 缓冲仍 'xz\na'。引擎：`@@` 重放宏 a → 又插一个 'x'（'xxz\na'）。
 // oracle：printf 'a\na\n' > b_ec13; keys
-//   b'\x1bqax\x1bq:s/a/z/\r@:@@:call writefile([getline(1,"$")],"out")\r:wq\r'
-//   → ['zz','a']。
+//   b'qaix\x1bq:s/a/z/\r@:@@:call writefile(getline(1,"$"),"out")\r:wq\r'
+//   → ['xz','a']。
 #[test]
-#[ignore]
 fn at_at_after_at_colon_repeats_the_ex_command() {
     let mut f = Fixture::new("a\na\n");
-    f.feed(["q", "a", "x", "<Esc>", "q"]); // a = 'ix<Esc>'
-    f.feed([":", "s", "/", "a", "/", "z", "/", "<CR>"]); // line1 'za'
-    f.feed(["@", ":"]); // 重放 :s → line1 'zz'
-    assert_eq!(f.text(), "zz\na\n", "形状自检");
+    // 'x' 是**文本输入**（host IME 通道），须走 type_text——feed 的可打印
+    // 字符不会进缓冲。宏 a = 'i' + Text("x") + '<Esc>'。
+    f.feed(["q", "a", "i"]);
+    f.type_text("x");
+    f.feed(["<Esc>", "q"]);
+    f.feed([":", "s", "/", "a", "/", "z", "/", "<CR>"]); // line1 'xa' → 'xz'
+    assert_eq!(f.text(), "xz\na\n", "形状自检");
+    f.feed(["@", ":"]); // 重放 :s → line1 'xz'（无 'a'）
+    assert_eq!(f.text(), "xz\na\n", "形状自检 2");
     f.feed(["@", "@"]); // 应重放 @:（line1 无 'a' → 无操作）
     assert_eq!(
         f.text(),
-        "zz\na\n",
+        "xz\na\n",
         "vim 9.1: @@ 重复的是 @:（nv_at 的 lastc 收 ':'）；引擎重放了宏 a"
     );
 }
@@ -407,7 +410,6 @@ fn at_at_after_at_colon_repeats_the_ex_command() {
 // oracle：冷寄存器上 `p`（PTY 通道可见 E353 回显；typeahead 侧以
 // v:errmsg 采样亦可）。
 #[test]
-#[ignore]
 fn paste_from_empty_register_reports_e353() {
     let mut f = Fixture::new("a\n");
     f.feed(["p"]); // unnamed 未设
@@ -424,19 +426,18 @@ fn paste_from_empty_register_reports_e353() {
 // （oracle 已证引擎一致；失败即说明引擎回退，按回归处理）
 
 // 证伪-1：`":` 存冒号后整条命令行（含范围）。oracle：`:1,2d` 后 `":p`
-// 粘出 '1,2d'。
+// 粘出 '1,2d'。注意粘贴位置：`:1,2d` 后光标在第 1 行 'c'，`p` 插在其后 →
+// 'c1,2d'（旧探针把期望写成 '1,2dc' 是笔误）。
 #[test]
-#[ignore]
 fn falsified_colon_register_holds_range_without_colon() {
     let mut f = Fixture::new("a\nb\nc\n");
     f.feed([":", "1", ",", "2", "d", "<CR>"]);
     f.feed(["\"", ":", "p"]);
-    assert_eq!(f.text(), "1,2dc\n", "vim 9.1: \": = '1,2d'（无冒号、含范围）");
+    assert_eq!(f.text(), "c1,2d\n", "vim 9.1: \": = '1,2d'（无冒号、含范围）");
 }
 
 // 证伪-2：`c` 的小删也写 `"-`（op_delete 同路）。
 #[test]
-#[ignore]
 fn falsified_change_writes_small_delete_register() {
     let mut f = Fixture::new("ab cd\n");
     f.feed(["c", "w"]);
@@ -451,7 +452,6 @@ fn falsified_change_writes_small_delete_register() {
 
 // 证伪-3：连续小删**覆盖** `"-`（op_delete 每次重新 op_yank，无累积）。
 #[test]
-#[ignore]
 fn falsified_consecutive_small_deletes_overwrite_dash() {
     let mut f = Fixture::new("aa bb cc\n");
     f.feed(["d", "w", "d", "w"]);
@@ -462,20 +462,22 @@ fn falsified_consecutive_small_deletes_overwrite_dash() {
     );
 }
 
-// 证伪-4：`@@` 基本回放（无 @: 干扰时）。
+// 证伪-4：`@@` 基本回放（无 @: 干扰时）。宏必须含 `i` 才能插入 'x'
+// （旧探针 `qax<Esc>q` 实际录制的是普通 `x` 删除）。
 #[test]
-#[ignore]
 fn falsified_at_at_replays_previous_macro() {
     let mut f = Fixture::new("q\n");
-    f.feed(["q", "a", "x", "<Esc>", "q"]);
-    f.feed(["@", "a"]);
-    f.feed(["@", "@"]);
+    f.feed(["q", "a", "i"]);
+    f.type_text("x");
+    f.feed(["<Esc>", "q"]); // a = 'i' + Text("x") + '<Esc>'
+    f.feed(["@", "a"]); // 插入 'x'
+    f.feed(["@", "@"]); // 再插 'x'
     assert_eq!(f.text(), "xxxq\n", "vim 9.1: @@ 重复 @a");
 }
 
-// 证伪-5：`3u` / `2<C-r>` 计数步进（undo.c 的 count 循环）。
+// 证伪-5：`3u` / `2<C-r>` 计数步进（undo.c 的 count 循环）。`i` 插在光标
+// 字符**之前**，故结果为 'Xa Yb c'（旧探针误写成 'aX bY c'）。
 #[test]
-#[ignore]
 fn falsified_undo_redo_count_steps() {
     let mut f = Fixture::new("a b c\n");
     f.feed(["i"]);
@@ -489,12 +491,11 @@ fn falsified_undo_redo_count_steps() {
     assert_eq!(f.text(), "a b c\n", "3u 撤三个插入会话");
     f.feed_raw(Key::ctrl_char('r'));
     f.feed_raw(Key::ctrl_char('r'));
-    assert_eq!(f.text(), "aX bY c\n", "2<C-r> 重做两步");
+    assert_eq!(f.text(), "Xa Yb c\n", "2<C-r> 重做两步");
 }
 
 // 证伪-6：`"/` 最近搜索模式寄存器。
 #[test]
-#[ignore]
 fn falsified_search_register_holds_pattern() {
     let mut f = Fixture::new("foo\n");
     f.feed(["/", "f", "o", "o", "<CR>"]);
@@ -504,7 +505,6 @@ fn falsified_search_register_holds_pattern() {
 
 // 证伪-7：`p` 不改寄存器（unnamed 保持源内容）。
 #[test]
-#[ignore]
 fn falsified_put_leaves_register_untouched() {
     let mut f = Fixture::new("xy\n");
     f.feed(["y", "i", "w"]);
@@ -518,13 +518,14 @@ fn falsified_put_leaves_register_untouched() {
 }
 
 // 证伪-8：`:s` 各自一个 undo 组（连续两条 :s，一条 u 只撤最后一条）。
+// `:%s` 后光标停在**最后**改动行，故无范围的 `:s/b/c/` 改的是第 3 行 →
+// 'b\nb\nc'（旧探针期望 'c\nb\nb' 是把光标当成第 1 行）。
 #[test]
-#[ignore]
 fn falsified_ex_substitutes_are_separate_undo_groups() {
     let mut f = Fixture::new("a\na\na\n");
     f.feed([":", "%", "s", "/", "a", "/", "b", "/", "<CR>"]);
     f.feed([":", "s", "/", "b", "/", "c", "/", "<CR>"]);
-    assert_eq!(f.text(), "c\nb\nb\n", "形状自检");
+    assert_eq!(f.text(), "b\nb\nc\n", "形状自检");
     f.feed(["u"]);
     assert_eq!(f.text(), "b\nb\nb\n", "vim 9.1: u 只撤最后一条 :s");
 }
@@ -532,7 +533,6 @@ fn falsified_ex_substitutes_are_separate_undo_groups() {
 // 证伪-9：`qaq` 清寄存器、`@a` 空转不残留（execute_command 的 stop 臂
 // store_named_plain(reg, "")）。
 #[test]
-#[ignore]
 fn falsified_empty_recording_clears_the_register() {
     let mut f = Fixture::new("x\n");
     f.feed(["q", "a", "i", "y"]);
