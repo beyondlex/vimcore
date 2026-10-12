@@ -333,3 +333,47 @@ visual 选区，体验更好。写原语在 `CtxRo` 下类型层面不可达，�
   `cargo test --workspace` 绿，clippy 干净。
 - vimcore：`tck.rs` EDIT_KEYS 补 8 条插入族角落 + `readonly_pipeline.rs`
   锁偏离后模式语义；1161/1161 绿。
+
+## 11. 引擎信号闭环：搜索高亮渲染 + 视觉响铃（2026-10-13 完成）
+
+M1–M6 收口后剩下的两个已知缺口，本轮闭合：
+
+### 11.1 引擎搜索高亮进渲染（diff view）
+
+`*`/`#` 的移动一直即时生效，但 `set_search_highlights` 的发布在 diff view
+只被收藏、每次喂键后清空（`vim_ro.rs` 旧 312–315 行），从未渲染。现在：
+
+- `vim_apply_engine_search_hits`（diff view）把引擎字节范围转换成焦点窗格的
+  `search_hits`——与 merge view `vim_publish_highlights` 同构（跨行命中夹到
+  起始行），接的是 CodePane 既有的金色高亮画布 + 行高亮缓存，零新渲染机制；
+- 引擎搜索**接管宿主 find 状态**（find_matches/find_current 重建、
+  find_query 让位）：vim 语义里 `*` 即取代上一次搜索，`n`/`N` 因此 navigate
+  新命中而不是陈旧的主机 `/` 结果；
+- 只画焦点窗格（vim 的 `*` 只搜当前缓冲）；宿主 `/` 开搜时
+  `clear_search_hits` 复位 `vim_hits_pane`，两套搜索互不叠加；
+- **窗格切换重扫**：引擎缓冲随焦点换文本，旧发布是旧坐标。vimcore 0.2.1 新增
+  `refresh_highlights_ro`（与 `handle_key_ro` 同一层 RoBuffer/RoHost 包装），
+  宿主在切换后第一次喂键时按新缓冲重扫重发——顺带消除了「`n` 把光标拽回旧
+  窗格」的 bug。残留小缺口：上次发布为空（pattern 无命中）再切换时不重扫，
+  直到下一次搜索动作（`vim_hits_pane` 为 None 即无记录）。
+
+### 11.2 bell 真转发 + 视觉响铃
+
+引擎的 `bell()` 在 `VimHostRo` 有空默认实现，两个宿主都落入"被丢弃"：
+
+- diff view 曾在 `vim_key` 里**合成**两条手写期消息（"No matching bracket
+  found" / "No quoted string on this line"）——vim 9.1 真值是失败动作只响铃、
+  **无消息文本**（实证见 §9 对拍）。合成逻辑连同 `pending_target`/`block_pair`
+  一起删除；
+- 两个宿主实现 `bell()` → 收集 → flush 触发**视觉响铃**：约 150ms 的整屏
+  闪烁（前景色 12% 透明度叠层，终端 visualbell 的同构），代次机制防旧定时器
+  清掉新响铃；
+- E21 走 `status_message`（toast 文本）**加** bell（闪烁）——vim 的错误是
+  消息 + beep，两者并存不互斥。
+
+### 11.3 发布与验证
+
+- vimcore **0.2.1** 已发布 crates.io（`refresh_highlights_ro`，新增 API 向后
+  兼容）；alacer lock 跟进。
+- alacer：782/782 绿（新增 5 个测试：`*` 高亮 + n/N 接管、窗格切换重扫、esc
+  清高亮、merge RO 窗格 bell 无消息、E21 消息+响铃）；clippy 干净。
