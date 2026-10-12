@@ -25,6 +25,7 @@ use vimcore::key::Key;
 use vimcore::mode::Mode;
 use vimcore::motions::{Motion, MotionKind, MotionResult};
 use vimcore::state::{Ctx, CtxRo, VimState};
+use vimcore::tck::TckHostRo;
 
 // ---- 只读宿主 ------------------------------------------------------------
 
@@ -599,5 +600,51 @@ fn fuzz_readonly_never_reaches_a_write_primitive() {
         }
         assert_eq!(rw_buf.slice(0..rw_buf.len()), text, "seed {seed}: 缓冲被改动了");
         assert_eq!(ro_buf.slice(0..ro_buf.len()), text);
+    }
+}
+
+// ---- 插入族角落：入口即拒的偏离语义 --------------------------------------
+
+/// vim 9.1 对 `gI` / visual `I`/`A` / block `I`/`A` 是**静默进入插入**、
+/// 首个落字才 E21；引擎选择在入口拒绝（tck.rs EDIT_KEYS 注释记录的偏离）。
+/// 本测试锁住偏离的两条可观察语义：E21 照报 + 模式不被拖进插入。
+/// （拒绝方向更严是安全的：`CtxRo` 下写原语类型层面不可达；且 visual
+/// 选区保留对只读窗格是更好的体验。）
+#[test]
+fn insert_corners_refuse_at_entry_without_entering_insert() {
+    let text = "alpha beta\ngamma delta\n";
+    let cases: &[(&[&str], Mode)] = &[
+        (&["g", "I"], Mode::Normal),
+        (&["v", "I"], Mode::Visual {
+            kind: vimcore::mode::VisualKind::Char,
+        }),
+        (&["V", "A"], Mode::Visual {
+            kind: vimcore::mode::VisualKind::Line,
+        }),
+        (&["<C-v>", "j", "l", "I"], Mode::Visual {
+            kind: vimcore::mode::VisualKind::Block,
+        }),
+    ];
+    for (keys, want_mode) in cases {
+        let buf = BufferView::from_text(text);
+        let mut host = TckHostRo::default();
+        let mut vim = VimState::new();
+        {
+            let ctx_buf: &dyn VimBuffer = &buf;
+            let mut ctx = CtxRo {
+                buf: ctx_buf,
+                host: &mut host,
+            };
+            for k in *keys {
+                vim.handle_key_ro(&mut ctx, Key::parse(k));
+            }
+        }
+        assert_eq!(vim.mode, *want_mode, "{keys:?}: 模式被拖入了插入");
+        assert!(
+            host.statuses.iter().any(|s| s.contains("E21")),
+            "{keys:?}: 没收到 E21（{:?}）",
+            host.statuses
+        );
+        assert_eq!(buf.slice(0..buf.len()), text, "{keys:?}: 缓冲被改动");
     }
 }
