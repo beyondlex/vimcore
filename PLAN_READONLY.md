@@ -280,3 +280,55 @@ M1–M3 完成后 alacer 即可迁移（用 A 步兼容层 + 拦截点即可满�
    测试改写。
 3. **收尾**：`flash_status` 的 E21 文案、help 面板的 vim_keys 清单核对、
    `cargo test -p alacer-ui` 全绿后单独提交。
+
+## 10. M6 实施设计：alacer merge view 只读窗格迁 RO 管线（2026-10-13 定稿并完成）
+
+### 10.1 与 diff view（§9）的关键差异：混合，不是整体
+
+merge view 是三窗格 RW 在住集成（Local / Result / Remote），**Result 是冲突
+解决的手改出口，必须保持 RW**。所以 M6 的范围是：
+
+| 窗格 | 路径 | 写入 |
+|---|---|---|
+| Result | `Ctx` + `MergeVimBuffer`（RW，不变） | 真编辑 |
+| Local / Remote | `CtxRo` + `LineBufView` → `handle_key_ro` | 引擎内 E21 |
+
+### 10.2 替换掉的旧机制（及其漏洞）
+
+旧设计对只读窗格是「**拦截表 + 写了再回滚**」：`is_write_key` 表拦住单键写
+操作；漏网的（如 `gI` 这类和弦）会经 RW 路径真写进 SharedLines，靠
+`vim_flush` 发现缓冲 Arc 变了再回滚 + 闪 READONLY_MSG。新设计下写操作在
+**构造上不可能**（`RoBuffer` 拒写、`RoHost` 惰化编辑侧钩子），拦截表和回滚
+分支（和弦路径的安全网保留）一并删除。
+
+### 10.3 接入形态
+
+- `MergeVimHost` **直接** `impl VimHostRo`（收集器字段与 `VimHost` impl 共
+  享，`vim_flush` 两条路径同一套效应落盘）——不需要第二个适配器结构体；
+  `VimHostRo` 与 `VimHost` 的调用都经 trait object，无方法名歧义。
+- `vim_feed_engine_ro`：馈送前仍 `vim_buffer.0.set(before)`（保持光标换算
+  的 Arc 快路径与 clamp 路径一致），但缓冲以 `&dyn VimBuffer` 直接呈给
+  `CtxRo`，RW 存储不被触碰。
+- 路由点在 `vim_process_key` 原拦截表位置；**映射和弦键保留 RW 路径**
+  （和弦是故意的：action 型映射要在只读窗格能完成，而 `RoHost` 惰化
+  host-action 桥）；leader 中止重放也按窗格选路。
+
+### 10.4 顺带核实的引擎行为（vim 9.1 oracle + 引擎探针）
+
+| 按键族 | vim 9.1（`:set noma`） | 引擎 | 处置 |
+|---|---|---|---|
+| `i`/`I`/`a`/`A`/`o`/`O`/`gi`/`R` | E21 在入口 | 入口即拒（M1 已锁） | 一致 |
+| `gI`、visual/block `I`/`A` | **静默进插入**、首字 E21 | 入口即拒 | 引擎更严（安全方向），tck `EDIT_KEYS` 补锁 + 注释记偏 |
+
+`gI` 的 vim 行为（静默入口）是 vim 的怪癖；引擎拒绝更早且只读窗格拉住
+visual 选区，体验更好。写原语在 `CtxRo` 下类型层面不可达，不存在"放进插入
+再写坏"的路径。
+
+### 10.5 结果
+
+- alacer：`vim_ro_panes.rs` 5 个集成测试（E21 flash + 缓冲不变 + 光标不
+  漂 / visual 编辑拒且选区保留 / 导航 + 搜索 + yank + `"+y` 剪贴板 /
+  Result 可写路径不受影响 / leader 和弦在只读窗格仍完成）；全量
+  `cargo test --workspace` 绿，clippy 干净。
+- vimcore：`tck.rs` EDIT_KEYS 补 8 条插入族角落 + `readonly_pipeline.rs`
+  锁偏离后模式语义；1161/1161 绿。
