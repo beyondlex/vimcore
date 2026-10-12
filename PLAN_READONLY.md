@@ -196,9 +196,87 @@ M1–M3 完成后 alacer 即可迁移（用 A 步兼容层 + 拦截点即可满�
 | M2 | ✅ | `tck::readonly_contract` / `tck::readonly_pipeline_contract`；`tests/readonly_pipeline.rs`（RW/RO 等价回放 + panic-on-write fuzz） |
 | M3 | ✅ | `MotionHook` + `VimHost(Ro)::motion_hook()`，插入点 `Motion::target` |
 | M4 | ✅ | `VimHostRo` / `CtxRo` / `handle_key_ro`（`RoHost` + `RoBuffer` 适配器，主管线零改动） |
-| M5 | ⏳ 跨仓 | gpui-vim `VimEditorRo` + alacer diff view 迁移（不在本仓） |
+| M5 | ⏳ 跨仓 | gpui-vim-x 0.2.0 已发布（pager 迁 RO 管线，40/40 绿）；alacer 已合流 registry 0.2.0（774/774 绿）；diff view 迁移设计定稿（§9），执行未开始 |
 
 版本随 M1 的源级破坏（写原语签名）与 M4 的 0.2 API 演进提到 **0.2.0**。
 
 实现相对本文的两处有意偏离（`VimHost` 不做 `VimHostRo` 的 supertrait、
 缓冲区用适配器而非 `BufferRef` 枚举）已连同理由记入 `NOTES.md`。
+
+## 9. M5 实施设计：alacer diff view 迁移（2026-10-12 定稿）
+
+### 9.1 现状摸底（迁移前）
+
+- `crates/alacer-ui/src/diff_view/vim_motion.rs` **1226 行**手写只读 vim：
+  motions（w/b/e、f/F/t/T、quoted/bracket text object）+ `vim_key` 分发
+  （h l ^ _ $ w b e f F t T i a n N / v V y Y g G z{zt,zb,a} 0-9 计数）。
+- 宿主状态（`diff_view/mod.rs`）：`vim_col`/`vim_mode`/`vim_anchor`/
+  `vim_count`/`pending_yank`/`pending_g`/`pending_z`/`pending_find`/
+  `pending_text_obj`，坐标是 (row, grapheme-col)。
+- 宿主侧特权：`/` 搜索（IME + 增量高亮，`find_input` 管线）、`n`/`N`
+  （find_goto）、`z a`（toggle_fold_all）、`]c`/`[c`（keymap 动作
+  NextChange/PrevChange）、j/k（keymap 动作）、C-o/C-i（宿主 jumplist，
+  记录 (pane, row, col)——比 vimcore 的 offset-only jumplist 多窗格侧信息）、
+  鼠标拖选（pane_mouse）。
+- **参照实现在本仓**：`merge_view/vim.rs` 已是 vimcore 的在住 RW 集成
+  （`SharedLines` + 前缀和缓存、`MergeVimHost: VimHost`、`offset_rc`/
+  `rc_offset` 换算、`vim_frame_sync`/`vim_sync_pane`/`vim_selection`）。
+  diff view 迁移照此施工，换成 RO 形态。
+- 窗格 `pane.lines: Arc<Vec<String>>`（code_pane.rs:573）——缓冲区适配器
+  克隆 Arc 即得零拷贝快照。
+
+### 9.2 三个适配器（新文件 `diff_view/vim_ro.rs`）
+
+1. **`DiffVimRoBuf(Arc<Vec<String>>)`**：只 impl `VimBuffer`（行访问 +
+   `len`），**不 impl `VimBufferMut`**——写路径类型上不可达；`VimState` 设
+   `set_modifiable(false)`，编辑类按键走 E21。
+2. **`DiffVimRoHost`**：impl `VimHostRo`——`viewport`（读窗格可见行范围）、
+   `scroll_to_line(_anchored)`、`clipboard_write`、`status_message`（→
+   `flash_status`，E21 由此透传）、`set_search_highlights`、`columns`。
+   **延迟施用模式**：引擎调用期间把这些效应收进 collector，`handle_key_ro`
+   返回后再落到 DiffView（gpui 的 `cx.write_to_clipboard`/`cx.notify` 都在
+   调用后发生），绕开 `&mut DiffView` 与 Ctx 的借用冲突。
+3. **光标权威归引擎**：所有宿主侧光标变更（j/k、鼠标、]c/[c、n/N、gg/G、
+   minimap 点击）一律写穿 `vim_set_cursor_rc(row, col)`；渲染只读引擎
+   （`vim.cursor.offset` / `vim.mode` / `vim.visual_anchor`）。与 merge view
+   同一模型。
+
+### 9.3 键位划分：引擎拿什么、宿主留什么
+
+| 键 | 归属 | 理由 |
+|---|---|---|
+| h l ^ _ $ w b e f F t T v V y Y 计数 gg/G/{N}G | **引擎** | vimcore 已全实现且 oracle 对齐 |
+| d/c/s/S/C/o/O/i/a/I/A/R/~ x X p P J u C-r . 等 | **引擎**（→ E21） | `modifiable` off 下拒绝 + `status_message` 透传 |
+| zz/zt/zb | 宿主（现状） | 与 `z a` 同 Chord；引擎的 z 前缀会吞掉 `z a` |
+| `z a` | 宿主 | 折叠切换，引擎无此概念 |
+| `/` `n` `N` `?` | 宿主 | 既有 find 管线（IME/增量高亮）远比引擎搜索丰富 |
+| `i` `a` | **宿主拦截后转引擎 text-object** | 引擎的 i/a 是 insert/append（RO 下 E21），会杀死 vi"/va" |
+| j k ]c [c C-o C-i 鼠标 | 宿主（keymap/既有通道） | 写穿引擎光标；C-o/C-i 走宿主 jumplist（含窗格侧） |
+
+**与计划的两处偏离（连同理由）**：
+- **`]c`/`[c` 不走 `MotionHook`**：它们是 keymap 动作而非引擎 motion，
+  要让引擎处理就得为"跳到下一个变更"加引擎侧 motion 变体——只读场景
+  `d]c` 无意义，不值当。MotionHook 保留给未来的 RW 消费方。
+- **z 和弦整体留宿主**：见上表；引擎的 z 前缀与 `z a` 冲突。
+
+### 9.4 删除与测试迁移
+
+- **删**：`vim_word_forward/back/end`、`vim_find`、`quoted_span`、
+  `block_span`、`vim_key` 的 motion 分发、五个 pending 字段
+  （yank/g/z/find/text_obj——find/text_obj 若宿主保留 text-object 才留，
+  见 9.3 的 i/a 行）。
+- **留**：`vim_set_caret*`/`vim_move`（写穿用）、`yank_*`（]n/N 之外的
+  宿主 yank 通路若保留则留，否则删）、`vim_scroll_cursor_anchored`、
+  find 管线、`toggle_fold_all`、`vim_goto_line`（]c/[c 落点用）。
+- **测试**：`tests/z_anchor.rs`、`tests/model.rs` 的 `vim_key` 调用改调
+  新入口；motion 级语义归 vimcore（已 oracle 对齐 + tck），alacer 侧只测
+  集成面：光标写穿、选区渲染、yank 剪贴板、E21 flash、宿主保留键。
+
+### 9.5 分期
+
+1. **并行接入**：新写 `vim_ro.rs`，`vim_key` 的 motion 分支改调引擎，
+   宿主特权键原位拦截——行为不变、可对拍。
+2. **删除**：手写 motion 代码 + mod.rs 字段 + render/mouse 改读引擎；
+   测试改写。
+3. **收尾**：`flash_status` 的 E21 文案、help 面板的 vim_keys 清单核对、
+   `cargo test -p alacer-ui` 全绿后单独提交。
