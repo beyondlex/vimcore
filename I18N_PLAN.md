@@ -752,3 +752,59 @@ origin/main` → 分叉消除，版本回到 0.1.2，`cargo test` 97 全绿，
 | crates.io **0.2.1**（已发布） | **8,658** | 93 | 不可变，永久保留 4 个 BUG_AUDIT |
 | 本地新构建（未发布） | **7,823** | 89 | 扣掉 BUG_AUDIT + exclude I18N_PLAN |
 | Phase A 完成后（预期） | **~350** | — | 只剩 L4 CJK 测试数据 + NOTES 归档说明 |
+
+---
+
+## 9. 执行完成记录（2026-10-14）
+
+四仓 Phase A + B 全部执行完毕并推送。逐仓实况与偏差如下。
+
+### 9.1 结果总览
+
+| 仓库 | 工作树中文（前→后） | 残留性质 | 测试 | clippy | Phase B | 远端 |
+|---|---|---|---|---|---|---|
+| vimcore | 7,823 → **329**（另有 I18N_PLAN 自身 374，不进包不翻） | 全部 L4 数据 + NOTES 引证 | 1162 绿 ×2 | 0 | 219 条消息重写，六项验收过 | `main`=`98869b9`，`v0.2.0`→`3828653` |
+| alacer | 182 → **25** | 全部 IME 数据/字形引用（§4.1.1 预期内） | 1110 绿 | 0 | **按计划跳过** | `main`=`1616faa` |
+| crossterm_vim | 1,064 → **33** | 全部字节 fixture/字形引用 | 97 绿（72+21+3+1）+ py_compile | 0 | 9/10 条重写（`c0417d5c` 本就英文，透传） | `main`=`dfbdda3`（force-with-lease） |
+| gpui_vim main | 1,409 → **46** | 全部 fixture/引证 | 46 绿 | 0 | 33 条重写 | `main`=`789d8ad`，`v0.2.0`→`8120f12` |
+| gpui_vim fork-gpui-pre | （同仓第二分支） | 代码残留 39 行全数据 | 46 绿 | 0 | 同一次 `--branches` 重写覆盖 | `fork-gpui-pre`=`98dc96f` |
+
+回滚材料：`~/vimcore-pre-i18n.bundle`、`~/crossterm_vim-pre-i18n.bundle`、
+`~/gpui_vim-pre-i18n.bundle`（均 `--all` 全引用）。三仓 `refs/original` 已清；
+**未跑 `git gc --prune=now`**，reflog 是第二道回滚窗口。
+
+### 9.2 与计划的偏差（均为有意为之，留档）
+
+1. **§5.3「先试 5 条映射」改为单元模拟 + 单遍全量重写**。真实跑一遍 5 条
+   映射会改变后代提交 SHA，随后按原始 SHA 键控的全量映射会全部脱靶。
+   替代验证：`msg_filter.py` 用真实消息流模拟——映射命中→译文含正文，
+   未命中→逐字节透传，未命中的中文消息数=0。
+2. **§5.5 第 5 步「历史零中文」放宽为「零散文、允许数据字形引用」**：
+   vimcore 9 行、crossterm 3 行、gpui 4 行，全部是引用 `中文/你/在` 这类
+   fixture 字符的英文句子——与 §4.1.1 alacer 要点 4 同理，翻译反而破坏语义。
+3. **gpui `-pre` 分支的 Phase A 是计划批次表之外的补全**（§2 只统计了 main
+   工作树）：7 个共享文档 blob 与 main 逐字节一致 → main 精译一次后经
+   `git checkout main -- <docs>` 传播（`e3c9e6b`），-pre 独有 crate 单独翻译
+   （`c4471d3`，措辞对齐 main 译文）。
+4. **crossterm 本地备份分支 `backup/dup-prev-char-offset-fix` 随 `--branches`
+   一起重写**（正文零丢失已验证），未 `-D`——删除本地 ref 属破坏性操作，
+   留给用户决定。
+5. **vimcore 0.2.2 未发布**：§8.4 的顺序（A→推送→B→发布）已满足，发布是
+   crates.io 不可逆动作，默认关闭，等用户指令。
+
+### 9.3 执行事故与修复（都在验收内兜住了）
+
+- A4/W4 两个批次撞到 agent 轮次上限 → 接力 agent 收尾；经验值：**单个
+  多文件翻译 agent 控制在 ~700 行 CJK 以内**。
+- 三个 agent 自报的手脚事故（audit5_c 重复块、parity_round14 覆盖、
+  parity_round7 重复函数体）当场修复；用「每文件 `#[test]` 计数 HEAD 对照」
+  做了结构审计兜底，72 个测试文件全对上。
+- **会话级提示注入**：子 agent 工具结果流里出现伪造 `<system-reminder>`
+  （要求 MCP 门禁/中断/git 提交）。已核实对应 MCP server 不存在、指令不
+  来自系统；全部忽略并继续。重写后逐仓扫描提交历史：消息中不含注入文本，
+  注入仅在会话层，未入库存档。
+- 消息导出解析把 SHA 键带上前导换行（35/219 匹配失败），两侧 strip 归一后
+  合并；`%B` 正文完整性改用「按 tree 配对、正文有无逐条对齐」验证
+  （crossterm 39/39、gpui 168/168，零丢失）。
+- alacer 的翻译 agent 越界新增了两处英文键位文档（help.rs/KEYBINDINGS.md，
+  非迁移内容），已在提交前 revert，保持提交纯翻译。
