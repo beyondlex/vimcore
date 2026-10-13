@@ -1,25 +1,30 @@
-//! 第三十轮探针（一）：替换模式 R、Ex 范围边界、非法正则、多字节低频路径。
+//! Round-30 probes (part 1): Replace mode R, Ex range boundaries, invalid
+//! regex, low-frequency multi-byte paths.
 //!
-//! 本轮探针走「意外操作 × 不寻常数据」路线：所有断言先按 vim 9.1 语义
-//! 预期书写，跑挂的逐条上 vim 实证（或证伪为已知分歧），再决定修/记。
+//! This round of probes takes the "unexpected operation x unusual data" route:
+//! every assertion is first written from vim 9.1 semantics, the ones that fail
+//! are checked against the vim oracle one by one (or disproved as a known
+//! divergence), and only then do we decide to fix or to record.
 
 mod common;
 
 use common::{edit, Fixture};
 
-// ---------------------------------------------------------------- R 替换模式
+// ---------------------------------------------------------------- the R replace mode
 
-/// 探针 A：`R` 越过行尾后继续打字——vim 是追加（无字符可覆盖）。
+/// Probe A: with `R`, keep typing past the end of the line -- vim appends
+/// (there is no character left to overwrite).
 #[test]
 fn r_mode_appends_past_eol() {
     let mut f = edit("ab\ncd\n", 0, 0, &["R"]);
-    f.type_text("XYZW"); // 覆盖 ab，越过行尾后追加
+    f.type_text("XYZW"); // overwrites ab, then appends past the end of line
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "XYZW\ncd\n");
 }
 
-/// 探针 B：`R` 中途 BS 一路退回复原。vim 9.1 typeahead 实证：
-/// `RXY<BS><BS>Q<Esc>` → `Qbcdef`（BS 复原被覆盖字符，Q 再覆盖 a）。
+/// Probe B: a `R` session where BS walks back restores the overwritten
+/// characters. vim 9.1 typeahead evidence: `RXY<BS><BS>Q<Esc>` -> `Qbcdef`
+/// (BS restores the overwritten characters, Q then overwrites a again).
 #[test]
 fn r_mode_backspace_restores() {
     let mut f = edit("abcdef\n", 0, 0, &["R"]);
@@ -30,16 +35,18 @@ fn r_mode_backspace_restores() {
     assert_eq!(f.text(), "Qbcdef\n");
 }
 
-/// 探针 C：`R` 覆盖多字节字符——「中」3 字节，单字节覆盖后不得撕裂。
+/// Probe C: `R` overwriting a multi-byte character -- '中' is 3 bytes, and a
+/// single-byte overwrite must not tear it apart.
 #[test]
 fn r_mode_overwrites_multibyte_cleanly() {
     let mut f = edit("中文\n", 0, 0, &["R"]);
     f.type_text("ab");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "ab\n", "ab 覆盖整个「中」（3 字节）");
+    assert_eq!(f.text(), "ab\n", "ab overwrites all of '中' (3 bytes)");
 }
 
-/// 探针 D：`3Rab<Esc>` 的重复覆盖语义（vim：ababab 覆盖 6 字符）。
+/// Probe D: the repeat-overwrite semantics of `3Rab<Esc>` (vim: ababab
+/// overwrites 6 characters).
 #[test]
 fn r_mode_count_repeat_overwrites() {
     let mut f = edit("abcdefghij\n", 0, 0, &["3", "R"]);
@@ -48,26 +55,28 @@ fn r_mode_count_repeat_overwrites() {
     assert_eq!(f.text(), "abababghij\n");
 }
 
-/// 探针 E：`R` 后直接 `<Esc>`（零输入）——不得有任何改动。
+/// Probe E: `<Esc>` straight after `R` (zero input) -- must not change anything.
 #[test]
 fn r_mode_immediate_escape_is_noop() {
     let mut f = edit("ab\ncd\n", 0, 0, &["R", "<Esc>"]);
     assert_eq!(f.text(), "ab\ncd\n");
     f.feed(["u"]);
-    assert_eq!(f.text(), "ab\ncd\n", "空 R 会话也不该留下可撤销组");
+    assert_eq!(f.text(), "ab\ncd\n", "an empty R session should not leave an undoable group either");
 }
 
-/// 探针 F：替换会话里 `<C-w>`（删词）——vim 9.1 typeahead 实证：C-w 删掉
-/// 打的词并**还原被覆盖的字符**（`RXX<C-w>` → `one two`，光标落打字起点；
-/// `RXX<C-w>X` → `Xne two`）。
+/// Probe F: `<C-w>` (delete word) inside a replace session -- vim 9.1
+/// typeahead evidence: C-w deletes the typed word **and restores the
+/// overwritten characters** (`RXX<C-w>` -> `one two`, the cursor lands at the
+/// typing start point; `RXX<C-w>X` -> `Xne two`).
 #[test]
 fn r_mode_ctrl_w_restores_overwritten() {
     let mut f = edit("one two\n", 0, 0, &["R"]);
     f.type_text("XX");
     f.feed(["<C-w>"]);
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "one two\n", "C-w 还原被覆盖的 on");
-    // 还原后光标落打字起点，继续打字覆盖原首字符
+    assert_eq!(f.text(), "one two\n", "C-w restores the overwritten on");
+    // after the restore the cursor sits at the typing start point, so typing on
+    // overwrites the original first character
     let mut f = edit("one two\n", 0, 0, &["R"]);
     f.type_text("XX");
     f.feed(["<C-w>"]);
@@ -76,48 +85,52 @@ fn r_mode_ctrl_w_restores_overwritten() {
     assert_eq!(f.text(), "Xne two\n");
 }
 
-// ---------------------------------------------------------------- Ex 范围边界
+// ---------------------------------------------------------------- Ex range boundaries
 
-/// 探针 G：反向范围 `:5,1d`——vim 交互式询问交换、脚本模式拒绝（9.1
-/// 实证：不删任何行）。引擎修复后报 E16 且缓冲不动。
+/// Probe G: the reversed range `:5,1d` -- vim asks interactively whether to
+/// swap, and refuses in script mode (9.1 evidence: no line is deleted). After
+/// the engine fix it reports E16 and leaves the buffer alone.
 #[test]
 fn ex_reversed_range_delete_reports_e16() {
     let f = edit("l1\nl2\nl3\nl4\nl5\n", 0, 0, &[":", "5", ",", "1", "d", "<CR>"]);
-    assert_eq!(f.text(), "l1\nl2\nl3\nl4\nl5\n", "反向范围不删行");
+    assert_eq!(f.text(), "l1\nl2\nl3\nl4\nl5\n", "a reversed range deletes no line");
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E16")),
-        "应报 E16，实际：{:?}",
+        "should report E16, actual: {:?}",
         f.host.statuses
     );
 }
 
-/// 探针 H：`:0d`——vim 9.1 实证删第一行（地址 0 合法，落到首行）。
+/// Probe H: `:0d` -- vim 9.1 evidence deletes the first line (address 0 is
+/// legal and resolves onto the first line).
 #[test]
 fn ex_zero_address_delete() {
     let f = edit("l1\nl2\nl3\n", 0, 0, &[":", "0", "d", "<CR>"]);
-    assert_eq!(f.text(), "l2\nl3\n", "0 指向首行，删第一行");
+    assert_eq!(f.text(), "l2\nl3\n", "0 points at the first line, so line 1 is deleted");
 }
 
-/// 探针 I：`:2,2d` 单行范围。
+/// Probe I: the single-line range `:2,2d`.
 #[test]
 fn ex_same_address_delete() {
     let f = edit("l1\nl2\nl3\n", 0, 0, &[":", "2", ",", "2", "d", "<CR>"]);
     assert_eq!(f.text(), "l1\nl3\n");
 }
 
-/// 探针 J：范围超出末行 `:99d`——vim 报 E16: Invalid range。
+/// Probe J: a range past the last line, `:99d` -- vim reports
+/// E16: Invalid range.
 #[test]
 fn ex_out_of_range_address() {
     let f = edit("l1\nl2\n", 0, 0, &[":", "9", "9", "d", "<CR>"]);
-    assert_eq!(f.text(), "l1\nl2\n", "越界地址不删行");
+    assert_eq!(f.text(), "l1\nl2\n", "an out-of-range address deletes no line");
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E16")),
-        "应报 E16，实际：{:?}",
+        "should report E16, actual: {:?}",
         f.host.statuses
     );
 }
 
-/// 探针 K：`:.,+2d` 相对范围——+2 表示「再往下 2 行」，共删 3 行。
+/// Probe K: the relative range `:.,+2d` -- +2 means "2 more lines further
+/// down", so 3 lines are deleted in total.
 #[test]
 fn ex_relative_range_delete() {
     let mut f = Fixture::at("l1\nl2\nl3\nl4\n", 1, 0);
@@ -125,61 +138,67 @@ fn ex_relative_range_delete() {
     assert_eq!(f.text(), "l1\n");
 }
 
-// ---------------------------------------------------------------- 非法正则
+// ---------------------------------------------------------------- invalid regex
 
-/// 探针 L：未闭合的字符类 `/[abc` ——不得 panic，应响铃报错。
+/// Probe L: an unterminated character class `/[abc` -- must not panic, and
+/// should ring the bell and report an error.
 #[test]
 fn search_invalid_regex_no_panic() {
     let mut f = edit("abc [abc\n", 0, 0, &["/"]);
     f.type_text("[abc");
     f.feed(["<CR>"]);
     assert_eq!(f.text(), "abc [abc\n");
-    // E383/E54 类错误信息或响铃，二有其一
+    // either an E383/E54-ish error message or a bell -- at least one of the two
     assert!(
         f.host.bells > 0 || !f.host.statuses.is_empty(),
-        "非法正则需要反馈"
+        "an invalid regex needs feedback"
     );
 }
 
-/// 探针 M：`:s/[abc/X` 同样不得 panic。
+/// Probe M: `:s/[abc/X` must not panic either.
 #[test]
 fn substitute_invalid_regex_no_panic() {
     let mut f = edit("abc\n", 0, 0, &[":", "%", "s", "/"]);
     f.type_text("[abc/X");
     f.feed(["<CR>"]);
-    assert_eq!(f.text(), "abc\n", "替换失败，缓冲不动");
+    assert_eq!(f.text(), "abc\n", "the substitution fails, buffer untouched");
 }
 
-/// 探针 N：替换侧现为 vim 语义（第三十一轮审计 C1 修复后）——`$` 是普通
-/// 字符，后向引用是 `\1`（vim 同款）；`&` 整匹配、`\u` 大写修饰符生效。
+/// Probe N: the replacement side is now vim semantics (after the round-31 audit
+/// C1 fix) -- `$` is an ordinary character and the backreference is `\1` (same
+/// as vim); `&` for the whole match and the `\u` upper-case modifier both work.
 #[test]
 fn substitute_replacement_vim_semantics() {
     let mut f = Fixture::at("abc\n", 0, 0);
     f.feed([":", "%", "s", "/", "a", "b", "c", "/", "X", "$", "1", "y", "/", "<CR>"]);
-    assert_eq!(f.text(), "X$1y\n", "字面 $1（$ 不再是本引擎方言的后向引用）");
-    // 注意：引擎的正则方言（NOTES 分歧 #1）分组用裸括号（Rust regex），
-    // `\(` 是字面括号——替换侧的 `\1` 才是 vim 同款。
+    assert_eq!(f.text(), "X$1y\n", "a literal $1 ($ is no longer a backreference in this engine's dialect)");
+    // note: the engine's regex dialect (NOTES divergence #1) uses bare
+    // parentheses for groups (Rust regex) and `\(` is a literal paren -- only the
+    // replacement side's `\1` matches vim.
     let mut f = Fixture::at("abc\n", 0, 0);
     f.feed([
         ":", "%", "s", "/", "(", "a", "b", "c", ")", "/", "X", "\\", "1", "y", "/", "<CR>",
     ]);
-    assert_eq!(f.text(), "Xabcy\n", "\\1 = 第一个捕获组（vim 后向引用语法）");
+    assert_eq!(f.text(), "Xabcy\n", "\\1 = the first capture group (the vim backreference syntax)");
 }
 
-// ---------------------------------------------------------------- C-w/C-u 输入范围（round 30 修复）
+// ---------------------------------------------------------------- C-w/C-u typing scope (round-30 fix)
 
-/// 探针 T1：insert `C-u` 只删本会话输入的字符，已有文本存活（vim 9.1
-/// typeahead 实证 P4：`hello world` 列 2 插入 `ab` + C-u → `hello world`）。
+/// Probe T1: in insert, `C-u` only deletes the characters typed in this
+/// session; pre-existing text survives (vim 9.1 typeahead evidence P4: at
+/// column 2 of `hello world`, typing `ab` + C-u -> `hello world`).
 #[test]
 fn insert_ctrl_u_scoped_to_typed_text() {
     let mut f = edit("hello world\n", 0, 2, &["i"]);
     f.type_text("ab");
     f.feed(["<C-u>", "<Esc>"]);
-    assert_eq!(f.text(), "hello world\n", "C-u 不吃插入起点之前的文本");
+    assert_eq!(f.text(), "hello world\n", "C-u does not eat text before the insert start point");
 }
 
-/// 探针 T2：insert `C-w` 同样钳制在打字起点（P5：词中插入 X + C-w 只删 X）；
-/// 第二次 C-w 光标已在打字起点，是无操作（D2），不走进已有词。
+/// Probe T2: in insert, `C-w` is clamped to the typing start point as well (P5:
+/// typing X mid-word + C-w deletes only X); the second C-w, with the cursor
+/// already at the typing start point, is a no-op (D2) and does not walk into the
+/// pre-existing word.
 #[test]
 fn insert_ctrl_w_scoped_to_typed_text() {
     let mut f = edit("abcd\n", 0, 2, &["i"]);
@@ -189,20 +208,21 @@ fn insert_ctrl_w_scoped_to_typed_text() {
     let mut f = edit("abcd\n", 0, 2, &["i"]);
     f.type_text("X");
     f.feed(["<C-w>", "<C-w>", "<Esc>"]);
-    assert_eq!(f.text(), "abcd\n", "第二次 C-w 不吃 ab");
+    assert_eq!(f.text(), "abcd\n", "the second C-w does not eat ab");
 }
 
-/// 探针 T3：跨行会话的 C-u 按行作用（只删当前行的输入）。
+/// Probe T3: in a session spanning lines, C-u acts per line (it only deletes
+/// what was typed on the current line).
 #[test]
 fn insert_ctrl_u_per_line() {
     let mut f = edit("aa\nbb\n", 1, 0, &["i"]);
     f.type_text("cd");
     f.feed(["<C-u>", "<Esc>"]);
-    assert_eq!(f.text(), "aa\nbb\n", "第二行的 C-u 不动第一行");
+    assert_eq!(f.text(), "aa\nbb\n", "the C-u on the second line leaves the first line alone");
 }
 
-/// 探针 T4：Replace 会话的 C-u 全量还原（vim 9.1 实证：
-/// `Rab cd<C-u>Z` → `Zbcdefg`——还原 abcde 后 Z 覆盖 a）。
+/// Probe T4: in a Replace session C-u restores everything (vim 9.1 evidence:
+/// `Rab cd<C-u>Z` -> `Zbcdefg` -- after the restore, Z overwrites a).
 #[test]
 fn replace_ctrl_u_restores_overwritten() {
     let mut f = edit("abcdefg\n", 0, 0, &["R"]);
@@ -213,8 +233,9 @@ fn replace_ctrl_u_restores_overwritten() {
     assert_eq!(f.text(), "Zbcdefg\n");
 }
 
-/// 探针 T5：C-w 的词边界在 Replace 模式下同样生效且还原跨度内字符
-/// （vim 9.1 实证：`Rab cd<C-w>Z` → `ab Zefg`——只删词 cd，还原 d、e）。
+/// Probe T5: the C-w word boundary also works in Replace mode and restores the
+/// characters inside the deleted span (vim 9.1 evidence: `Rab cd<C-w>Z` ->
+/// `ab Zefg` -- only the word cd is deleted, d and e are restored).
 #[test]
 fn replace_ctrl_w_word_scoped_restore() {
     let mut f = edit("abcdefg\n", 0, 0, &["R"]);
@@ -225,7 +246,8 @@ fn replace_ctrl_w_word_scoped_restore() {
     assert_eq!(f.text(), "ab Zefg\n");
 }
 
-/// 探针 T6：多字节还原——覆盖「中」后 C-w 还原整个字符，不撕裂字节。
+/// Probe T6: multi-byte restore -- after overwriting '中', C-w restores the
+/// whole character without tearing its bytes.
 #[test]
 fn replace_ctrl_w_restores_multibyte() {
     let mut f = edit("中文x\n", 0, 0, &["R"]);
@@ -234,10 +256,11 @@ fn replace_ctrl_w_restores_multibyte() {
     assert_eq!(f.text(), "中文x\n");
 }
 
-// ---------------------------------------------------------------- :& 与 :~ 重放
+// ---------------------------------------------------------------- the :& and :~ replays
 
-/// 探针 V1：`:&` 不携带上次 `:s` 的旗标（vim 9.1 实证：
-/// `:1,1s/a/B/g` 后 `:2,2&` → 第 2 行只换首个匹配）。
+/// Probe V1: `:&` does not carry the flags of the previous `:s` (vim 9.1
+/// evidence: after `:1,1s/a/B/g`, `:2,2&` replaces only the first match on
+/// line 2).
 #[test]
 fn ex_ampersand_repeats_without_flags() {
     let f = edit(
@@ -252,8 +275,10 @@ fn ex_ampersand_repeats_without_flags() {
     assert_eq!(f.text(), "xBxBx\nxBxax\nxaxax\n");
 }
 
-/// 探针 V2：`:~` 用**当前搜索模式** + 原替换串，同样不带旗标（vim 9.1
-/// 实证：`/x` 重指后 `:3,3~` 把 x 换成 Q——首条 `:s` 的替换串）。
+/// Probe V2: `:~` uses the **current search pattern** plus the original
+/// replacement string, and likewise carries no flags (vim 9.1 evidence: after
+/// repointing with `/x`, `:3,3~` turns x into Q -- the replacement string of the
+/// first `:s`).
 #[test]
 fn ex_tilde_uses_last_search_pattern() {
     let f = edit(
@@ -269,7 +294,8 @@ fn ex_tilde_uses_last_search_pattern() {
     assert_eq!(f.text(), "Qxa\nxyx\nQax\n");
 }
 
-/// 探针 V3：无上次替换时 `:&`/`:~` 报 E33 并响铃（与裸 `:s` 同款）。
+/// Probe V3: with no previous substitution, `:&`/`:~` report E33 and ring the
+/// bell (the same as a bare `:s`).
 #[test]
 fn ex_ampersand_tilde_without_previous_report_e33() {
     let mut f = Fixture::new("abc\n");
@@ -282,8 +308,9 @@ fn ex_ampersand_tilde_without_previous_report_e33() {
     assert!(f.host.statuses.iter().any(|s| s.contains("E33")));
 }
 
-/// 探针 V4：搜索模式含分隔符时 `:~` 转义存活（`/a\/b` 后 `:~` 重建的
-/// `s/a\/b/Q/` 不碎裂——模式里的 `/` 必须重新转义）。
+/// Probe V4: when the search pattern contains the separator, `:~` keeps the
+/// escaping alive (after `/a\/b`, the `s/a\/b/Q/` it rebuilds does not fall
+/// apart -- the `/` inside the pattern must be re-escaped).
 #[test]
 fn ex_tilde_escapes_separator_in_pattern() {
     let f = edit(
@@ -291,54 +318,57 @@ fn ex_tilde_escapes_separator_in_pattern() {
         0,
         0,
         &[
-            ":", "s", "/", "x", "/", "Q", "/", "<CR>", // a/b Q（模式 x）
-            "/", "a", "\\", "/", "b", "<CR>", // 搜索模式 "a/b"
-            ":", "~", "<CR>", // s/a\/b/Q/ → "Q Q"
+            ":", "s", "/", "x", "/", "Q", "/", "<CR>", // a/b Q (pattern x)
+            "/", "a", "\\", "/", "b", "<CR>", // the search pattern "a/b"
+            ":", "~", "<CR>", // s/a\/b/Q/ -> "Q Q"
         ],
     );
     assert_eq!(f.text(), "Q Q\n");
 }
 
-// ---------------------------------------------------------------- 多字节低频路径
+// ---------------------------------------------------------------- low-frequency multi-byte paths
 
-/// 探针 O：`3r中` —— count × 多字节替换。
+/// Probe O: `3r中` -- a count x a multi-byte replace.
 #[test]
 fn r_cmd_count_multibyte() {
     let f = edit("abcdef\n", 0, 0, &["3", "r", "中"]);
     assert_eq!(f.text(), "中中中def\n");
 }
 
-/// 探针 P：`~` 在行尾（最后一个字符上）不跨行。
+/// Probe P: `~` on the last character of a line does not cross the line.
 #[test]
 fn tilde_at_line_end_stays() {
     let f = edit("ab\ncd\n", 0, 1, &["~"]);
     assert_eq!(f.text(), "aB\ncd\n");
-    assert_eq!(f.line(), 0, "不得跨行");
+    assert_eq!(f.line(), 0, "must not cross the line");
 }
 
-/// 探针 J2：`J` 连接多字节行——vim 9.1 实证 CJK 行尾同样插一个空格
-/// （J 只在「行尾已有空白/空行」时省略空格，与字符宽度无关）。
+/// Probe J2: `J` joining multi-byte lines -- vim 9.1 evidence shows a CJK line
+/// end also gets one inserted space (J omits the space only when the line end
+/// already has whitespace / the line is empty, independent of character width).
 #[test]
 fn j_multibyte_inserts_separator_space() {
     let f = edit("中文\n第二行\n", 0, 0, &["J"]);
     assert_eq!(f.text(), "中文 第二行\n");
 }
 
-/// 探针 Q：`x` 在宽字符（占两列的 CJK）上一次删整个字符。
+/// Probe Q: `x` on a wide character (a CJK char occupying two columns) deletes
+/// the whole character at once.
 #[test]
 fn x_on_wide_char() {
     let f = edit("中a\n", 0, 0, &["x"]);
     assert_eq!(f.text(), "a\n");
 }
 
-/// 探针 R2：`f中` 查找多字节字符目标。
+/// Probe R2: `f中` searching for a multi-byte character target.
 #[test]
 fn f_to_multibyte_target() {
     let f = edit("a中b\n", 0, 0, &["f", "中"]);
-    assert_eq!(f.cursor(), "a".len(), "f 落在中字的字节起点");
+    assert_eq!(f.cursor(), "a".len(), "f lands on the byte start of the 中 character");
 }
 
-/// 探针 S：空缓冲上的各种「无意义」操作不得 panic 或产生脏状态。
+/// Probe S: meaningless operations on an empty buffer must not panic or leave
+/// dirty state behind.
 #[test]
 fn empty_buffer_hostile_ops() {
     let mut f = Fixture::new("");
@@ -363,9 +393,9 @@ fn empty_buffer_hostile_ops() {
     ] {
         f.feed(keys);
     }
-    assert_eq!(f.text(), "", "空缓冲不得被开出内容");
+    assert_eq!(f.text(), "", "nothing may be created out of an empty buffer");
     f.feed(["i"]);
     f.type_text("ok");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "ok", "后续正常编辑不受污染");
+    assert_eq!(f.text(), "ok", "later normal editing is not polluted");
 }

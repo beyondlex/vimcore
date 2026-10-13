@@ -1,5 +1,6 @@
-//! 第十三轮回归：读码探针 + fuzz 轰炸 + 三路审查发现的全部修复面锁定。
-//! 所有期望行为均经 vim 9.1（`/usr/bin/vim`，patches 1-1752）探针实证。
+//! Round-13 regression: locks in every fix surfaced by the read-the-code probes, the fuzz
+//! bombardment and the three-way review.
+//! All expected behaviors were verified with probes against vim 9.1 (`/usr/bin/vim`, patches 1-1752).
 
 mod common;
 
@@ -92,9 +93,9 @@ fn probe_octal_increment_overflow() {
 #[test]
 fn probe_describe_garbage() {
     let o = vimcore::options::Options::default();
-    // `no{bool}` 是 `{bool}?` 的合法拼写，但对**值选项**前缀也照样解掉：
-    // vim 9.1 的 `execute('set notabstop?')`（`ts=6` 时）返回
-    // `  tabstop=6`，不是 unknown option（audit8 A-6 实证，旧钉作废）
+    // `no{bool}` is a legal spelling of `{bool}?`, and the prefix is stripped for **value options**
+    // just the same: vim 9.1's `execute('set notabstop?')` (with `ts=6`) returns
+    // `  tabstop=6`, not unknown option (proven by audit8 A-6; the old pin is void)
     assert_eq!(o.describe("notabstop").as_deref(), Some("  tabstop=4"));
     assert_eq!(o.describe("nosuchopt"), None);
     assert_eq!(o.describe("nu").as_deref(), Some("  nonumber"));
@@ -186,202 +187,216 @@ fn probe_huge_count_dd() {
     assert_eq!(f.text(), "", "count saturates, both lines die");
 }
 
-// ---- 数据丢失面 -----------------------------------------------------------
+// ---- data-loss surface -----------------------------------------------------
 
-/// `~` 消费整个字素簇但只映射基字符：组合符与 ZWJ 家族尾巴必须原样保留
-/// （vim 9.1：`~` 后 `E`+U+0301 仍是 3 字符；emoji 家族完全不变）。
+/// `~` consumes the whole grapheme cluster but maps only the base character: combining marks and the
+/// tail of a ZWJ family must survive verbatim (vim 9.1: after `~`, `E`+U+0301 is still 3 characters;
+/// the emoji family is completely unchanged).
 #[test]
 fn tilde_preserves_grapheme_tail() {
-    // 分解形 é（e + U+0301）+ x：~ 只翻 e 的大小写
+    // decomposed é (e + U+0301) followed by x: ~ toggles the case of the e only
     let f = edit("e\u{0301}x\n", 0, 0, &["~"]);
-    assert_eq!(f.text(), "E\u{0301}x\n", "组合符尾巴必须保留");
+    assert_eq!(f.text(), "E\u{0301}x\n", "the combining-mark tail must survive");
 
-    // ZWJ emoji 家族：~ 在基字符上，家族保持 9 字节不动，光标右移
-    // ZWJ emoji 家族：~ 消费整个家族但全部原样写回（基字符无大小写），
-    // 一个成员都不能少（vim 9.1 探针：家族完全不变）
+    // ZWJ emoji family: ~ acts on the base character, the family keeps its 9 units untouched and the
+    // cursor moves right
+    // ZWJ emoji family: ~ consumes the whole family but writes every unit back verbatim (the base
+    // character has no case), not one member may go missing (vim 9.1 probe: family fully unchanged)
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F466}";
     let f2 = edit(&format!("{family} b\n"), 0, 0, &["~"]);
-    assert_eq!(f2.text(), format!("{family} b\n"), "家族成员一个都不能少");
+    assert_eq!(f2.text(), format!("{family} b\n"), "not a single family member may be missing");
 }
 
-/// linewise 寄存器的尾部空行在 p/P 下存活（vim 9.1：["a",""] 的寄存器
-/// 粘出两行）。
+/// The trailing empty line of a linewise register survives p/P (vim 9.1: a register holding
+/// ["a",""] pastes two lines).
 #[test]
 fn linewise_put_keeps_trailing_empty_lines() {
     use vimcore::registers::RegisterKind;
-    // P above: 5 行
+    // P above: 5 lines
     let mut f = Fixture::new("a\n\nz\n");
     f.feed(["g", "g", "V", "j", "y"]); // register = "a\n\n"
     f.feed(["G", "P"]);
-    assert_eq!(f.text(), "a\n\na\n\nz\n", "P 保留寄存器的空行");
+    assert_eq!(f.text(), "a\n\na\n\nz\n", "P keeps the register's empty line");
 
-    // p past buffer end（末行无换行）：["a",""]
+    // p past the end of the buffer (last line without a newline): ["a",""]
     let mut f2 = Fixture::new("z");
     f2.vim
         .registers
         .store_yank(None, "a\n\n".into(), RegisterKind::Linewise);
     f2.feed(["p"]);
-    // ["z","a",""] 的字节文本随 'fixendofline' 补末尾换行："z\na\n\n"
-    // （vim 9.1 od 实证 noeol 文件 yyp 写回带终结符）
-    assert_eq!(f2.text(), "z\na\n\n", "p 保留寄存器的空行");
+    // the byte text of ["z","a",""] gets a final newline appended per 'fixendofline': "z\na\n\n"
+    // (vim 9.1 od evidence: writing back a noeol file after yyp carries the terminator)
+    assert_eq!(f2.text(), "z\na\n\n", "p keeps the register's empty line");
 }
 
-// ---- 块会话面 -------------------------------------------------------------
+// ---- block-session surface --------------------------------------------------
 
-/// 块会话退出时若打字行增量 ≠ 副本长度（发散会话），跳过复制而非写出
-/// 错位副本。确定性复现 fuzz 抓到的 mid-char insert：3o 残留的
-/// count-repeat 曾在块会话退出时先插入文本，把复制偏移顶进多字节字符。
+/// When a block session exits and the typing-row delta differs from the copy length (a diverged
+/// session), the replication is skipped instead of writing misaligned copies. This reproduces
+/// deterministically the mid-char insert caught by fuzz: the count-repeat left over from 3o once
+/// inserted the text first at block-session exit, pushing the copy offset into a multi-byte character.
 #[test]
 fn block_session_replication_divergence_safe() {
-    // 块 I 会话中途用 <Del> 删掉打字文本（vim 探针：不复製任何行）
+    // delete the typed text with <Del> in the middle of a block I session (vim probe: no row is reproduced)
     let mut f = Fixture::new("ab中\ncd中\n");
     f.feed(["<C-v>", "j", "I"]);
     f.type_text("X");
     f.feed(["<Left>", "<Del>", "escape"]);
-    assert_eq!(f.text(), "ab中\ncd中\n", "发散会话不复製（vim 9.1 实证）");
+    assert_eq!(f.text(), "ab中\ncd中\n", "a diverged session reproduces nothing (vim 9.1 evidence)");
 }
 
-/// 关闭 hlsearch 逐编辑重扫后，宿主的 refresh_highlights 必须真正刷新
-/// 匹配缓存与高亮（曾被 hlsearch_live_update 守卫短路成永久空操作）。
+/// With the per-edit hlsearch rescan turned off, the host's refresh_highlights must really refresh the
+/// match cache and the highlights (it used to be short-circuited by the hlsearch_live_update guard
+/// into a permanent no-op).
 #[test]
 fn refresh_highlights_works_with_live_update_off() {
     let mut f = Fixture::new("fox dog fox\n");
     f.vim.set_hlsearch_live_update(false);
     f.feed(["/", "f", "o", "x", "<CR>"]);
-    f.feed(["x"]); // 编辑删掉一个 o：live update 关闭，缓存允许过期
+    f.feed(["x"]); // the edit removes one o: with live update off, the cache may be stale
     let mut ctx = vimcore::state::Ctx {
         buf: &mut f.buf,
         host: &mut f.host,
     };
     f.vim.refresh_highlights(&mut ctx);
-    // 缓存与高亮都刷新到当前文本（1 个 fox：第一个被 x 咬掉一个 o）
-    assert_eq!(f.vim.search.last_matches.len(), 1, "显式刷新更新匹配缓存");
-    assert_eq!(f.host.highlights.len(), 1, "显式刷新发布新高亮");
+    // cache and highlights both refresh against the current text (1 fox left: the first lost an o to x)
+    assert_eq!(f.vim.search.last_matches.len(), 1, "the explicit refresh updates the match cache");
+    assert_eq!(f.host.highlights.len(), 1, "the explicit refresh publishes the new highlights");
 }
 
-// ---- visual 行语义（vim 探针：v_D/v_X 删整行、v_Y 行复制、v_C=v_S 行改） --
+// ---- visual linewise semantics (vim probes: v_D/v_X delete whole lines, v_Y yanks
+// lines, v_C=v_S changes lines) -----------------------------------------------
 
 #[test]
 fn visual_linewise_spellings() {
-    // v_D 删覆盖行
+    // v_D deletes the covered lines
     let f = edit("abcd\nefgh\nijkl\n", 0, 0, &["v", "l", "D"]);
-    assert_eq!(f.text(), "efgh\nijkl\n", "v_D 行删除");
+    assert_eq!(f.text(), "efgh\nijkl\n", "v_D is a linewise delete");
 
-    // v_Y 行复制（p 开新行）
+    // v_Y yanks whole lines (p opens a new line)
     let f2 = edit("abcd\nefgh\n", 0, 0, &["v", "l", "Y", "p"]);
-    assert_eq!(f2.text(), "abcd\nabcd\nefgh\n", "v_Y 行复制");
+    assert_eq!(f2.text(), "abcd\nabcd\nefgh\n", "v_Y is a linewise yank");
 
-    // v_C 行修改（保留行，清内容，进插入）
+    // v_C changes whole lines (keeps the line, empties it, enters insert)
     let mut f3 = edit("abcd\nefgh\nijkl\n", 0, 0, &["v", "j", "l", "C"]);
     f3.type_text("x");
     f3.feed(["escape"]);
-    assert_eq!(f3.text(), "x\nijkl\n", "v_C 行修改");
+    assert_eq!(f3.text(), "x\nijkl\n", "v_C is a linewise change");
 
-    // v_x 保持字符语义
+    // v_x keeps the charwise semantics
     let f4 = edit("abcd\nefgh\n", 0, 0, &["v", "l", "x"]);
-    assert_eq!(f4.text(), "cd\nefgh\n", "v_x 字符删除");
+    assert_eq!(f4.text(), "cd\nefgh\n", "v_x is a charwise delete");
 }
 
-// ---- ap 段落跨度（方向化）--------------------------------------------------
+// ---- the ap paragraph span (directional) ----------------------------------
 
 #[test]
 fn ap_paragraph_span_directional() {
-    // 文本行：吞掉后面全部连续空行（vim: [aaa,bbb,"","",ccc] 2Gdap → [ccc]）
+    // text line: swallows every following blank line (vim: [aaa,bbb,"","",ccc]
+    // with 2Gdap -> [ccc])
     let f = edit("aaa\nbbb\n\n\nccc\n", 1, 0, &["d", "a", "p"]);
-    assert_eq!(f.text(), "ccc\n", "全部尾随空行一起删除");
+    assert_eq!(f.text(), "ccc\n", "all trailing blank lines go with it");
 
-    // 空行：空行块 + 整个下一段落（不含它的尾随空行）
+    // blank line: the blank block plus the whole next paragraph
+    // (not that paragraph's own trailing blanks)
     let f2 = edit("aaa\n\n\nbbb\nccc\n", 1, 0, &["d", "a", "p"]);
-    assert_eq!(f2.text(), "aaa\n", "空行会话吞整个下一段落");
+    assert_eq!(f2.text(), "aaa\n", "from a blank line the session swallows the whole next paragraph");
 
     let f3 = edit("aaa\n\nbbb\n\nx\n", 1, 0, &["d", "a", "p"]);
-    assert_eq!(f3.text(), "aaa\n\nx\n", "下一段落自己的尾随空行保留");
+    assert_eq!(f3.text(), "aaa\n\nx\n", "the next paragraph's own trailing blank lines survive");
 }
 
-// ---- 块 A 中带补齐（vim 探针："123456"/"12" → "123 X456"/"12  X"）---------
+// ---- blockwise A pads the gap (vim probe: "123456"/"12" -> "123 X456"/"12  X")
 
 #[test]
 fn block_append_pads_to_append_column() {
-    // 注意：引擎的块 visual `l` 不越过行尾（vim 的块可进入虚拟列——记录在
-    // NOTES 分歧 #35），所以短行放在块中间构造
+    // note: the engine's blockwise visual `l` does not go past the end of a
+    // line (vim lets a block enter virtual columns -- recorded as NOTES
+    // divergence #35), so the short line is placed in the middle of the block
+    // to build the shape
     let mut f = Fixture::new("123456\n1\n123456\n");
     f.feed(["<C-v>", "j", "j", "l", "A"]);
     f.type_text("_X");
     f.feed(["escape"]);
-    assert_eq!(f.text(), "12_X3456\n1 _X\n12_X3456\n", "短行补齐到追加列");
+    assert_eq!(f.text(), "12_X3456\n1 _X\n12_X3456\n", "the short line is padded up to the append column");
 }
 
-// ---- Ex 命令面 ------------------------------------------------------------
+// ---- Ex command surface ---------------------------------------------------
 
 #[test]
 fn ex_bang_forms_and_abbreviations() {
     let mut f = Fixture::new("a\nb\nc\n");
     f.feed([":", "w", "!", "<CR>"]);
-    assert_eq!(f.host.saved, 1, ":w! 保存（曾 E492）");
+    assert_eq!(f.host.saved, 1, ":w! saves (it used to be E492)");
 
     let f2 = edit("a\nb\nc\n", 0, 0, &[":", "2", "d", "e", "<CR>"]);
-    assert_eq!(f2.text(), "a\nc\n", ":2de 缩写删除");
+    assert_eq!(f2.text(), "a\nc\n", ":2de is the abbreviated delete");
 
     let f3 = edit("ab\n", 0, 0, &[":", "s", "u", "/", "a", "/", "b", "/", "<CR>"]);
-    assert_eq!(f3.text(), "bb\n", ":su 是 :substitute 的缩写");
+    assert_eq!(f3.text(), "bb\n", ":su is an abbreviation of :substitute");
 }
 
 #[test]
 fn ex_garbage_count_reports_e488_and_deletes_nothing() {
-    // 【第十四轮修正】vim 9.1 探针 P13：`:1,2d 3x` 报 E488 且**不删除**。
-    // 第十三轮把垃圾 count 当 0（=无 count）照常删整个 typed range——
-    // 相邻修复方向对了，终点错了；第十四轮的 parse_reg_count 现在报错。
+    // [Round-14 correction] vim 9.1 probe P13: `:1,2d 3x` reports E488 and
+    // **deletes nothing**. Round 13 treated the garbage count as 0 (= no
+    // count) and still deleted the whole typed range -- the adjacent fix had
+    // the right direction but the wrong endpoint; round 14's parse_reg_count
+    // now reports an error.
     let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "d", " ", "3", "x", "<CR>"]);
-    assert_eq!(f.text(), "a\nb\nc\n", "垃圾尾参 = E488，缓冲不动");
+    assert_eq!(f.text(), "a\nb\nc\n", "garbage trailing argument = E488, buffer untouched");
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert!(last.starts_with("E488"), "got {last:?}");
 }
 
 #[test]
 fn ex_address_whitespace_and_midrange_percent() {
-    // 【第十四轮修正】地址内空白跳过用**范围内**的例子证明（vim 9.1）：
-    // `:2 +1d` 删第 3 行。越界地址 `:5 +2` 现按探针 P15 报 E16（第十二轮
-    // 注释里的「clamp 到 $」是当时实现的期望，非 vim 行为）。
+    // [Round-14 correction] skipping whitespace inside an address is proven
+    // with an **in-range** example (vim 9.1): `:2 +1d` deletes line 3. The
+    // out-of-range address `:5 +2` now reports E16 per probe P15 (the "clamp
+    // to $" in the round-12 comment was what that implementation expected,
+    // not vim behaviour).
     let f = edit("a\nb\nc\nd\n", 0, 0, &[":", "2", " ", "+", "1", "d", "<CR>"]);
-    assert_eq!(f.text(), "a\nb\nd\n", "地址内空白被跳过");
+    assert_eq!(f.text(), "a\nb\nd\n", "whitespace inside the address is skipped");
 
     let f3 = edit("a\nb\nc\n", 0, 0, &[":", "5", " ", "+", "2", "d", "<CR>"]);
     let last = f3.host.statuses.last().map(String::as_str).unwrap_or("");
-    assert!(last.starts_with("E16"), "越界地址 = E16，got {last:?}");
+    assert!(last.starts_with("E16"), "out-of-range address = E16, got {last:?}");
 
     let f2 = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "%", "d", "<CR>"]);
-    assert_eq!(f2.text(), "", "mid-range % = 1,$（曾是 cursor line）");
+    assert_eq!(f2.text(), "", "mid-range % = 1,$ (it used to be the cursor line)");
 }
 
 #[test]
 fn ex_comment_lines() {
-    // 行首 " 整行注释静默跳过（曾 E492）
+    // a leading " makes the whole line a comment, skipped silently
+    // (it used to be E492)
     let mut f = Fixture::new("a\n");
     f.feed([":", " ", "\"", " ", "s", "c", "r", "a", "t", "c", "h", "<CR>"]);
     assert_eq!(f.text(), "a\n");
-    assert!(f.host.bells == 0, "注释行不响铃");
+    assert!(f.host.bells == 0, "a comment line does not ring the bell");
 
-    // :set 尾注释
+    // a trailing comment on :set
     let mut f2 = Fixture::new("a\n");
     f2.feed([":", "s", "e", "t", " ", "t", "s", "=", "8", " ", "\"", " ", "x", "<CR>"]);
-    assert!(f2.host.bells == 0, ":set ts=8 \" x 静默生效");
+    assert!(f2.host.bells == 0, ":set ts=8 \" x takes effect silently");
 }
 
 #[test]
 fn cmdline_editing_chords() {
-    // C-u 清行、C-w 删词
+    // C-u clears the line, C-w deletes a word
     let mut f = Fixture::new("a\n");
     f.feed([":", "f", "o", "o"]);
     f.feed_raw(vimcore::key::Key::ctrl_char('u'));
     f.feed(["w"]);
     f.feed(["<CR>"]);
-    assert_eq!(f.text(), "a\n", "C-u 清掉 foo，只剩 :w");
+    assert_eq!(f.text(), "a\n", "C-u clears foo, leaving only :w");
     assert_eq!(f.host.saved, 1);
 
     let mut f2 = Fixture::new("a\n");
     f2.feed([":", "f", "o", "o", " ", "b", "a"]);
     f2.feed_raw(vimcore::key::Key::ctrl_char('w'));
-    assert_eq!(f2.vim.cmdline.buffer, "foo ", "C-w 删最后一个词");
+    assert_eq!(f2.vim.cmdline.buffer, "foo ", "C-w deletes the last word");
 }
 
 #[test]
@@ -390,52 +405,53 @@ fn cmdline_history_dedups_nonconsecutive() {
     let mut f = Fixture::new("a\n");
     for line in ["/foo", "/bar", "/foo"] {
         let mut chars = line.chars();
-        f.feed_raw(Key::char(chars.next().unwrap())); // 提示符
+        f.feed_raw(Key::char(chars.next().unwrap())); // the prompt char
         for c in chars {
             f.feed_raw(Key::char(c));
         }
         f.feed_raw(Key::enter());
     }
     let history = f.vim.cmdline.history.get(&'/').unwrap();
-    assert_eq!(history, &vec!["bar".to_owned(), "foo".to_owned()], "旧重复搬走");
+    assert_eq!(history, &vec!["bar".to_owned(), "foo".to_owned()], "the older duplicate is moved away");
 }
 
-// ---- 宏与映射面 -----------------------------------------------------------
+// ---- macro and mapping surface --------------------------------------------
 
 #[test]
 fn macro_register_rules() {
     use vimcore::keymap::ModeClass;
-    // qA 追加到 a 的录制
+    // qA appends to the recording of a
     let mut f = Fixture::new("abc\n");
     f.feed(["q", "a", "x", "q"]);
     f.feed(["j"]);
     f.feed(["q", "A", "x", "q"]);
-    assert_eq!(f.vim.macro_len('a'), 2, "qA 追加到 a");
-    assert_eq!(f.vim.macro_len('A'), 0, "没有独立的 A 槽");
+    assert_eq!(f.vim.macro_len('a'), 2, "qA appends to a");
+    assert_eq!(f.vim.macro_len('A'), 0, "there is no separate A slot");
 
-    // q 前的 count 不泄漏
+    // a count before q does not leak
     let mut f2 = Fixture::new("abc\n");
     f2.feed(["2", "q", "a", "q"]);
     f2.feed(["x"]);
-    assert_eq!(f2.text(), "bc\n", "count 2 在 q 后不放大 x");
+    assert_eq!(f2.text(), "bc\n", "the count 2 does not multiply x after q");
     let _ = ModeClass::Normal;
 }
 
-/// mapping 前缀压住的多个 declined 打印键必须按序交给宿主（单槽 IOU
-/// 曾把 j 丢掉——`:imap jk <Esc>` 后打 `jx` 得到 `xXabc`）。
+/// Several declined printable keys held back by a mapping prefix must be
+/// handed to the host in order (the single-slot IOU used to drop j -- with
+/// `:imap jk <Esc>`, typing `jx` produced `xXabc`).
 #[test]
 fn declined_printables_queue_in_order() {
     use vimcore::keymap::ModeClass;
     let mut f = Fixture::new("abc\n");
     f.vim.keymaps_mut().map_str(ModeClass::Insert, "jk", "<Esc>");
     f.feed(["i"]);
-    f.feed(["j"]); // mapping 前缀：引擎答 Consumed，欠宿主一个 j
-    f.feed(["x"]); // x 打破前缀：j、x 都应排队待宿主放置
+    f.feed(["j"]); // mapping prefix: the engine answers Consumed, owing the host a j
+    f.feed(["x"]); // x breaks the prefix: both j and x should queue for the host to place
     let pending = f.vim.take_pending_unknown_chars();
-    assert_eq!(pending, vec!['j', 'x'], "两个 declined 字符都欠着，按序");
+    assert_eq!(pending, vec!['j', 'x'], "both declined characters are owed, in order");
 }
 
-// ---- 配置面 ---------------------------------------------------------------
+// ---- configuration surface ------------------------------------------------
 
 #[test]
 fn config_g_mapleader_and_tab_separator() {
@@ -443,11 +459,11 @@ fn config_g_mapleader_and_tab_separator() {
     let cfg = config::parse("let g:mapleader = \",\"\nnnoremap <Leader>w :w<CR>\n");
     assert!(
         !cfg.mappings.is_empty(),
-        "g:mapleader 生效，<Leader>w 解析为 ,w"
+        "g:mapleader takes effect, <Leader>w resolves to ,w"
     );
-    assert_eq!(cfg.mappings[0].lhs.len(), 2, "leader + w 两个键");
+    assert_eq!(cfg.mappings[0].lhs.len(), 2, "two keys: leader + w");
 
     let cfg2 = config::parse("nnoremap\t<Leader>x ix<CR>");
-    assert!(!cfg2.ignored.iter().any(|l| l.contains("nnoremap\t")), "TAB 分隔不进 ignored");
-    assert_eq!(cfg2.mappings.len(), 1, "TAB 分隔的映射正常解析");
+    assert!(!cfg2.ignored.iter().any(|l| l.contains("nnoremap\t")), "a TAB separator does not land in ignored");
+    assert_eq!(cfg2.mappings.len(), 1, "a TAB-separated mapping parses correctly");
 }

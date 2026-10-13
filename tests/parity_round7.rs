@@ -1,7 +1,8 @@
-//! 第七轮检视回归测试。
+//! Round-7 review regression tests.
 //!
-//! 流程沿用前几轮：读码列可疑点 → vim 9.1 探针实证（`-es` 脚本）→
-//! 修复 → 这里入册。每条测试标注实证方式。
+//! The workflow follows the earlier rounds: read the code and list suspicions ->
+//! prove them with vim 9.1 probes (`-es` scripts) -> fix -> record here. Each
+//! test notes how it was proven.
 
 mod common;
 
@@ -9,63 +10,69 @@ use common::Fixture;
 use vimcore::buffer::VimBuffer;
 use vimcore::mode::VisualKind;
 
-// ---- 1. active_visual 生命周期 ---------------------------------------------
+// ---- 1. the active_visual lifetime ----------------------------------------
 
-/// `Vjd` 后 `:'<,'>d` 必须读 `'<`/`'>` mark（最新选区），不能用算子前
-/// 的过期 live 偏移。旧行为把整个缓冲删空。
+/// After `Vjd`, `:'<,'>d` must read the `'<`/`'>` marks (the newest selection)
+/// and may not use the stale live offsets from before the operator. The old
+/// behaviour deleted the whole buffer.
 #[test]
 fn cmdline_range_uses_marks_not_stale_live_visual() {
     let mut f = Fixture::new("aaa\nbbb\nccc\nddd\n");
-    f.feed(["V", "j", "d"]); // 删 L1-L2 → ["ccc", "ddd"]
+    f.feed(["V", "j", "d"]); // delete L1-L2 -> ["ccc", "ddd"]
     assert_eq!(f.buf.slice(0..f.buf.len()), "ccc\nddd\n");
     f.feed([":", "'", "<", ",", "'", ">", "d", "\n"]);
     assert_eq!(
         f.buf.slice(0..f.buf.len()),
         "ddd\n",
-        ":'<,'>d 应删光标所在行（ccc），不能用过期 live 范围"
+        ":'<,'>d should delete the line the cursor is on (ccc), not a stale live range"
     );
 }
 
-/// visual 模式文本对象扩展（跨行 `vi(`）必须同步 live 范围，`:` 的
-/// `'<,'>` 才覆盖整个对象。旧行为只替换塌缩行。
+/// A visual-mode text object extension (the cross-line `vi(`) must keep the live
+/// range in sync so that the `'<,'>` of `:` covers the whole object. The old
+/// behaviour only replaced the collapsed line.
 #[test]
 fn object_extension_updates_live_range_for_cmdline() {
     let mut f = Fixture::new("let a = foo(\n    bar,\n    baz,\n);\n");
-    // 光标到 L1 的 bar（offset 17），vi( 选 L1-L2，:s 两行都替换
+    // move the cursor onto bar of L1 (offset 17); vi( selects L1-L2 and :s
+    // replaces both lines
     f.vim.cursor.offset = 17;
     f.feed(["v", "i", "("]);
-    // 模式 ba 同时命中 bar/baz：范围若塌缩在 L1 就只换一处
+    // the pattern ba hits both bar and baz: if the range collapsed onto L1 only
+    // one of them would be replaced
     f.feed([":", "s", "/", "b", "a", "/", "X", "/", "\n"]);
     assert_eq!(
         f.buf.slice(0..f.buf.len()),
         "let a = foo(\n    Xr,\n    Xz,\n);\n",
-        "vi( 后 :s 应覆盖对象的全部行（bar 与 baz）"
+        "after vi( the :s should cover every line of the object (bar and baz)"
     );
 }
 
-// ---- 2. visual 变更会话后 gv 恢复选区 --------------------------------------
+// ---- 2. gv restores the selection after a visual change session -----------
 
-/// `viwcX<Esc>` 后 `gv` 恢复选区。vim 9.1 探针：`'<`/`'>` 保持编辑前
-/// 字节范围（gv 重选 5 字符），而非塌缩/移位后的空区。
+/// After `viwcX<Esc>`, `gv` restores the selection. vim 9.1 probe: `'<`/`'>`
+/// keep the pre-edit byte range (gv reselects 5 characters) instead of an empty
+/// range after collapsing/shifting.
 #[test]
 fn gv_restores_selection_after_visual_change() {
     let mut f = Fixture::new("alpha beta\ngamma\n");
-    f.feed(["v", "i", "w"]); // 选 alpha（offset 0..5）
+    f.feed(["v", "i", "w"]); // select alpha (offset 0..5)
     f.feed(["c"]);
     f.type_text("X");
     f.feed(["escape"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "X beta\ngamma\n");
     f.feed(["g", "v"]);
-    let sel = f.vim.visual_selection().expect("gv 应恢复选区");
-    // 9.1 oracle 矩阵（audit C12）：gv 的 CHARWISE 复选是**反向**选区
-    // ——锚点在末字符、光标在起点
-    assert_eq!(sel.0, 4, "gv 锚点 = 原选区末字符");
+    let sel = f.vim.visual_selection().expect("gv should restore the selection");
+    // the 9.1 oracle matrix (audit C12): the CHARWISE gv reselection is a
+    // **reversed** selection -- the anchor on the last character, the cursor at
+    // the start
+    assert_eq!(sel.0, 4, "the gv anchor = the last character of the original selection");
     assert_eq!(sel.2, VisualKind::Char);
-    assert_eq!(sel.1, 0, "gv 光标 = 原选区起点");
+    assert_eq!(sel.1, 0, "the gv cursor = the start of the original selection");
 }
 
-/// 块插入 `C-v jj I` 后 `gv` 恢复原块。vim 9.1 探针：`'<`/`'>` 落在
-/// 原块列。
+/// After the block insert `C-v jj I`, `gv` restores the original block. vim 9.1
+/// probe: `'<`/`'>` land on the columns of the original block.
 #[test]
 fn gv_restores_block_after_block_insert() {
     let mut f = Fixture::new("ab\ncd\nef\n");
@@ -74,17 +81,19 @@ fn gv_restores_block_after_block_insert() {
     f.feed(["escape"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "Zab\nZcd\nZef\n");
     f.feed(["g", "v"]);
-    let sel = f.vim.visual_selection().expect("gv 应恢复块选区");
+    let sel = f.vim.visual_selection().expect("gv should restore the block selection");
     assert_eq!(sel.2, VisualKind::Block);
-    assert_eq!(sel.0, 0, "块起点 = 原块首（L0 行首）");
-    // 块 gv 的光标回到块末行行首（光标端随编辑漏斗移到编辑后坐标）
-    assert_eq!(sel.1, 6, "块终点 = 原块末（L2 行首，编辑前偏移）");
+    assert_eq!(sel.0, 0, "block start = the first cell of the original block (start of L0)");
+    // block gv puts the cursor back at the start of the block's last line (the
+    // cursor end follows the edit funnel to post-edit coordinates)
+    assert_eq!(sel.1, 6, "block end = the last cell of the original block (start of L2, pre-edit offset)");
 }
 
-// ---- 3. hlsearch=false 时取消提示符不得泄漏高亮 -----------------------------
+// ---- 3. with hlsearch=false, cancelling the prompt must not leak highlights
 
-/// hlsearch=false + incsearch=true：`/` 预览高亮在 Esc 取消后必须清空。
-/// 旧行为把 `last_matches`（上一个模式的匹配）原样发布，留下永久高亮。
+/// hlsearch=false + incsearch=true: the `/` preview highlights must be cleared
+/// once Esc cancels. The old behaviour republished `last_matches` (the matches of
+/// the previous pattern) verbatim, leaving permanent highlights.
 #[test]
 fn cancel_cmdline_respects_hlsearch_off() {
     let mut f = Fixture::new("foo\nbar\nfoo\n");
@@ -92,28 +101,30 @@ fn cancel_cmdline_respects_hlsearch_off() {
     f.feed(["/", "f", "o", "o", "\n"]);
     assert!(
         f.host.highlights.is_empty(),
-        "hlsearch=false 搜索后不应有高亮"
+        "with hlsearch=false there should be no highlights after a search"
     );
-    f.feed(["/", "b"]); // incsearch 预览
+    f.feed(["/", "b"]); // the incsearch preview
     f.feed(["escape"]);
     assert!(
         f.host.highlights.is_empty(),
-        "取消提示符后不得恢复 last_matches 高亮"
+        "after cancelling the prompt the last_matches highlights must not come back"
     );
 }
 
-// ---- 4. Esc 优先级 ---------------------------------------------------------
+// ---- 4. Esc precedence ----------------------------------------------------
 
-/// `g<Esc>` 静默取消（旧实现走 trie-miss 重试路径误响铃）。
+/// `g<Esc>` cancels silently (the old implementation went through the trie-miss
+/// retry path and rang the bell by mistake).
 #[test]
 fn escape_cancels_pending_state_quietly() {
     let mut f = Fixture::new("abc\n");
     f.feed(["g"]);
     f.feed(["escape"]);
-    assert_eq!(f.host.bells, 0, "g<Esc> 应静默取消");
+    assert_eq!(f.host.bells, 0, "g<Esc> should cancel silently");
 }
 
-/// `3"<Esc>` 后 count 必须一起取消，dd 只删一行。
+/// After `3"<Esc>` the count must be cancelled along with it, so dd deletes only
+/// one line.
 #[test]
 fn escape_at_register_prefix_cancels_count() {
     let mut f = Fixture::new("l1\nl2\nl3\nl4\n");
@@ -123,60 +134,67 @@ fn escape_at_register_prefix_cancels_count() {
     assert_eq!(
         f.buf.slice(0..f.buf.len()),
         "l2\nl3\nl4\n",
-        "Esc 必须取消 `3\"` 的整个 pending（含 count），dd 只删一行"
+        "Esc must cancel the whole pending `3\"` (the count included), so dd deletes one line"
     );
 }
 
-// ---- 5. :sort u 单行不建幻影 undo 组 ---------------------------------------
+// ---- 5. :sort u on a single line builds no phantom undo group -------------
 
-/// `:sort u` 在单行范围上无操作（单行没有可去重的连续重复），
-/// 不得为无变化的 replace 宣告 undo 组。旧行为每次空耗一个 `u`。
+/// `:sort u` on a single-line range is a no-op (one line has no consecutive
+/// duplicates to dedup), so it must not declare an undo group for an unchanged
+/// replace. The old behaviour burned one `u` every time.
 #[test]
 fn sort_u_single_line_creates_no_undo_group() {
     let mut f = Fixture::new("hello\n");
     f.feed([":", "s", "o", "r", "t", " ", "u", "\n"]);
-    assert_eq!(f.host.group_count, 0, "单行 :sort u 无变化，不得建 undo 组");
+    assert_eq!(f.host.group_count, 0, "a single-line :sort u changes nothing, so no undo group");
     f.feed(["x"]);
-    assert_eq!(f.host.group_count, 1, "只有 x 建组");
+    assert_eq!(f.host.group_count, 1, "only x builds a group");
 }
 
-// ---- 6. visual : 执行后 '< '> 保留执行前范围 --------------------------------
+// ---- 6. after visual :, '< '> keep the pre-execution range ----------------
 
-/// visual 选区打开 `:` 执行 :s 后，`'<`/`'>` 必须保留提示符打开时的
-/// 选区（vim：保留执行的 range）。旧行为按「锚点..执行后光标」重写：
-/// :s 把光标放到行首非空白，选区塌缩成 1 字符，gv 二次语义被破坏。
+/// Opening `:` from a visual selection and running :s must leave `'<`/`'>` holding
+/// the selection as it was when the prompt opened (vim: it keeps the range that
+/// was executed). The old behaviour rewrote them as "anchor..post-execution
+/// cursor": :s puts the cursor on the first non-blank, the selection collapsed to
+/// 1 character and the second-order semantics of gv broke.
 #[test]
 fn visual_colon_keeps_prompt_time_range_in_marks() {
     let mut f = Fixture::new("hello world\nsecond\n");
-    f.feed(["v", "i", "w"]); // 选 hello（anchor 0，cursor 4）
+    f.feed(["v", "i", "w"]); // select hello (anchor 0, cursor 4)
     f.feed([":", "s", "/", "h", "e", "l", "/", "H", "E", "L", "/", "\n"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "HELlo world\nsecond\n");
-    // :s 把光标留在行首（col 0）——若按执行后光标重写，'> 会塌缩到 1
+    // :s leaves the cursor at the start of the line (col 0) -- were we to rewrite
+    // from the post-execution cursor, '> would collapse to 1
     let lt = f.vim.marks.resolve('<', &f.buf).unwrap();
     let gt = f.vim.marks.resolve('>', &f.buf).unwrap();
-    assert_eq!(lt, 0, "'< = 提示符时选区起点");
-    // audit E3：`'>` 解析到选区**末字符**（'o' = offset 4），不再暴露
-    // 排他端字节；gv 的内部存储仍是 0..5
-    assert_eq!(gt, 4, "'> = 提示符时选区末字符，不随命令后的光标塌缩");
-    // gv 复选原选区（0..5；9.1 oracle 矩阵，audit C12：CHARWISE gv 是
-    // 反向选区——锚点在末字符、光标在起点）
+    assert_eq!(lt, 0, "'< = the start of the selection at prompt time");
+    // audit E3: `'>` resolves to the **last character** of the selection ('o' =
+    // offset 4) and no longer exposes the exclusive-end byte; gv's internal
+    // storage is still 0..5
+    assert_eq!(gt, 4, "'> = the last character of the selection at prompt time, it does not collapse with the cursor after the command");
+    // gv reselects the original range (0..5; 9.1 oracle matrix, audit C12: the
+    // CHARWISE gv is a reversed selection -- anchor on the last character, cursor
+    // at the start)
     f.feed(["g", "v"]);
     assert_eq!(
         f.vim.visual_selection().map(|(a, c, _)| (a, c)),
         Some((4, 0)),
-        "gv 应恢复 hello 的选区"
+        "gv should restore the selection of hello"
     );
 }
 
-// ---- 7. :d 的寄存器参数 ----------------------------------------------------
+// ---- 7. the register argument of :d ---------------------------------------
 
-/// `:1,2d a` 把删除的行存进 `"a`（vim 9.1：`:d [x]`，旧实现忽略该参数）。
+/// `:1,2d a` stores the deleted lines into `"a` (vim 9.1: `:d [x]`; the old
+/// implementation ignored that argument).
 #[test]
 fn ex_delete_stores_into_named_register() {
     let mut f = Fixture::new("one\ntwo\nthree\n");
     f.feed([":", "1", ",", "2", "d", " ", "a", "\n"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "three\n");
-    let reg = f.vim.registers.get('a').expect("寄存器 a 应有内容");
+    let reg = f.vim.registers.get('a').expect("register a should have content");
     assert_eq!(reg.text, "one\ntwo\n");
     assert!(matches!(
         reg.kind,
@@ -184,8 +202,9 @@ fn ex_delete_stores_into_named_register() {
     ));
 }
 
-/// `:2d 3`（count 从范围末行起算）仍按第六轮语义删 2-4 行，且不带
-/// 寄存器参数时走既有删除寄存器路径。
+/// `:2d 3` (the count counted from the last line of the range) still deletes
+/// lines 2-4 per the round-6 semantics, and without a register argument it goes
+/// down the existing delete-register path.
 #[test]
 fn ex_delete_count_semantics_unchanged() {
     let mut f = Fixture::new("one\ntwo\nthree\nfour\nfive\n");
@@ -193,18 +212,20 @@ fn ex_delete_count_semantics_unchanged() {
     assert_eq!(
         f.buf.slice(0..f.buf.len()),
         "one\nfive\n",
-        ":2d 3 从第 2 行起删 3 行"
+        ":2d 3 deletes 3 lines starting from line 2"
     );
-    // 被删的多行文本落在 "1（编号环）
-    let reg = f.vim.registers.get('1').expect("多行删除应进 \"1");
+    // the deleted multi-line text lands in "1 (the numbered ring)
+    let reg = f.vim.registers.get('1').expect("a multi-line delete should go into \"1");
     assert_eq!(reg.text, "two\nthree\nfour\n");
 }
 
-// ---- 8. 对抗性 fuzz 抓取的修复 ---------------------------------------------
+// ---- 8. fixes caught by the adversarial fuzz ------------------------------
 
-/// `db` 在行首：b 跨到上一行行尾，exclusive + 列 1 + 起点在首个非空白
-/// 之前 → linewise 删除**上一行**（vim 9.1 探针：['abc','def'] → ['def']）。
-/// 旧实现 `target_line - 1` 在向上跨行时 usize 下溢 panic。
+/// `db` at the start of a line: b crosses to the end of the previous line, and
+/// exclusive + column 1 + a start before the first non-blank -> a linewise delete
+/// of the **previous line** (vim 9.1 probe: ['abc','def'] -> ['def']). The old
+/// implementation's `target_line - 1` underflowed a usize and panicked when
+/// crossing upwards.
 #[test]
 fn db_at_line_start_deletes_previous_line_linewise() {
     let mut f = Fixture::new("abc\ndef\n");
@@ -213,29 +234,30 @@ fn db_at_line_start_deletes_previous_line_linewise() {
     assert_eq!(
         f.buf.slice(0..f.buf.len()),
         "def\n",
-        "db 在行首 = linewise 删上一行（vim 探针）"
+        "db at the start of a line = a linewise delete of the previous line (vim probe)"
     );
 }
 
-/// `gn` 选中的匹配以多字节字符结尾时，光标必须落在末字符**起点**，
-/// 不能用 `end - 1` 字节算术落进字符中间（fuzz：匹配 `中` 后宿主
-/// `offset_to_line` 直接 panic）。
+/// When the match selected by `gn` ends with a multi-byte character, the cursor
+/// must land on the **start** of the last character; `end - 1` byte arithmetic
+/// would drop it inside a character (fuzz: after matching `中`, the host's
+/// `offset_to_line` panicked outright).
 #[test]
 fn gn_cursor_lands_on_multibyte_match_start() {
     let mut f = Fixture::new("foo 中 bar\n");
-    f.feed(["/", "中", "\n"]); // 搜索 中
-    f.feed(["g", "g"]); // 回到开头（pattern 仍在）
-    f.feed(["g", "n"]); // 选中匹配
+    f.feed(["/", "中", "\n"]); // search for 中
+    f.feed(["g", "g"]); // back to the start (the pattern is still live)
+    f.feed(["g", "n"]); // select the match
     let co = f.vim.cursor_offset();
     let text = f.buf.slice(0..f.buf.len());
     assert!(
         text.is_char_boundary(co),
-        "gn 后光标 {co} 必须在字符边界（text {text:?}）"
+        "after gn the cursor {co} must sit on a character boundary (text {text:?})"
     );
-    let sel = f.vim.visual_selection().expect("gn 应进入 visual");
-    assert_eq!(sel.0, 4, "选区起点 = 中 的起点");
+    let sel = f.vim.visual_selection().expect("gn should enter visual mode");
+    assert_eq!(sel.0, 4, "selection start = the start of 中");
 }
 
-// ---- harness 辅助 -----------------------------------------------------------
-// insert 打字走 common::Fixture::type_text（record_typed_text +
-// insert_text_at_cursor，与集成层 place_text 同款）。
+// ---- harness helpers ------------------------------------------------------
+// insert typing goes through common::Fixture::type_text (record_typed_text +
+// insert_text_at_cursor, the same shape as place_text in the integration layer).

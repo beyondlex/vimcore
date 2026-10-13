@@ -1,18 +1,20 @@
-//! 只读管线（PLAN_READONLY P1 / P2）的行为测试。
+//! Behaviour tests for the read-only pipeline (PLAN_READONLY P1 / P2).
 //!
-//! 覆盖三件事：
+//! Covers three things:
 //!
-//! 1. `handle_key_ro` + `CtxRo`：只读宿主（`impl VimBuffer` +
-//!    `impl VimHostRo`，零写原语）拿到完整的 motion / text object /
-//!    搜索 / 标记 / 滚动 / yank 能力；
-//! 2. `'modifiable'` 关闭时编辑类命令按 vim 的 E21 拒绝，且写原语一次都
-//!    没被调到（fuzz 用"写原语即 panic"的缓冲做硬断言）；
-//! 3. `MotionHook` 拦截点：宿主接管的 motion 在普通移动、算子待决与可视
-//!    扩展三条路径上同时生效。
+//! 1. `handle_key_ro` + `CtxRo`: a read-only host (`impl VimBuffer` +
+//!    `impl VimHostRo`, zero write primitives) gets the full motion / text
+//!    object / search / mark / scroll / yank capability;
+//! 2. with 'modifiable' off, editing commands are refused with vim's E21, and
+//!    no write primitive is ever called (the fuzz case asserts this hard with a
+//!    buffer whose write primitives panic);
+//! 3. the `MotionHook` interception point: a host-owned motion takes effect on
+//!    all three paths at once -- plain movement, pending operator and visual
+//!    extension.
 //!
-//! E21 的键位语义以 vim 9.1 实证为准（`:set nomodifiable` 下 `x` `dw` `dd`
-//! `i` `o` `~` `p` `J` `u` `>` `:s` `:d` `:j` `:m` `:pu` 全部报 E21；
-//! `y` `yy` `m{a}` `:q` 不报）。
+//! The E21 key semantics follow the vim 9.1 evidence (under `:set nomodifiable`
+//! all of `x` `dw` `dd` `i` `o` `~` `p` `J` `u` `>` `:s` `:d` `:j` `:m` `:pu`
+//! report E21; `y` `yy` `m{a}` `:q` do not).
 
 mod common;
 
@@ -27,10 +29,11 @@ use vimcore::motions::{Motion, MotionKind, MotionResult};
 use vimcore::state::{Ctx, CtxRo, VimState};
 use vimcore::tck::TckHostRo;
 
-// ---- 只读宿主 ------------------------------------------------------------
+// ---- read-only host -------------------------------------------------------
 
-/// 一个"折叠感知"的宿主：第 `hidden` 行被折叠，j/k 必须跨过它。这就是
-/// alacer diff view 的 `]c`/`[c` 与可见行移动在引擎侧的接入形态。
+/// A "fold-aware" host: the lines in `hidden` are folded away, so j/k must step
+/// over them. This is exactly how the alacer diff view's `]c`/`[c` and
+/// visible-line movement plug into the engine side.
 struct HiddenLineHook {
     hidden: Vec<usize>,
 }
@@ -74,8 +77,10 @@ impl MotionHook for HiddenLineHook {
             }
         }
         if !moved {
-            // 交回引擎：`j` 在末行的 stuck 语义由内建实现给出，宿主不必
-            // 自己复刻一遍（返回 None 就是"这条我不接管"）。
+            // hand it back to the engine: the stuck semantics of `j` on the last
+            // line is already given by the built-in implementation, the host does
+            // not have to replicate it (returning None means "I do not own this
+            // one").
             return None;
         }
         Some(MotionResult {
@@ -137,7 +142,8 @@ impl VimHostRo for RoHost {
     }
 }
 
-// 同一类型也实现完整 `VimHost`，好让 RW/RO 等价性回放共用一套宿主语义。
+// The same type also implements the full `VimHost`, so the RW/RO equivalence
+// replay can share one set of host semantics.
 impl VimHost for RoHost {
     fn viewport(&self) -> (usize, usize) {
         (0, 24)
@@ -189,7 +195,7 @@ fn feed_rw(vim: &mut VimState, buf: &mut BufferView, host: &mut RoHost, keys: &[
     }
 }
 
-// ---- 1. 只读管线：查看能力全在，编辑被 E21 拒绝 ----------------------------
+// ---- 1. read-only pipeline: all viewing capability stays, edits get E21 ----
 
 #[test]
 fn ro_pipeline_keeps_motions_search_marks_and_yank() {
@@ -202,30 +208,30 @@ fn ro_pipeline_keeps_motions_search_marks_and_yank() {
     assert_eq!(buf.offset_to_line(vim.cursor_offset()), 1);
     feed_ro(&mut vim, &buf, &mut host, &["G"]);
     assert_eq!(buf.offset_to_line(vim.cursor_offset()), 2);
-    // 搜索
+    // search
     feed_ro(&mut vim, &buf, &mut host, &["g", "g"]);
     feed_ro(&mut vim, &buf, &mut host, &["/", "b", "e", "t", "a", "<CR>"]);
     assert_eq!(buf.offset_to_line(vim.cursor_offset()), 1);
-    assert!(!host.highlights.is_empty(), "搜索高亮必须照常发布给宿主");
-    // 标记（vim: `m{a}` 在 nomodifiable 下合法）
+    assert!(!host.highlights.is_empty(), "search highlights must still be published to the host");
+    // marks (vim: `m{a}` is legal under nomodifiable)
     feed_ro(&mut vim, &buf, &mut host, &["m", "a"]);
     feed_ro(&mut vim, &buf, &mut host, &["g", "g"]);
     feed_ro(&mut vim, &buf, &mut host, &["'", "a"]);
     assert_eq!(buf.offset_to_line(vim.cursor_offset()), 1);
-    // yank（vim: `y` 在 nomodifiable 下合法）— 写寄存器 + 剪贴板
+    // yank (vim: `y` is legal under nomodifiable) -- writes the register + clipboard
     feed_ro(&mut vim, &buf, &mut host, &["\"", "+", "y", "y"]);
     assert_eq!(host.clipboard.as_deref(), Some("beta\n"));
     assert_eq!(
         vim.registers.get('+').map(|r| r.text.clone()).unwrap_or_default(),
         "beta\n"
     );
-    // 滚动
+    // scrolling
     feed_ro(&mut vim, &buf, &mut host, &["z", "z"]);
     host.statuses.clear();
     feed_ro(&mut vim, &buf, &mut host, &["/", "g", "a", "m", "m", "a", "<CR>"]);
     assert!(
         !host.statuses.iter().any(|s| s.contains("E21")),
-        "查看类键位不得报 E21：{:?}",
+        "viewing keys must not report E21: {:?}",
         host.statuses
     );
 }
@@ -252,15 +258,15 @@ fn ro_pipeline_refuses_edits_with_e21_and_leaves_the_text_alone() {
     ] {
         let mut host = RoHost::new();
         feed_ro(&mut vim, &buf, &mut host, &keys);
-        assert_eq!(buf.slice(0..buf.len()), before, "{keys:?} 改动了缓冲");
+        assert_eq!(buf.slice(0..buf.len()), before, "{keys:?} changed the buffer");
         assert!(
             host.statuses.iter().any(|s| s.contains("E21")),
-            "{keys:?} 没有上报 E21：{:?}",
+            "{keys:?} did not report E21: {:?}",
             host.statuses
         );
         feed_ro(&mut vim, &buf, &mut host, &["<Esc>"]);
     }
-    // 拒绝之后引擎仍然可用
+    // the engine is still usable after the refusals
     let mut host = RoHost::new();
     feed_ro(&mut vim, &buf, &mut host, &["g", "g"]);
     assert_eq!(vim.cursor_offset(), 0);
@@ -274,7 +280,7 @@ fn set_modifiable_is_a_real_option_spelling() {
     assert!(vim.is_modifiable());
 
     feed_rw(&mut vim, &mut buf, &mut host, &[":", "s", "e", "t", " ", "n", "o", "m", "a", "<CR>"]);
-    assert!(!vim.is_modifiable(), ":set noma 没有关掉 'modifiable'");
+    assert!(!vim.is_modifiable(), ":set noma did not turn 'modifiable' off");
     host.statuses.clear();
     feed_rw(&mut vim, &mut buf, &mut host, &[":", "s", "e", "t", " ", "m", "a", "?", "<CR>"]);
     assert_eq!(host.statuses.last().map(|s| s.as_str()), Some("nomodifiable"));
@@ -283,21 +289,22 @@ fn set_modifiable_is_a_real_option_spelling() {
     feed_rw(&mut vim, &mut buf, &mut host, &["x"]);
     assert!(
         host.statuses.iter().any(|s| s.contains("E21")),
-        "关闭后 x 必须报 E21：{:?}",
+        "x must report E21 after it is turned off: {:?}",
         host.statuses
     );
     assert_eq!(buf.slice(0..buf.len()), "alpha\n");
 
-    // 再打开：编辑恢复
+    // back on: editing resumes
     feed_rw(&mut vim, &mut buf, &mut host, &[":", "s", "e", "t", " ", "m", "a", "<CR>"]);
     assert!(vim.is_modifiable());
     feed_rw(&mut vim, &mut buf, &mut host, &["x"]);
     assert_eq!(buf.slice(0..buf.len()), "lpha\n");
 }
 
-// ---- 2. RW / RO 等价性回放 ------------------------------------------------
+// ---- 2. RW / RO equivalence replay ----------------------------------------
 
-/// 查看类键序（不含任何编辑）：两条管线必须给出逐项相同的状态。
+/// Viewing key sequences (no editing at all): the two pipelines must report
+/// item-for-item identical state.
 const VIEW_SEQUENCES: &[&[&str]] = &[
     &["g", "g"],
     &["w"],
@@ -327,35 +334,35 @@ const VIEW_SEQUENCES: &[&[&str]] = &[
 fn rw_and_ro_pipelines_agree_on_every_view_sequence() {
     for seq in VIEW_SEQUENCES {
         let text = "alpha beta\n(gamma)\n\ndelta\nepsilon\n";
-        // RW：完整 VimHost，'modifiable' 开着（观测序列里没有编辑）
+        // RW: full VimHost, 'modifiable' on (no edit in the observed sequence)
         let mut rw_buf = BufferView::from_text(text);
         let mut rw_host = RoHost::new();
         let mut rw = VimState::new();
         feed_rw(&mut rw, &mut rw_buf, &mut rw_host, seq);
 
-        // RO：只读管线
+        // RO: the read-only pipeline
         let ro_buf = BufferView::from_text(text);
         let mut ro_host = RoHost::new();
         let mut ro = VimState::new();
         feed_ro(&mut ro, &ro_buf, &mut ro_host, seq);
 
-        assert_eq!(rw.cursor_offset(), ro.cursor_offset(), "{seq:?} 光标不同");
+        assert_eq!(rw.cursor_offset(), ro.cursor_offset(), "{seq:?} cursor differs");
         assert_eq!(
             format!("{:?}", rw.mode()),
             format!("{:?}", ro.mode()),
-            "{seq:?} 模式不同"
+            "{seq:?} mode differs"
         );
         assert_eq!(
             format!("{:?}", rw.registers),
             format!("{:?}", ro.registers),
-            "{seq:?} 寄存器不同"
+            "{seq:?} registers differ"
         );
-        assert_eq!(rw_host.highlights, ro_host.highlights, "{seq:?} 高亮不同");
-        assert_eq!(rw_host.current, ro_host.current, "{seq:?} 当前高亮不同");
+        assert_eq!(rw_host.highlights, ro_host.highlights, "{seq:?} highlights differ");
+        assert_eq!(rw_host.current, ro_host.current, "{seq:?} current highlight differs");
     }
 }
 
-// ---- 3. MotionHook 拦截点 -------------------------------------------------
+// ---- 3. the MotionHook interception point ---------------------------------
 
 #[test]
 fn motion_hook_owns_vertical_motion() {
@@ -363,43 +370,45 @@ fn motion_hook_owns_vertical_motion() {
     let mut host = RoHost::new();
     host.hook = Some(HiddenLineHook { hidden: vec![1] });
     let mut vim = VimState::new();
-    // 第 1 行被折叠：`j` 必须落在第 2 行，不是第 1 行
+    // line 1 is folded: `j` must land on line 2, not line 1
     feed_ro(&mut vim, &buf, &mut host, &["j"]);
     assert_eq!(
         buf.offset_to_line(vim.cursor_offset()),
         2,
-        "拦截点没有被调用（j 落到了内建实现的位置）"
+        "the interception point was not called (j landed on the built-in implementation's line)"
     );
     feed_ro(&mut vim, &buf, &mut host, &["j"]);
     assert_eq!(buf.offset_to_line(vim.cursor_offset()), 3);
-    // 到底了：stuck（光标不动）
+    // at the bottom: stuck (the cursor does not move)
     feed_ro(&mut vim, &buf, &mut host, &["j"]);
     assert_eq!(buf.offset_to_line(vim.cursor_offset()), 3);
 }
 
 #[test]
 fn motion_hook_is_consulted_for_operator_pending_and_visual() {
-    // 算子待决：dj 的跨度必须走宿主的行投影（跨过折叠行）
+    // pending operator: the span of dj must go through the host's line projection
+    // (stepping over the folded line)
     let mut buf = BufferView::from_text("a\nb\nc\nd\n");
     let mut host = RoHost::new();
     host.hook = Some(HiddenLineHook { hidden: vec![1] });
     let mut vim = VimState::new();
-    // 内建 j 会落在第 1 行（`dj` → "c\nd\n"）；拦截点跨过折叠行落到第 2
-    // 行，跨度覆盖到第 2 行末（`dj` → "d\n"）。
+    // the built-in j would land on line 1 (`dj` -> "c\nd\n"); the interception
+    // point steps over the folded line to line 2, so the span reaches the end of
+    // line 2 (`dj` -> "d\n").
     feed_rw(&mut vim, &mut buf, &mut host, &["d", "j"]);
-    assert_eq!(buf.slice(0..buf.len()), "d\n", "dj 的跨度没有用拦截点");
+    assert_eq!(buf.slice(0..buf.len()), "d\n", "the span of dj did not use the interception point");
 
-    // 可视扩展：vj 的选区同样走宿主的行投影
+    // visual extension: the selection of vj also goes through the host's line projection
     let buf2 = BufferView::from_text("a\nb\nc\nd\n");
     let mut host2 = RoHost::new();
     host2.hook = Some(HiddenLineHook { hidden: vec![1] });
     let mut vim2 = VimState::new();
     feed_ro(&mut vim2, &buf2, &mut host2, &["v", "j"]);
-    assert!(matches!(vim2.mode(), Mode::Visual { .. }), "v 之后应在可视模式");
+    assert!(matches!(vim2.mode(), Mode::Visual { .. }), "should be in visual mode after v");
     assert_eq!(
         buf2.offset_to_line(vim2.cursor_offset()),
         2,
-        "可视扩展没有用拦截点"
+        "the visual extension did not use the interception point"
     );
 }
 
@@ -414,18 +423,19 @@ fn without_a_hook_the_builtin_motion_wins() {
 
 #[test]
 fn hook_declines_unknown_motions() {
-    // 只接管 Up/Down，其余交回内建实现
+    // only owns Up/Down; everything else goes back to the built-in implementation
     let buf = BufferView::from_text("alpha beta\n");
     let mut host = RoHost::new();
     host.hook = Some(HiddenLineHook { hidden: vec![] });
     let mut vim = VimState::new();
     feed_ro(&mut vim, &buf, &mut host, &["w"]);
-    assert_eq!(vim.cursor_offset(), 6, "未被接管的 motion 必须走内建实现");
+    assert_eq!(vim.cursor_offset(), 6, "a motion that is not intercepted must use the built-in implementation");
 }
 
-// ---- 4. fuzz：只读模式下写原语一次都不能被调到 -----------------------------
+// ---- 4. fuzz: in read-only mode a write primitive must never be reached ----
 
-/// 写原语即 panic 的缓冲：任何一次到达 `insert_text`/`delete_range` 都红。
+/// A buffer whose write primitives panic: any single arrival at
+/// `insert_text`/`delete_range` goes red.
 struct PanicBuf(String);
 
 impl VimBuffer for PanicBuf {
@@ -487,10 +497,10 @@ impl VimBuffer for PanicBuf {
 
 impl VimBufferMut for PanicBuf {
     fn insert_text(&mut self, offset: usize, text: &str) -> bool {
-        panic!("只读模式下到达了 insert_text({offset}, {text:?})")
+        panic!("reached insert_text({offset}, {text:?}) while in read-only mode")
     }
     fn delete_range(&mut self, range: Range<usize>) -> bool {
-        panic!("只读模式下到达了 delete_range({range:?})")
+        panic!("reached delete_range({range:?}) while in read-only mode")
     }
 }
 
@@ -503,8 +513,9 @@ fn xorshift(state: &mut u64) -> u64 {
     x
 }
 
-/// 不含 `:`（避免 ex 的 `!` 过滤分支真的去 spawn sh）与 `q`/`@` 之外的
-/// 重放炸弹；编辑类键位全部在内，因为这正是要证明"被拦住"的那批。
+/// No `:` (so the ex `!` filter branch never really spawns sh) and no replay
+/// bombs other than `q`/`@`; every editing key is in here, because that is
+/// exactly the batch we want to prove "got stopped".
 const FUZZ_KEYS: &[&str] = &[
     "x", "X", "d", "w", "b", "e", "0", "$", "j", "k", "h", "l", "gg", "G", "dd", "yy", "p", "P",
     "u", "<C-r>", "v", "V", "<C-v>", "o", "O", "i", "a", "A", "I", "R", "s", "S", "C", "D",
@@ -533,12 +544,13 @@ fn fuzz_readonly_never_reaches_a_write_primitive() {
     for seed in 0..seeds {
         let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
         let text = FUZZ_BUFFERS[seed as usize % FUZZ_BUFFERS.len()];
-        // 两条形态并跑，同一个键序喂给两台引擎：
-        //   · A 步 —— `handle_key` + `set_modifiable(false)` + 写原语 panic
-        //     （任何一次漏过 E21 闸门立刻红）；
-        //   · B 步 —— `handle_key_ro`，缓冲以 `&dyn VimBuffer` 进入，
-        //     `VimBufferMut` 根本不在调用路径上。
-        // 两者还必须给出同一个光标：这是"只读管线不改语义"的强断言。
+        // both shapes run side by side, the same key sequence fed to two engines:
+        //   - step A -- `handle_key` + `set_modifiable(false)` + panicking write
+        //     primitives (any single leak past the E21 gate goes red immediately);
+        //   - step B -- `handle_key_ro`, the buffer entering as `&dyn VimBuffer`,
+        //     so `VimBufferMut` is not on the call path at all.
+        // Both must also give the same cursor: that is the strong assertion that
+        // "the read-only pipeline does not change semantics".
         let mut rw_buf = PanicBuf(text.to_owned());
         let mut rw_host = RoHost::new();
         let mut rw = VimState::new();
@@ -568,19 +580,19 @@ fn fuzz_readonly_never_reaches_a_write_primitive() {
                 let len = rw_buf.len();
                 assert!(
                     rw.cursor_offset() <= len,
-                    "seed {seed}: 光标 {} 越界（len {len}），键 {k:?}",
+                    "seed {seed}: cursor {} out of range (len {len}), key {k:?}",
                     rw.cursor_offset()
                 );
                 assert_eq!(
                     rw.cursor_offset(),
                     ro.cursor_offset(),
-                    "seed {seed}: 键 {k:?} 之后 RW/RO 光标不同（{} vs {}）",
+                    "seed {seed}: RW/RO cursors differ after key {k:?} ({} vs {})",
                     rw.cursor_offset(),
                     ro.cursor_offset()
                 );
             }
-            // 两条管线必须收到完全相同的键流——漏给一边一个 Esc 就会让
-            // 它们从下一轮起各走各的
+            // the two pipelines must receive exactly the same key stream -- dropping
+            // one Esc on either side makes them diverge from the next round onwards
             let esc = Key::parse("<Esc>");
             {
                 let mut ctx = Ctx {
@@ -598,18 +610,21 @@ fn fuzz_readonly_never_reaches_a_write_primitive() {
                 ro.handle_key_ro(&mut ctx, esc);
             }
         }
-        assert_eq!(rw_buf.slice(0..rw_buf.len()), text, "seed {seed}: 缓冲被改动了");
+        assert_eq!(rw_buf.slice(0..rw_buf.len()), text, "seed {seed}: the buffer was changed");
         assert_eq!(ro_buf.slice(0..ro_buf.len()), text);
     }
 }
 
-// ---- 插入族角落：入口即拒的偏离语义 --------------------------------------
+// ---- insert-family corners: the divergence of refusing at entry -----------
 
-/// vim 9.1 对 `gI` / visual `I`/`A` / block `I`/`A` 是**静默进入插入**、
-/// 首个落字才 E21；引擎选择在入口拒绝（tck.rs EDIT_KEYS 注释记录的偏离）。
-/// 本测试锁住偏离的两条可观察语义：E21 照报 + 模式不被拖进插入。
-/// （拒绝方向更严是安全的：`CtxRo` 下写原语类型层面不可达；且 visual
-/// 选区保留对只读窗格是更好的体验。）
+/// vim 9.1 **silently enters insert** for `gI` / visual `I`/`A` / block
+/// `I`/`A`, and only reports E21 on the first character landed; the engine
+/// chooses to refuse at the entry (the divergence recorded in the tck.rs
+/// EDIT_KEYS comment). This test locks the two observable semantics of that
+/// divergence: E21 is still reported + the mode never gets dragged into insert.
+/// (Refusing earlier is the safer direction: under `CtxRo` write primitives are
+/// unreachable at the type level, and keeping the visual selection is the
+/// better experience for a read-only pane.)
 #[test]
 fn insert_corners_refuse_at_entry_without_entering_insert() {
     let text = "alpha beta\ngamma delta\n";
@@ -639,19 +654,21 @@ fn insert_corners_refuse_at_entry_without_entering_insert() {
                 vim.handle_key_ro(&mut ctx, Key::parse(k));
             }
         }
-        assert_eq!(vim.mode, *want_mode, "{keys:?}: 模式被拖入了插入");
+        assert_eq!(vim.mode, *want_mode, "{keys:?}: the mode was dragged into insert");
         assert!(
             host.statuses.iter().any(|s| s.contains("E21")),
-            "{keys:?}: 没收到 E21（{:?}）",
+            "{keys:?}: did not receive E21 ({:?})",
             host.statuses
         );
-        assert_eq!(buf.slice(0..buf.len()), text, "{keys:?}: 缓冲被改动");
+        assert_eq!(buf.slice(0..buf.len()), text, "{keys:?}: the buffer was changed");
     }
 }
 
-/// `refresh_highlights_ro`：宿主把引擎下面的文本换掉（多视图布局的窗格
-/// 切换）后，不喂合成键就能按当前缓冲重扫并重发高亮。无活动 pattern 时
-/// 是安静的 no-op（不得清空宿主已有的发布）。
+/// `refresh_highlights_ro`: after the host swaps out the text underneath the
+/// engine (a pane switch in a multi-view layout), the highlights are rescanned
+/// and republished against the current buffer without feeding synthetic keys.
+/// With no active pattern it is a quiet no-op (it must not wipe what the host
+/// already has published).
 #[test]
 fn refresh_highlights_ro_republishes_for_the_new_buffer() {
     let a = BufferView::from_text("alpha\nbeta\ngamma\n");
@@ -659,9 +676,10 @@ fn refresh_highlights_ro_republishes_for_the_new_buffer() {
     let mut host = RoHost::new();
     let mut vim = VimState::new();
     feed_ro(&mut vim, &a, &mut host, &["/", "b", "e", "t", "a", "<CR>"]);
-    assert_eq!(host.highlights, vec![6..10], "缓冲 A 上的 beta 命中");
+    assert_eq!(host.highlights, vec![6..10], "the beta hit on buffer A");
 
-    // 换缓冲（宿主侧 pane switch 的等价物）：同一 pattern 重扫
+    // swap the buffer (the equivalent of a host-side pane switch): the same
+    // pattern is rescanned
     {
         let b: &dyn VimBuffer = &b;
         let mut ctx = CtxRo {
@@ -673,11 +691,11 @@ fn refresh_highlights_ro_republishes_for_the_new_buffer() {
     assert_eq!(
         host.highlights,
         vec![0..4],
-        "重扫必须按新缓冲的坐标发布，而不是沿用旧偏移"
+        "the rescan must publish coordinates of the new buffer, not reuse the old offsets"
     );
-    assert_eq!(a.slice(0..a.len()), "alpha\nbeta\ngamma\n", "刷新不得写缓冲");
+    assert_eq!(a.slice(0..a.len()), "alpha\nbeta\ngamma\n", "refresh must not write the buffer");
 
-    // 无 pattern（新引擎实例）：no-op，不清空宿主状态
+    // no pattern (a fresh engine instance): no-op, does not clear host state
     let mut fresh = RoHost::new();
     fresh.highlights = vec![1..2];
     let mut vim2 = VimState::new();
@@ -692,6 +710,6 @@ fn refresh_highlights_ro_republishes_for_the_new_buffer() {
     assert_eq!(
         fresh.highlights,
         vec![1..2],
-        "没有活动 pattern 时 refresh 必须是 no-op"
+        "refresh must be a no-op when there is no active pattern"
     );
 }

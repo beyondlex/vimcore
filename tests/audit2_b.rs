@@ -1,142 +1,171 @@
-//! audit2_b：第二轮算子/寄存器/粘贴审计（2026-10-07）。
-//! 每个发现一个 `#[test]`，断言 vim 9.1（`-Nu NONE -N -s` typeahead oracle，
-//! 本机实证）的预期结果，因此当前全部失败。
+//! audit2_b: the second-round operator / register / paste audit (2026-10-07).
+//! One `#[test]` per finding, asserting the expected result from vim 9.1
+//! (`-Nu NONE -N -s` typeahead oracle, verified on this machine), so all of them
+//! fail right now.
 //!
-//! 发现清单（严重度 / 编号对应回复正文）：
-//! 1. 空 linewise 寄存器在无尾换行的行上 p/P 少粘一行（P1）
-//! 2. 无尾换行末行上 `p` 吞掉寄存器自带的末尾 `\n`（P1）
-//! 3. 无尾换行末行上 `]p` 把粘贴内容并进当前行（P1）
-//! 4. linewise 寄存器按 count 重复时不补行分隔符（P1）
-//! 5. 大小写算子用全 Unicode 映射（ﬁ→FI、ǰ→J̌、İ→i̇），vim 用简单映射（P2）
-//! 6. `gP` 行级粘贴光标落在粘贴块首行，vim 落在块之后一行（P2）
-//! 7. `"{reg}` 前缀在 operator-pending 下被接受（vim 取消算子并响铃）（P2）
-//! 8. 只读寄存器（`"%` `":` `".` `"/`）可被 `"{reg}` 前缀写入（vim 拒绝）（P2）
-//! 9. `"Add` 后未命名寄存器指向合并结果，vim 指向新追加片段（P3）
-//! 10. `"=` 表达式寄存器缺失（vim 求值并粘出结果）（P2）
+//! Findings list (severity / numbering match the reply body):
+//! 1. an empty linewise register put with p/P pastes one line short on a line
+//!    without a trailing newline (P1)
+//! 2. on a last line without a trailing newline, `p` swallows the trailing `\n`
+//!    the register itself carries (P1)
+//! 3. on a last line without a trailing newline, `]p` merges the pasted content
+//!    into the current line (P1)
+//! 4. repeating a linewise register by a count does not add line separators (P1)
+//! 5. the case operators use the full Unicode mapping (ﬁ→FI, ǰ→J̌, İ→i̇) while vim
+//!    uses the simple mapping (P2)
+//! 6. the `gP` linewise paste cursor lands on the first line of the pasted block;
+//!    vim lands it on the line after the block (P2)
+//! 7. the `"{reg}` prefix is accepted in operator-pending state (vim cancels the
+//!    operator and rings the bell) (P2)
+//! 8. read-only registers (`"%` `":` `".` `"/`) can be written through the
+//!    `"{reg}` prefix (vim refuses) (P2)
+//! 9. after `"Add` the unnamed register points at the merged result; vim points it
+//!    at the newly appended piece (P3)
+//! 10. the `"=` expression register is missing (vim evaluates it and pastes the
+//!     result) (P2)
 
 mod common;
 
 use common::edit;
 use vimcore::VimBuffer;
 
-/// 1.（P1）空 linewise 寄存器 put 少一行。
-/// oracle：空文件（1 空行）上 `yyp` → line("$")==2；`yy3p` → 4；`yyP` → 2。
-/// 引擎：`p`/`P` 分支把寄存器自带的 `\n` 当作「与当前行的分隔」消费掉，
-/// 空寄存器被强制成 `"\n"` 后 strip_suffix 归零，一行都没落进缓冲。
+/// 1. (P1) Putting an empty linewise register loses a line.
+/// oracle: on an empty file (1 empty line) `yyp` -> line("$")==2; `yy3p` -> 4;
+/// `yyP` -> 2.
+/// engine: the `p`/`P` branch consumes the `\n` the register carries as the
+/// "separator from the current line", so once the empty register is forced to
+/// `"\n"` the strip_suffix call zeroes it and not a single line lands in the
+/// buffer.
 #[test]
 fn f1_empty_linewise_put_on_empty_buffer_loses_line() {
-    // yy + p：vim 2 行（"\n\n"），引擎仍是 1 行（"\n"）
+    // yy + p: vim gives 2 lines ("\n\n"), the engine still has 1 ("\n")
     let f = edit("", 0, 0, &["y", "y", "p"]);
-    assert_eq!(f.text(), "\n\n", "yy p 于空缓冲应得到两个空行");
+    assert_eq!(f.text(), "\n\n", "yy p on an empty buffer should give two empty lines");
 
-    // yy + P：vim 2 行
+    // yy + P: vim gives 2 lines
     let f = edit("", 0, 0, &["y", "y", "P"]);
-    assert_eq!(f.text(), "\n\n", "yy P 于空缓冲应得到两个空行");
+    assert_eq!(f.text(), "\n\n", "yy P on an empty buffer should give two empty lines");
 
-    // yy + 3p：vim 1+3=4 行
+    // yy + 3p: vim gives 1+3=4 lines
     let f = edit("", 0, 0, &["y", "y", "3", "p"]);
-    assert_eq!(f.text(), "\n\n\n\n", "yy 3p 于空缓冲应得到四个空行");
+    assert_eq!(f.text(), "\n\n\n\n", "yy 3p on an empty buffer should give four empty lines");
 }
 
-/// 2.（P1）`p` 于无尾换行的末行下粘贴时，把换行结尾的寄存器文本的
-/// 末尾 `\n` strip 掉当分隔符，最后一个被粘行丢了文件末尾换行。
-/// oracle：文件 "a\n" 上 `ddp` + `:wq` → 文件字节 `\na\n`；`dd3p` → `\na\na\na\n`。
-/// 引擎：`"\na"` / `"\na\na\na"`（末行 noeol，静默丢字节）。
+/// 2. (P1) When `p` pastes below a last line without a trailing newline, it
+/// strips the trailing `\n` of a newline-terminated register text and uses it as
+/// the separator, so the last pasted line loses the file-ending newline.
+/// oracle: on a file "a\n", `ddp` + `:wq` -> file bytes `\na\n`; `dd3p` ->
+/// `\na\na\na\n`.
+/// engine: `"\na"` / `"\na\na\na"` (last line noeol, bytes dropped silently).
 #[test]
 fn f2_put_below_noel_line_drops_final_newline() {
     let f = edit("a\n", 0, 0, &["d", "d", "p"]);
-    assert_eq!(f.text(), "\na\n", "dd p 应得 [\"\"] 与 [\"a\"]（末行带 eol）");
+    assert_eq!(f.text(), "\na\n", "dd p should give [\"\"] and [\"a\"] (last line with eol)");
 
     let f = edit("a\n", 0, 0, &["d", "d", "3", "p"]);
-    assert_eq!(f.text(), "\na\na\na\n", "dd 3p 应得 [\"\",a,a,a]");
+    assert_eq!(f.text(), "\na\na\na\n", "dd 3p should give [\"\",a,a,a]");
 }
 
-/// 3.（P1）`]p` 粘贴位置取 `line_range(cur).end.min(len)`——末行无尾换行时
-/// 该点就是缓冲末尾，粘贴文本直接拼进行内。
-/// oracle：noeol 文件 [ab, cd] 上 `yy j ]p` → [ab, cd, ab]。
-/// 引擎："ab\ncdab\n"（"ab" 并进 "cd" 行）。
+/// 3. (P1) The `]p` put position is `line_range(cur).end.min(len)` -- when the
+/// last line has no trailing newline that point is the very end of the buffer,
+/// so the pasted text is appended inside the line.
+/// oracle: on a noeol file [ab, cd], `yy j ]p` -> [ab, cd, ab].
+/// engine: "ab\ncdab\n" ("ab" merged into the "cd" line).
 #[test]
 fn f3_bracket_p_below_noel_line_glues() {
     let f = edit("ab\ncd", 0, 0, &["y", "y", "j", "]", "p"]);
-    // 字节级 oracle 复核（od -c）：vim 写回的文件是 "ab\ncd\nab\n"——
-    // 'fixendofline'（默认开）让保存时补回末尾换行；粘连 "ab\ncdab" 才
-    // 是本项 bug 的本体，行结构 [ab,cd,ab] 为准
-    assert_eq!(f.text(), "ab\ncd\nab\n", "]p 应在末行下开新行粘出 ab");
+    // byte-level oracle cross-check (od -c): the file vim writes back is
+    // "ab\ncd\nab\n" -- 'fixendofline' (on by default) restores the trailing
+    // newline on save; the gluing "ab\ncdab" is the actual bug here, so the line
+    // structure [ab,cd,ab] is what we assert on
+    assert_eq!(f.text(), "ab\ncd\nab\n", "]p should open a new line below the last line and paste ab there");
 }
 
-/// 4.（P1）linewise 寄存器按 count 重复用 `text.repeat(count)`——从 noeol
-/// 末行 yank 出的 linewise 文本没有自带的 `\n`，重复后各行水平粘连。
-/// oracle：noeol 文件 "abc" 上 `yy3p` → [abc,abc,abc,abc]。
-/// 引擎："abc\nabcabcabc"。
+/// 4. (P1) Repeating a linewise register by a count uses `text.repeat(count)` --
+/// linewise text yanked from a noeol last line carries no `\n` of its own, so
+/// after the repetition the lines glue together horizontally.
+/// oracle: on a noeol file "abc", `yy3p` -> [abc,abc,abc,abc].
+/// engine: "abc\nabcabcabc".
 #[test]
 fn f4_linewise_count_repeat_glues_without_separators() {
     let f = edit("abc", 0, 0, &["y", "y", "3", "p"]);
-    // 字节级 oracle 复核（od -c）：vim 写回 "abc\nabc\nabc\nabc\n"
-    // （fixendofline 补末尾换行）；四行独立、无水平粘连为断言本体
-    assert_eq!(f.text(), "abc\nabc\nabc\nabc\n", "3p 应粘出三个独立行");
+    // byte-level oracle cross-check (od -c): vim writes back
+    // "abc\nabc\nabc\nabc\n" (fixendofline adds the trailing newline); the four
+    // independent lines with no horizontal gluing are the assertion body
+    assert_eq!(f.text(), "abc\nabc\nabc\nabc\n", "3p should paste three separate lines");
 }
 
-/// 5.（P2）大小写算子走 Rust 的 full Unicode 映射；vim 9.1 用简单映射，
-/// 无简单映射的字符保持不变：
-///   `~` 于 ﬁ（U+FB01）→ vim 不变 "ﬁx"，引擎 "FIx"；
-///   `gul` 于 İ（U+0130）→ vim "ix"（普通 i），引擎 "i\u{307}x"；
-///   `~` 于 ǰ（U+01F0）→ vim 不变 "ǰx"，引擎 "J\u{30c}x"。
-/// （oracle：三例 getline(1) 逐一实证。ß→ẞ 已单列特判，本项是其余同族。）
+/// 5. (P2) The case operators go through Rust's full Unicode mapping; vim 9.1
+/// uses the simple mapping and leaves characters without a simple mapping
+/// unchanged:
+///   `~` on ﬁ (U+FB01) -> vim keeps "ﬁx" unchanged, engine gives "FIx";
+///   `gul` on İ (U+0130) -> vim "ix" (a plain i), engine "i\u{307}x";
+///   `~` on ǰ (U+01F0) -> vim keeps "ǰx" unchanged, engine "J\u{30c}x".
+/// (oracle: all three verified one by one with getline(1). ß→ẞ already has its
+/// own special case; this item is the rest of the same family.)
 #[test]
 fn f5_case_operators_full_vs_simple_unicode() {
     let f = edit("\u{fb01}x", 0, 0, &["~"]);
-    assert_eq!(f.text(), "\u{fb01}x", "~ 不得展开连字 ﬁ");
+    assert_eq!(f.text(), "\u{fb01}x", "~ must not expand the ligature ﬁ");
 
     let f = edit("\u{0130}x", 0, 0, &["g", "u", "l"]);
-    assert_eq!(f.text(), "ix", "gu 于 İ 应得普通 i，不带组合点");
+    assert_eq!(f.text(), "ix", "gu on İ should give a plain i, with no combining dot");
 
     let f = edit("\u{01f0}x", 0, 0, &["~"]);
-    assert_eq!(f.text(), "\u{01f0}x", "~ 不得把 ǰ 拆成 J+组合符");
+    assert_eq!(f.text(), "\u{01f0}x", "~ must not split ǰ into J + a combining mark");
 }
 
-/// 6.（P2）`gP` 行级粘贴光标：vim 落在「粘贴文本之后」= 粘贴块的下一行
-/// （oracle：[aaa,bbb,ccc] 上 `jyyGgP` → cursor line 4；2 行块 → line 5）。
-/// 引擎落在粘贴块首行（line 3，1-based）。
+/// 6. (P2) the `gP` linewise paste cursor: vim puts it "after the pasted text",
+/// i.e. on the line following the pasted block (oracle: on [aaa,bbb,ccc],
+/// `jyyGgP` -> cursor line 4; a 2-line block -> line 5).
+/// The engine puts it on the first line of the pasted block (line 3, 1-based).
 #[test]
 fn f6_gp_linewise_cursor_after_block() {
     let f = edit("aaa\nbbb\nccc\n", 1, 0, &["y", "y", "G", "g", "P"]);
-    // 粘贴后缓冲 [aaa,bbb,bbb,ccc]；vim 光标在 1-based 第 4 行（块之后）
-    assert_eq!(f.line(), 3, "gP 光标应落在粘贴块之后的行（0-based 3）");
+    // after the paste the buffer is [aaa,bbb,bbb,ccc]; vim's cursor is on the
+    // 1-based line 4 (after the block)
+    assert_eq!(f.line(), 3, "the gP cursor should land on the line after the pasted block (0-based 3)");
 }
 
-/// 7.（P2）operator-pending 下不接受 `"{reg}` 前缀。
-/// oracle："foo bar" 上 `d"aw<Esc>` → 算子被 `"` 取消（响铃），随后 `a` 进入
-/// 插入模式、`w` 被打字 → 缓冲 "fwoo bar"，寄存器 a 保持为空。
-/// 引擎：把 "foo " 删进寄存器 a，缓冲变 "bar"。
+/// 7. (P2) the `"{reg}` prefix is not accepted in operator-pending state.
+/// oracle: on "foo bar", `d"aw<Esc>` -> the operator is cancelled by `"` (bell),
+/// then `a` enters insert mode and `w` is typed -> buffer "fwoo bar", register a
+/// stays empty.
+/// Engine: deletes "foo " into register a, turning the buffer into "bar".
 #[test]
 fn f7_register_prefix_rejected_under_operator() {
-    // oracle 实证：vim 在算子待定遇 `"` 即响铃取消算子，随后 `a` 进插入、
-    // `w` 落成打字（"fwoo bar"）。本夹具的 feed 不模拟插入态打字（按合同
-    // 交宿主放置），故断言钉 oracle 的可观测本质：缓冲不被删、寄存器 a
-    // 不被写入（"ap 粘不出删除内容）、响铃。
+    // oracle evidence: vim rings the bell and cancels the operator when it meets
+    // `"` in operator-pending state, then `a` enters insert and `w` lands as
+    // typed text ("fwoo bar"). This fixture's feed does not simulate typing in
+    // insert mode (that is handed to the host per the contract), so the
+    // assertion pins the observable essence of the oracle: the buffer is not
+    // deleted, register a is not written (so "ap cannot paste any deleted
+    // content), and the bell rings.
     let mut f = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
-    assert_eq!(f.text(), "foo bar", "d\"aw 不得当作删除执行");
-    assert!(f.host.bells >= 1, "算子待定遇 \" 应响铃：{:?}", f.host.bells);
+    assert_eq!(f.text(), "foo bar", "d\"aw must not be executed as a delete");
+    assert!(f.host.bells >= 1, "meeting \" in operator-pending state should ring the bell: {:?}", f.host.bells);
     let mut f2 = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
     f2.feed(["\"", "a", "p"]);
-    assert_eq!(f2.text(), "foo bar", "寄存器 a 不得被写入（\"ap 粘不出删除内容）");
+    assert_eq!(f2.text(), "foo bar", "register a must not be written (\"ap pastes no deleted content)");
 }
 
-/// 8.（P2）只读寄存器不得经 `"{reg}` 前缀写入。
-/// oracle（逐一实证）：
-///   `"%dd` → 拒绝，缓冲保持 "abc"（1 行）；
-///   `":dd`、`".dd`、`"/dd` → 同样拒绝（`.dd` 后 getreg('.') 仍是旧插入文本）。
-/// 引擎：`"%dd` 照删不误（缓冲变空），还把删除内容塞进名为 % 的槽。
+/// 8. (P2) read-only registers must not be written through the `"{reg}` prefix.
+/// oracle (verified one by one):
+///   `"%dd` -> refused, buffer stays "abc" (1 line);
+///   `":dd`, `".dd`, `"/dd` -> refused the same way (after `.dd`, getreg('.') is
+///   still the old inserted text).
+/// Engine: `"%dd` deletes as usual (the buffer becomes empty) and even stuffs
+/// the deleted content into a slot named %.
 #[test]
 fn f8_readonly_registers_reject_prefix_write() {
     let f = edit("abc\n", 0, 0, &["\"", "%", "d", "d"]);
-    assert_eq!(f.text(), "abc\n", "\"%dd 必须被拒绝，缓冲不变");
+    assert_eq!(f.text(), "abc\n", "\"%dd must be refused, buffer unchanged");
 }
 
-/// 9.（P3）`"Add` 之后未命名寄存器的内容。
-/// oracle：[ab,cd,ef] 上 `"ayy` `j` `"Add` → getreg('"') == "ef\n"（新删除的
-/// 片段），寄存器 a == "ab\ncd\n"（合并）。引擎把未命名寄存器指向合并后的
-/// 整体，`p` 会粘出两行。
+/// 9. (P3) the content of the unnamed register after `"Add`.
+/// oracle: on [ab,cd,ef], `"ayy` `j` `"Add` -> getreg('"') == "ef\n" (the newly
+/// deleted piece), register a == "ab\ncd\n" (merged). The engine points the
+/// unnamed register at the whole merged result, so `p` pastes two lines.
 #[test]
 fn f9_uppercase_append_unnamed_gets_new_piece() {
     let f = edit("ab\ncd\nef\n", 1, 0, &[
@@ -145,15 +174,16 @@ fn f9_uppercase_append_unnamed_gets_new_piece() {
     assert_eq!(
         f.text(),
         "ab\ncd\nef\n",
-        "p 应只粘出新追加的 ef 一行（未命名=新片段，非合并体）"
+        "p should paste only the newly appended ef line (unnamed = the new piece, not the merged body)"
     );
 }
 
-/// 10.（P2）`"=` 表达式寄存器缺失。
-/// oracle："ab" 上 `"=2+3<CR>p` → vim 弹出 `=` 提示行求值 2+3，p 粘出 "5"
-/// → 缓冲 "a5b"。引擎无表达式寄存器，`p` 落空（响铃），缓冲不变。
+/// 10. (P2) the `"=` expression register is missing.
+/// oracle: on "ab", `"=2+3<CR>p` -> vim pops the `=` prompt line, evaluates 2+3,
+/// and p pastes "5" -> buffer "a5b". The engine has no expression register, so
+/// `p` lands on nothing (bell) and the buffer is unchanged.
 #[test]
 fn f10_expression_register_put() {
     let f = edit("ab", 0, 0, &["\"", "=", "2", "+", "3", "<CR>", "p"]);
-    assert_eq!(f.text(), "a5b", "\"=2+3<CR>p 应粘出求值结果 5");
+    assert_eq!(f.text(), "a5b", "\"=2+3<CR>p should paste the evaluation result 5");
 }
