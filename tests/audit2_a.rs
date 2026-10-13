@@ -1,186 +1,205 @@
-//! audit2_a：normal-mode motions / counts / text objects 独立审计（2026-10-07）。
+//! audit2_a: independent audit (2026-10-07) of normal-mode motions / counts / text objects.
 //!
-//! 每个测试对应一个新发现，断言的是 **vim 9.1（`-Nu NONE -N -s` typeahead
-//! 实证）的期望结果**，因此在当前工作树上应当失败。oracle 探针逐条用
-//! `printf … > /tmp/*.txt; vim -Nu NONE -N -i NONE -s …; cat 输出` 复核，
-//! 证据写在各测试的注释里（1-based col 已换算回 0-based 字节偏移）。
+//! Each test corresponds to a newly discovered finding and asserts the **expected
+//! result of vim 9.1 (empirically verified via `-Nu NONE -N -s` typeahead)**, so it
+//! should fail on the current working tree. Each oracle probe was re-checked with
+//! `printf … > /tmp/*.txt; vim -Nu NONE -N -i NONE -s …; cat output`; the evidence is
+//! written in each test's comments (1-based col already converted back to 0-based
+//! byte offsets).
 
 mod common;
 
 use common::edit;
 use vimcore::buffer::VimBuffer;
 
-// ---------------------------------------------------------------- 1. `|` 与 tab
+// ---------------------------------------------------------------- 1. `|` and tab
 
-/// **发现 1（P1）**：`{count}|` 的列号把 TAB 当 1 个显示格；vim 按 'ts'=8 展开。
-/// oracle：`ab<Tab>c` 上 `5|` → col=3（停在 TAB 上，vcol 5 落在 tab 的 3..10
-/// 格区间内）；引擎落到 offset 3（'c'，第 4 列）。
+/// **Finding 1 (P1)**: `{count}|` treats TAB as 1 display cell when counting
+/// columns; vim expands it by 'ts'=8.
+/// oracle: on `ab<Tab>c`, `5|` → col=3 (stops on the TAB, vcol 5 falls inside the
+/// tab's cells 3..10); the engine lands on offset 3 ('c', column 4).
 #[test]
 fn pipe_column_ignores_tabstop() {
-    // oracle 采样时 ts=8；引擎默认 ts=4（NOTES 有意分歧），先钉住
+    // oracle sampling used ts=8; the engine defaults to ts=4 (deliberate NOTES
+    // divergence), so pin it first
     let f = edit("ab\tc", 0, 0, &[":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>", "5", "|"]);
-    assert_eq!(f.cursor(), 2, "vim 9.1: 5| 停在 TAB（col 3 1-based）");
+    assert_eq!(f.cursor(), 2, "vim 9.1: 5| stops on the TAB (col 3, 1-based)");
 }
 
-// ---------------------------------------------------------------- 2. `d2aw` 于空行
+// ---------------------------------------------------------------- 2. `d2aw` on an empty line
 
-/// **发现 2（P1）**：文本对象 count 的重复扫描在空行处断链（probe 落回本行
-/// 尾词，range 无进展即 break）。vim 把空行本身当一个 word，2aw 会穿过它。
-/// oracle：`foo␊␊bar␊` 光标 foo 上 `d2aw` → 缓冲全空（n=1，l1 为空）；
-/// 引擎只剩 `\n\nbar\n`。
+/// **Finding 2 (P1)**: the repeated scan for a text-object count breaks its chain at
+/// an empty line (the probe falls back to the last word of the current line and
+/// breaks once the range makes no progress). vim treats the empty line itself as a
+/// word, so 2aw passes through it.
+/// oracle: cursor on foo, `foo␊␊bar␊` with `d2aw` → buffer completely empty (n=1,
+/// l1 empty); the engine leaves only `\n\nbar\n`.
 #[test]
 fn d2aw_count_stops_at_empty_line() {
     let f = edit("foo\n\nbar\n", 0, 0, &["d", "2", "a", "w"]);
     assert_eq!(
         f.buf.line_count(),
         1,
-        "vim 9.1: d2aw 穿过空行删掉 foo 与 bar，缓冲只剩 1 个空行"
+        "vim 9.1: d2aw crosses the empty line and deletes foo and bar, leaving one empty line"
     );
     assert_eq!(f.buf.line_content(0), "");
 }
 
-// ------------------------------------- 3. `daw` 于行尾空白 + 空行 + 下一词
+// ------------------------------------- 3. `daw` at trailing whitespace + empty line + next word
 
-/// **发现 3（P1）**：光标在行尾空白上时 `aw` 的空白+下一词搜索越过空行吞掉
-/// 下面的词；vim 在空行（本身是一个 word）处停住，只删 `   \n`。
-/// oracle：`a   ␊␊b␊` 光标在最后一个空格 `daw` → `a␊b␊`（n=2）；
-/// 引擎得 `a`（b 也被吞，还丢了行结构）。
+/// **Finding 3 (P1)**: when the cursor sits on trailing whitespace, `aw`'s
+/// blank-run+next-word search skips over the empty line and swallows the word below;
+/// vim stops at the empty line (itself a word) and deletes only `   \n`.
+/// oracle: cursor on the last space, `a   ␊␊b␊` with `daw` → `a␊b␊` (n=2);
+/// the engine yields `a` (b is swallowed too, losing the line structure).
 #[test]
 fn daw_after_trailing_ws_eats_next_word_across_empty_line() {
     let f = edit("a   \n\nb\n", 0, 3, &["d", "a", "w"]);
-    assert_eq!(f.text(), "a\nb\n", "vim 9.1: 只删 '   \\n'，保留空行与 b");
+    assert_eq!(f.text(), "a\nb\n", "vim 9.1: delete only '   \\n', keep the empty line and b");
 }
 
-// ------------------------------------ 4. `daw` 于纯空白行 + 空行 + 下一词
+// ------------------------------------ 4. `daw` on a whitespace-only line + empty line + next word
 
-/// **发现 4（P1）**：光标在纯空白行（含 tab 行）上时同样吞掉空行之后的词。
-/// oracle：`foo␊   ␊␊bar␊` 光标在空白行 `daw` → `foo␊bar␊`（n=2，
-/// 删的是 `   \n\n`）；tab 版 `foo␊\t␊␊bar␊` → `foo␊bar␊`。引擎得 `foo␊`
-/// （bar 被吞）。
+/// **Finding 4 (P1)**: when the cursor is on a whitespace-only line (including a
+/// tab-only line), it likewise swallows the word after the empty line.
+/// oracle: cursor on the whitespace line, `foo␊   ␊␊bar␊` with `daw` → `foo␊bar␊`
+/// (n=2, deleting `   \n\n`); the tab version `foo␊\t␊␊bar␊` → `foo␊bar␊`.
+/// The engine yields `foo␊` (bar swallowed).
 #[test]
 fn daw_on_ws_only_line_eats_next_word_across_empty_line() {
     let f = edit("foo\n   \n\nbar\n", 1, 0, &["d", "a", "w"]);
-    assert_eq!(f.text(), "foo\nbar\n", "vim 9.1: 删 '   \\n\\n'，bar 保留");
+    assert_eq!(f.text(), "foo\nbar\n", "vim 9.1: delete '   \\n\\n', keep bar");
 }
 
-// --------------------------------------- 5. `daw` 于无下一词的空白（EOF 方向）
+// --------------------------------------- 5. `daw` on whitespace with no next word (toward EOF)
 
-/// **发现 5a（P1）**：光标在行尾空白、其后没有任何 word（直接到 EOF/空行
-/// 尾部）时 vim 的 `daw` 是**无操作**（找不到「下一个词」，对象失败）；引擎
-/// 的 blank_run_plus_next_word 把 `\n` 当普通空白续扫，把空白连同换行删掉。
-/// oracle：`a   ␊` 光标在空格上 `daw` → 缓冲原样（n=1，l1="a   "）；
-/// 引擎得 `a`（连换行都没了）。
+/// **Finding 5a (P1)**: when the cursor is on trailing whitespace with no word after
+/// it (straight to EOF / end of the empty line), vim's `daw` is a **no-op** (it cannot
+/// find the "next word", so the object fails); the engine's blank_run_plus_next_word
+/// keeps scanning treating `\n` as ordinary blank and deletes the blanks together with
+/// the newline.
+/// oracle: cursor on the space, `a   ␊` with `daw` → buffer unchanged (n=1,
+/// l1="a   "); the engine yields `a` (even the newline is gone).
 #[test]
 fn daw_trailing_ws_without_next_word_is_noop() {
     let f = edit("a   \n", 0, 3, &["d", "a", "w"]);
-    assert_eq!(f.text(), "a   \n", "vim 9.1: 无下一词时 daw 不动");
+    assert_eq!(f.text(), "a   \n", "vim 9.1: daw does nothing when there is no next word");
 }
 
-/// **发现 5b（P1）**：纯空白**末行**（无换行结尾）同理。oracle：
-/// `foo␊   ` 光标在空白行 `daw` → 原样（n=2，l1=foo l2="   "）；引擎得
-/// `foo␊`（删掉了三个空格）。
+/// **Finding 5b (P1)**: the same applies to a whitespace-only **last line** (no
+/// trailing newline). oracle: cursor on the whitespace line, `foo␊   ` with `daw` →
+/// unchanged (n=2, l1=foo l2="   "); the engine yields `foo␊` (the three spaces deleted).
 #[test]
 fn daw_ws_only_last_line_without_next_word_is_noop() {
     let f = edit("foo\n   ", 1, 0, &["d", "a", "w"]);
-    assert_eq!(f.text(), "foo\n   ", "vim 9.1: 无下一词时 daw 不动");
+    assert_eq!(f.text(), "foo\n   ", "vim 9.1: daw does nothing when there is no next word");
 }
 
-// ---------------------------------------------------------------- 6. `cw` 与 U+3000
+// ---------------------------------------------------------------- 6. `cw` and U+3000
 
-/// **发现 6（P1）**：`cw` 的「不含尾随空白」特例只剥 `' '`/`'\t'`；vim 的 cw
-/// 等价 ce——**任何**尾随空白都不动。全角空格 U+3000 被引擎当词后空白删掉。
-/// oracle：`a　b␊`（U+3000）`cwX<Esc>` → `X　b`；引擎得 `Xb`。
+/// **Finding 6 (P1)**: `cw`'s "excludes trailing whitespace" special case only
+/// strips `' '`/`'\t'`; vim's cw is equivalent to ce — **no** trailing whitespace is
+/// touched. The engine treats the ideographic space U+3000 as post-word blank and
+/// deletes it.
+/// oracle: `a　b␊` (U+3000) with `cwX<Esc>` → `X　b`; the engine yields `Xb`.
 #[test]
 fn cw_keeps_wide_space_vim_ce_semantics() {
     let mut f = edit("a\u{3000}b\n", 0, 0, &["c", "w"]);
     f.type_text("X");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "X\u{3000}b\n", "vim 9.1: cw=ce，U+3000 保留");
+    assert_eq!(f.text(), "X\u{3000}b\n", "vim 9.1: cw=ce, keep U+3000");
 }
 
-// ---------------------------------------------------------------- 7. tag 大小写
+// ---------------------------------------------------------------- 7. tag case
 
-/// **发现 7a（P1）**：`it`/`at` 的开闭标签名匹配是大小写敏感的（`rposition`
-/// 按名字相等）；vim 9.1 对 HTML 标签大小写不敏感。
-/// oracle：`<P>x</p>␊` 光标在 x `dit` → `<P></p>`；引擎原样不动。
+/// **Finding 7a (P1)**: `it`/`at` match open/close tag names case-sensitively
+/// (`rposition` compares by name equality); vim 9.1 is case-insensitive for HTML tags.
+/// oracle: cursor on x, `<P>x</p>␊` with `dit` → `<P></p>`; the engine leaves it
+/// unchanged.
 #[test]
 fn tag_object_matches_open_tag_case_insensitively() {
     let f = edit("<P>x</p>\n", 0, 3, &["d", "i", "t"]);
-    assert_eq!(f.text(), "<P></p>\n", "vim 9.1: P/p 视为同名，删出 x");
+    assert_eq!(f.text(), "<P></p>\n", "vim 9.1: P/p count as the same name, x deleted");
 }
 
-/// **发现 7b（P1）**：反方向同理（小写开、大写闭）。oracle：
-/// `<p>x</P>␊` `dit` → `<p></P>`；引擎原样不动。
+/// **Finding 7b (P1)**: the reverse direction likewise (lowercase open, uppercase
+/// close). oracle: `<p>x</P>␊` with `dit` → `<p></P>`; the engine leaves it unchanged.
 #[test]
 fn tag_object_matches_close_tag_case_insensitively() {
     let f = edit("<p>x</P>\n", 0, 3, &["d", "i", "t"]);
-    assert_eq!(f.text(), "<p></P>\n", "vim 9.1: p/P 视为同名，删出 x");
+    assert_eq!(f.text(), "<p></P>\n", "vim 9.1: p/P count as the same name, x deleted");
 }
 
 // ---------------------------------------------------------------- 8. section motions
 
-/// **发现 8（P2）**：`]]`/`[[`（及 `][`/`[]`/`]m`/`[m` 族）完全未绑定——
-/// tables.rs 无行，按下响铃原地不动。vim 9.1 内建：`]]` 到下一个第一列
-/// `{`/`}`，`[[` 到上一个第一列 `{`（`}` 在第一列不拦 `[[`）。
-/// oracle：`foo␊{␊bar␊}␊baz␊` 上 `]]` → line 2（`{` 行）；`G[[` → line 2。
+/// **Finding 8 (P2)**: `]]`/`[[` (and the `][`/`[]`/`]m`/`[m` family) are entirely
+/// unbound — no rows in tables.rs; pressing them rings the bell and stays in place.
+/// vim 9.1 has them built in: `]]` goes to the next `{`/`}` in column 1, `[[` to the
+/// previous `{` in column 1 (a `}` in column 1 does not block `[[`).
+/// oracle: on `foo␊{␊bar␊}␊baz␊`, `]]` → line 2 (the `{` line); `G[[` → line 2.
 #[test]
 fn section_motions_brace_column_unbound() {
     let f = edit("foo\n{\nbar\n}\nbaz\n", 0, 0, &["]", "]"]);
-    assert_eq!(f.line(), 1, "vim 9.1: ]] 落到第一列开花括号的行");
+    assert_eq!(f.line(), 1, "vim 9.1: ]] lands on the line with an opening brace in column 1");
     let f = edit("foo\n{\nbar\n}\nbaz\n", 4, 0, &["[", "["]);
-    assert_eq!(f.line(), 1, "vim 9.1: [[ 落到第一列开花括号的行");
+    assert_eq!(f.line(), 1, "vim 9.1: [[ lands on the line with an opening brace in column 1");
 }
 
-// ------------------------------------------- 9. `d2aw` 的 count 在换行处断链
+// ------------------------------------------- 9. `d2aw` count chain breaks at the line break
 
-/// **发现 9a（P1）**：首个对象是行尾词时，重复扫描从 span.end（换行位）落回
-/// 本行末词、range 无进展即 break——count 静默失效。vim 的第 2 个 aw 跨过
-/// 换行取下一行的词。
-/// oracle：`ab cd␊ef gh␊` 光标在 cd 前的空格上 `d2aw` → `abgh`（n=1，
-/// 删了 ` cd\nef `）；引擎得 `ab␊ef gh␊`（只删 ` cd`）。
+/// **Finding 9a (P1)**: when the first object is the last word on the line, the
+/// repeated scan falls back from span.end (the newline position) to the last word of
+/// the current line and breaks once the range makes no progress — the count silently
+/// fails. vim's second aw crosses the newline and takes the word on the next line.
+/// oracle: cursor on the space before cd, `ab cd␊ef gh␊` with `d2aw` → `abgh` (n=1,
+/// ` cd\nef ` deleted); the engine yields `ab␊ef gh␊` (only ` cd` deleted).
 #[test]
 fn d2aw_count_stops_at_line_break() {
     let f = edit("ab cd\nef gh\n", 0, 2, &["d", "2", "a", "w"]);
-    assert_eq!(f.buf.line_count(), 1, "vim 9.1: 两行并成一行 abgh");
+    assert_eq!(f.buf.line_count(), 1, "vim 9.1: the two lines merge into one line abgh");
     assert_eq!(f.buf.line_content(0), "abgh");
 }
 
-/// **发现 9b（P1）**：标点词变体。oracle：`ab!␊cd␊` 光标在 `!` 上
-/// `2daw` → `ab`（n=1，删了 `!\ncd`）；引擎得 `ab␊cd␊`（只删 `!`）。
+/// **Finding 9b (P1)**: punctuation-word variant. oracle: cursor on `!`, `ab!␊cd␊`
+/// with `2daw` → `ab` (n=1, `!\ncd` deleted); the engine yields `ab␊cd␊` (only `!`
+/// deleted).
 #[test]
 fn d2aw_punct_line_final_stops_at_line_break() {
     let f = edit("ab!\ncd\n", 0, 2, &["2", "d", "a", "w"]);
-    assert_eq!(f.buf.line_count(), 1, "vim 9.1: 只剩一行 ab");
+    assert_eq!(f.buf.line_count(), 1, "vim 9.1: only one line ab left");
     assert_eq!(f.buf.line_content(0), "ab");
 }
 
-// ---------------------------------------------- 10. `2cw` 跨空行
+// ---------------------------------------------- 10. `2cw` across an empty line
 
-/// **发现 10（P1）**：`2cw` 的落点在第 2 行第 1 列（空行后）时，span 被下行
-/// 的「列 1 落点」规则钳回本行行尾，cw 剥尾随空白后只剩光标词；vim 的 2cw
-/// 一路改到第 2 个词的**末尾**（`b \n\ncd` 整段删掉）。
-/// oracle：`ab ␊␊cd␊` 光标在 b 上 `2cwX<Esc>` → `aX`（n=1）；引擎得
-/// `aX ␊␊cd␊`。
+/// **Finding 10 (P1)**: when `2cw`'s landing position is line 2 column 1 (after the
+/// empty line), the span is clamped back to the end of the current line by the next
+/// line's "column-1 landing" rule, so after cw strips trailing whitespace only the
+/// cursor word remains; vim's 2cw changes all the way to the **end** of the second
+/// word (deleting the whole stretch `b \n\ncd`).
+/// oracle: cursor on b, `ab ␊␊cd␊` with `2cwX<Esc>` → `aX` (n=1); the engine yields
+/// `aX ␊␊cd␊`.
 #[test]
 fn c2w_across_empty_line_reaches_last_word() {
     let mut f = edit("ab \n\ncd\n", 0, 1, &["2", "c", "w"]);
     f.type_text("X");
     f.feed(["<Esc>"]);
-    assert_eq!(f.buf.line_count(), 1, "vim 9.1: 改写吞掉空行与 cd");
+    assert_eq!(f.buf.line_count(), 1, "vim 9.1: the change swallows the empty line and cd");
     assert_eq!(f.buf.line_content(0), "aX");
 }
 
-// --------------------------------------------------- 11. `j` 与 tab 的列保持
+// --------------------------------------------------- 11. `j` and column preservation with tab
 
-/// **发现 11（P1）**：`j`/`k`（及 `<C-d>`/`<C-u>`/`<C-f>`/`<C-b>`）的列保持
-/// 用 unicode-width，TAB 记 1 格；vim 保持的是**虚拟列**（'ts'=8 展开）。
-/// oracle：`a<Tab>b␊0123456789x␊` 上 `w`（col 3，virtcol 9）再 `j` →
-/// line 2 col 9（'8'）；引擎落在 '2'（col 3）。
+/// **Finding 11 (P1)**: column preservation for `j`/`k` (and `<C-d>`/`<C-u>`/`<C-f>`/
+/// `<C-b>`) uses unicode-width, counting TAB as 1 cell; vim preserves the **virtual
+/// column** (expanded with 'ts'=8).
+/// oracle: on `a<Tab>b␊0123456789x␊`, `w` (col 3, virtcol 9) then `j` → line 2 col 9
+/// ('8'); the engine lands on '2' (col 3).
 #[test]
 fn j_preserves_virtcol_with_tabstop() {
-    // 同上：oracle 的 ts=8 前提先钉住
+    // Same as above: pin the oracle's ts=8 premise first
     let f = edit("a\tb\n0123456789x\n", 0, 2, &[
         ":", "s", "e", "t", " ", "t", "s", "=", "8", "<CR>", "j",
     ]);
-    assert_eq!(f.cursor(), 12, "vim 9.1: j 保持 virtcol 9 → 第 9 列 '8'");
+    assert_eq!(f.cursor(), 12, "vim 9.1: j keeps virtcol 9 → column 9, the '8'");
 }

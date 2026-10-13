@@ -1,35 +1,42 @@
-//! audit8_a：Ex / `:s` / `:set` / insert 缩进的对拍回归（独立审计·域 A）
+//! audit8_a: parity regression for Ex / `:s` / `:set` / insert indent (independent audit, domain A)
 //!
-//! 用例来自黑盒对拍：同一（初始缓冲, 按键）喂给引擎与本机 `/usr/bin/vim`
-//! （9.1 patches 1-1752，`-Nu NONE -N -i NONE -n`，前置 `:set ic scs ts=4
-//! tw=78 et` 把引擎有意分歧的默认值钉成 oracle 前提），`:wq` 写回后逐字节
-//! 比较缓冲文本。下表 `want` 就是 vim 侧的实测值。
+//! Cases come from black-box parity: the same (initial buffer, keystrokes) is fed to
+//! the engine and to the local `/usr/bin/vim` (9.1 patches 1-1752,
+//! `-Nu NONE -N -i NONE -n`, with a leading `:set ic scs ts=4 tw=78 et` to pin the
+//! engine's deliberately divergent defaults into oracle premises); after `:wq` writes
+//! the buffer back, the text is compared byte by byte. The `want` column below is
+//! exactly vim's measured result.
 //!
-//! 按键按**原始字节**存（`<CR>` 已展开成 `\r`、`<C-h>` 成 `\u{8}`），
-//! [`feed`] 把字节还原成引擎键名——不再造一层 DSL 往返。表内没有
-//! 插入模式下打字的用例：那种字符是宿主的文本通道（引擎只把它们
-//! 收进 `pending_unknown_chars` 等宿主落地），要写就得像真宿主那样
-//! 调 `type_text`（本轮 `0<C-d>` 用例的教训）。
+//! Keys are stored as **raw bytes** (`<CR>` already expanded to `\r`, `<C-h>` to
+//! `\u{8}`); [`feed`] turns the bytes back into engine key names — no extra DSL
+//! round-trip. The table has no case that types text in insert mode: those characters
+//! are the host's text channel (the engine only collects them into
+//! `pending_unknown_chars` waiting for the host to settle them); writing one would
+//! require calling `type_text` like a real host (the lesson of this round's `0<C-d>`
+//! case).
 //!
-//! 161 例里 10 例是已知分歧，不入表：`:g`/`:v`/`:normal`（分歧账目 #12）、
-//! `:copy`/`:move`（`:t`/`:co`/`:m` 整族未实现，红探针在 `tests/audit6_a.rs`
-//! 的 `copy_command_missing`/`move_command_missing`）、`:<C-h>d`（空命令行
-//! 退格，`-s` 与 expect PTY 两条通道给出互相矛盾的 vim 结果，见 NOTES 挂账）。
+//! Of the 161 cases, 10 are known divergences and stay out of the table: `:g`/`:v`/
+//! `:normal` (divergence ledger #12), `:copy`/`:move` (the whole `:t`/`:co`/`:m` family
+//! unimplemented; red probes in `tests/audit6_a.rs`'s `copy_command_missing`/
+//! `move_command_missing`), `:<C-h>d` (backspace on an empty command line — the `-s`
+//! and expect PTY channels give contradictory vim results; see the NOTES open-items
+//! ledger).
 //!
-//! 4 例（`cmd_u`/`range_pct`/`range_dot_dollar`/`hist_prefix`）两端文本都是
-//! 空串——这是 `-s` 通道 timeout 假阴性的典型形状，已用 expect PTY 复核确认
-//! 命令真的执行了（oracle 纪律：响铃/方向键类走 PTY）。
+//! For 4 cases (`cmd_u`/`range_pct`/`range_dot_dollar`/`hist_prefix`) both sides' text
+//! is the empty string — the classic shape of a false negative from `-s` channel
+//! timeout, already re-verified via expect PTY to confirm the command really executed
+//! (oracle discipline: bell/arrow-key classes go through PTY).
 
 mod common;
 use common::Fixture;
 
-/// 原始按键字节 → 引擎键名回灌（与对拍脚本喂 vim 的字节流同源）。
+/// Raw key bytes → re-fed as engine key names (same byte stream the parity script feeds vim).
 fn feed(f: &mut Fixture, keys: &str) {
     let bytes = keys.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        // 方向键是 ESC + [ + 字母，必须先于裸 ESC 判定
+        // arrow keys are ESC + [ + letter and must be checked before a bare ESC
         let arrow = match bytes.get(i..i + 3) {
             Some(b"\x1b[A") => Some(("<Up>", 3)),
             Some(b"\x1b[B") => Some(("<Down>", 3)),
@@ -52,8 +59,9 @@ fn feed(f: &mut Fixture, keys: &str) {
                 format!("<C-{}>", (b + b'A' - 1) as char).to_lowercase()
             }
             _ => {
-                // 可打印字符走 KEY 事件（与对拍脚本同源）：`:` 在提示符下
-                // 必须是键，type_text 的 IME 通道会把命令行喂歪
+                // printables go through KEY events (same source as the parity script):
+                // under the prompt `:` must be a key; type_text's IME channel would
+                // feed the command line askew
                 let ch = keys[i..].chars().next().unwrap();
                 f.feed([ch.to_string()]);
                 i += ch.len_utf8();
@@ -80,10 +88,10 @@ fn statuses(init: &str, keys: &str) -> Vec<String> {
 fn last_status(init: &str, keys: &str) -> String {
     statuses(init, keys)
         .pop()
-        .unwrap_or_else(|| "<无消息>".to_owned())
+        .unwrap_or_else(|| "<no message>".to_owned())
 }
 
-/// (标签, 初始缓冲, 按键字节, vim 9.1 实测缓冲)
+/// (label, initial buffer, key bytes, buffer measured in vim 9.1)
 const CASES: &[(&str, &str, &str, &str)] = &[
         ("set_nonu_q", "x\n", ":set nonumber?\r", "x\n"),
         ("set_nu_q", "x\n", ":set number?\r", "x\n"),
@@ -238,7 +246,7 @@ const CASES: &[(&str, &str, &str, &str)] = &[
         ("s_i32max1", "aa\n", ":s/a/b/2147483646\r", "ba\n"),
 ];
 
-/// 对拍表：引擎文本必须逐字节等于 vim 9.1 的实测写回结果。
+/// Parity table: the engine text must equal vim 9.1's measured write-back byte for byte.
 #[test]
 fn parity_with_vim_oracle() {
     let mut bad: Vec<String> = Vec::new();
@@ -258,13 +266,14 @@ fn parity_with_vim_oracle() {
 }
 
 // ---------------------------------------------------------------------------
-// 消息面（缓冲文本看不到的一半）——逐项对应本轮修复
+// The message side (the half invisible in buffer text) — each item maps to a fix
+// from this round
 // ---------------------------------------------------------------------------
 
-/// A-1：`no` 前缀从不反转显示值——`:set noic?` 在 'ignorecase' 为 ON 时报
-/// `ignorecase`（9.1 redir 实证：`:set ic` + `:set noic?` → "  ignorecase"；
-/// `:set noic` + `:set ic?` → "noignorecase"）。旧实现带 `negated` 标志，
-/// 打印的是相反状态。
+/// A-1: the `no` prefix never inverts the displayed value — `:set noic?` reports
+/// `ignorecase` while 'ignorecase' is ON (9.1 redir evidence: `:set ic` +
+/// `:set noic?` → "  ignorecase"; `:set noic` + `:set ic?` → "noignorecase"). The old
+/// implementation carried a `negated` flag and printed the opposite state.
 #[test]
 fn set_query_never_inverts_the_no_prefix() {
     assert_eq!(last_status("x\n", ":set ic\r:set noic?\r"), "  ignorecase");
@@ -275,9 +284,9 @@ fn set_query_never_inverts_the_no_prefix() {
     assert_eq!(last_status("x\n", ":set ic\r:set ic?\r"), "  ignorecase");
 }
 
-/// A-6（收口时的复核新发现）：`no{值选项}?` 在 vim 里解析到该值选项本身
-/// （9.1 实证：`:set ts=6` + `:set notabstop?` → "  tabstop=6"），旧实现
-/// 认定 `notabstop` 不存在。
+/// A-6 (a new finding in the closing re-check): `no{value-option}?` resolves to the
+/// value option itself in vim (9.1 evidence: `:set ts=6` + `:set notabstop?` →
+/// "  tabstop=6"); the old implementation claimed `notabstop` does not exist.
 #[test]
 fn set_query_resolves_no_prefix_on_value_options() {
     assert_eq!(
@@ -287,9 +296,10 @@ fn set_query_resolves_no_prefix_on_value_options() {
     assert_eq!(last_status("x\n", ":set ts=6\r:set nots?\r"), "  tabstop=6");
 }
 
-/// A-2：`:set all&` 是**重置**不是列表（9.1 实证：`:set ts=9` + `:set all&` +
-/// `:set ts?` → "  tabstop=8"）。引擎重置的目标是引擎自己的默认值（'ts'=4 是
-/// 分歧账目 #2），这里钉的是「值回到默认」这一语义。
+/// A-2: `:set all&` is a **reset**, not a listing (9.1 evidence: `:set ts=9` +
+/// `:set all&` + `:set ts?` → "  tabstop=8"). The engine's reset target is the engine's
+/// own default ('ts'=4 is divergence ledger #2); what is pinned here is the semantics
+/// "the value returns to the default".
 #[test]
 fn set_all_amp_resets_every_option() {
     assert_eq!(
@@ -300,18 +310,19 @@ fn set_all_amp_resets_every_option() {
         last_status("x\n", ":set noic\r:set all&\r:set ic?\r"),
         "  ignorecase"
     );
-    // `:set all`（不带 &）仍然逐项列出
+    // `:set all` (without &) still lists item by item
     let listed = statuses("x\n", ":set all\r");
     assert!(
         listed.len() > 1,
-        "`:set all` 应逐项列出，实得 {listed:?}"
+        "`:set all` should list items one by one, got {listed:?}"
     );
     assert!(listed.iter().any(|s| s == "  tabstop=4"));
 }
 
-/// A-3：`:s` 的旗标串必须紧邻第三分隔符，其前的空白只有在「整段是纯 count」
-/// 时才合法（9.1 实证：`:s/a/b/ e` → "E488: Trailing characters: e" 且文本
-/// 不动；`:s/a/b/2g` → E488 引用 "g"）。旧实现接受 `/ e` 并照做替换。
+/// A-3: `:s`'s flag string must hug the third delimiter; whitespace before it is legal
+/// only when "the whole stretch is a pure count" (9.1 evidence: `:s/a/b/ e` →
+/// "E488: Trailing characters: e" with the text unmoved; `:s/a/b/2g` → E488 quoting
+/// "g"). The old implementation accepted `/ e` and performed the substitution.
 #[test]
 fn sub_flags_must_hug_the_delimiter() {
     assert_eq!(
@@ -324,15 +335,16 @@ fn sub_flags_must_hug_the_delimiter() {
         "E488: Trailing characters: g"
     );
     assert_eq!(run("aa\nbb\ncc\n", ":s/a/b/2g\r"), "aa\nbb\ncc\n");
-    // 纯 count 前允许空白，并把范围拉长到 count 行
+    // whitespace is allowed before a pure count, which also extends the range by count lines
     assert_eq!(run("a1\na2\na3\na4\n", ":1s/a/X/ 3\r"), "X1\nX2\nX3\na4\n");
     assert_eq!(run("aa\n", ":s/a/b/g 2\r"), "bb\n");
 }
 
-/// A-3 附带：count 0 是 E939、超限是 E1510 且**按 clamp 后的值**报告（9.1
-/// 实证：`:s/a/b/999…` → "E1510: Value too large: 9223372036854775807"、
-/// `:s/a/b/2147483647` → "E1510: Value too large: 2147483647"，而
-/// `:s/a/b/2147483646` 合法且真的替换出 "ba"）。
+/// A-3 addendum: count 0 raises E939; overflow raises E1510 reported with the
+/// **clamped value** (9.1 evidence: `:s/a/b/999…` →
+/// "E1510: Value too large: 9223372036854775807", `:s/a/b/2147483647` →
+/// "E1510: Value too large: 2147483647", while `:s/a/b/2147483646` is legal and really
+/// substitutes out "ba").
 #[test]
 fn sub_count_error_messages_match_vim() {
     assert_eq!(
@@ -350,10 +362,10 @@ fn sub_count_error_messages_match_vim() {
     assert_eq!(run("aa\n", ":s/a/b/2147483646\r"), "ba\n");
 }
 
-/// A-4：`n` 旗标按「替换会怎么做」来数——无 `g` 时每行只算一次（9.1 实证：
-/// `:s/a/X/n` 于 "aa" → "1 match on 1 line"、`:%s/a/X/n` 于三行各一命中 →
-/// "3 matches on 3 lines"、`:%s/a/X/gn` → "5 matches on 3 lines"）。旧实现
-/// 永远数尽所有出现。
+/// A-4: the `n` flag counts by "what the substitution would do" — without `g` each line
+/// counts once (9.1 evidence: `:s/a/X/n` on "aa" → "1 match on 1 line"; `:%s/a/X/n` on
+/// three lines with one hit each → "3 matches on 3 lines"; `:%s/a/X/gn` →
+/// "5 matches on 3 lines"). The old implementation always counted every occurrence.
 #[test]
 fn sub_n_counts_like_the_substitution_would() {
     assert_eq!(last_status("aa\n", ":s/a/X/n\r"), "1 match on 1 line");
@@ -368,10 +380,10 @@ fn sub_n_counts_like_the_substitution_would() {
     assert_eq!(last_status("ab\nab\n", ":%s/a/X/n\r"), "2 matches on 2 lines");
 }
 
-/// A-5：`i`/`I` 之外**不碰**大小写设定——无旗标时跟随 'ignorecase'/'smartcase'
-/// （9.1 实证：`:set noic` + `:s/a/X/` 于 "Aa" → "AX"，只命中小写 a；
-/// `:set ic` + `:s/a/X/gI` → "AX"）。旧实现无条件
-/// `case_insensitive(true)`，`:set noic` 形同无效。
+/// A-5: outside `i`/`I` the case settings are **not touched** — with no flags it follows
+/// 'ignorecase'/'smartcase' (9.1 evidence: `:set noic` + `:s/a/X/` on "Aa" → "AX",
+/// hitting only the lowercase a; `:set ic` + `:s/a/X/gI` → "AX"). The old implementation
+/// unconditionally called `case_insensitive(true)`, making `:set noic` a no-op.
 #[test]
 fn sub_without_flags_follows_ignorecase() {
     assert_eq!(run("Aa\n", ":set noic\r:s/a/X/\r"), "AX\n");
@@ -385,13 +397,14 @@ fn sub_without_flags_follows_ignorecase() {
 }
 
 // ---------------------------------------------------------------------------
-// insert `<C-t>`/`<C-d>`：vim 是 ROUND 到 shiftwidth 倍数，不是 ±shiftwidth
+// insert `<C-t>`/`<C-d>`: vim ROUNDs to a multiple of shiftwidth, not ±shiftwidth
 // ---------------------------------------------------------------------------
 //
-// 全部形状为 vim 9.1 实证（`:set et ts=4 sw=4 noai`，键序一律 `0` 锚定——
-// `-s` 通道的起始光标落在行末，不锚定就是假结果）。
+// All shapes are vim 9.1 evidence (`:set et ts=4 sw=4 noai`; key sequences are always
+// anchored with `0` — under the `-s` channel the starting cursor lands at end of line,
+// so without anchoring the results would be false).
 
-/// 用 `<C-t>`/`<C-d>` 后打一个 `X` 来同时钉住「新缩进」和「光标落点」。
+/// Type an `X` after `<C-t>`/`<C-d>` to pin both the new indent and the cursor landing.
 fn shift_then_type(init: &str, col: usize, key: &str) -> (String, usize) {
     let mut f = Fixture::new(init);
     f.feed(["0"]);
@@ -405,12 +418,12 @@ fn shift_then_type(init: &str, col: usize, key: &str) -> (String, usize) {
     (f.text(), f.cursor())
 }
 
-/// `get_new_sw_indent(round=TRUE)` 的上升臂：进到位数上取的下一个倍数
-/// （9.1：缩进 0/2/3/4/6/8 → 4/4/4/8/8/12）。旧实现是 `old + sw`，非倍数
-/// 缩进一步偏到位移之外（2 空格 → 6）。
+/// The rising arm of `get_new_sw_indent(round=TRUE)`: round up to the next shiftwidth
+/// multiple (9.1: indents 0/2/3/4/6/8 → 4/4/4/8/8/12). The old implementation did
+/// `old + sw`, so on a non-multiple indent one step overshoots (2 spaces → 6).
 #[test]
 fn insert_ctrl_t_rounds_indent_up_to_a_shiftwidth_multiple() {
-    // (缩进, 光标列, 新缩进, X 的字节位)
+    // (indent, cursor col, new indent, byte position of X)
     for (indent, col, want_indent, want_byte) in [
         (0usize, 0usize, 4usize, 4usize),
         (2, 0, 4, 2),
@@ -428,14 +441,16 @@ fn insert_ctrl_t_rounds_indent_up_to_a_shiftwidth_multiple() {
             " ".repeat(want_byte),
             " ".repeat(want_indent - want_byte)
         );
-        assert_eq!(text, want, "<C-t> 于 {indent} 空格缩进、列 {col}");
-        assert_eq!(byte, want_byte, "<C-t> 后光标列（{indent} 空格、列 {col}）");
+        assert_eq!(text, want, "<C-t> on {indent}-space indent, col {col}");
+        assert_eq!(byte, want_byte, "<C-t> cursor col afterwards ({indent} spaces, col {col})");
     }
 }
 
-/// 下降臂：退到位数下取整的前一个倍数（9.1：缩进 2/4/6/8 → 0/0/4/4；
-/// 恰为倍数时再降一格，所以 4 → 0 而不是 4 → 4 的「原地假成功」）。
-/// 光标落在缩进内部时钳到行首（列位移为负没有列可退）。
+/// The falling arm: round down to the previous shiftwidth multiple (9.1: indents
+/// 2/4/6/8 → 0/0/4/4; when already a multiple it drops another notch, so 4 → 0 rather
+/// than the in-place "false success" 4 → 4). When the cursor lands inside the indent it
+/// is clamped to the start of the line (a negative column shift has no column to back
+/// out of).
 #[test]
 fn insert_ctrl_d_rounds_indent_down_to_a_shiftwidth_multiple() {
     for (indent, col, want_indent) in [
@@ -448,16 +463,16 @@ fn insert_ctrl_d_rounds_indent_down_to_a_shiftwidth_multiple() {
     ] {
         let init = format!("{}foo\n", " ".repeat(indent));
         let (text, byte) = shift_then_type(&init, col, "<C-d>");
-        // X 一律落在字节 0（光标钳到行首），后跟新缩进
+        // X always lands at byte 0 (cursor clamped to line start), followed by the new indent
         let want = format!("X{}foo\n", " ".repeat(want_indent));
-        assert_eq!(text, want, "<C-d> 于 {indent} 空格缩进、列 {col}");
-        assert_eq!(byte, 0, "<C-d> 后光标钳到行首（{indent} 空格、列 {col}）");
+        assert_eq!(text, want, "<C-d> on {indent}-space indent, col {col}");
+        assert_eq!(byte, 0, "<C-d> clamps the cursor to line start ({indent} spaces, col {col})");
     }
 }
 
-/// `0<C-d>`：先打的 `0` 是命令字符不是文本，退格把缩进**清零**（vim
-/// ins_shift 走 change_indent 的 INDENT_SET 臂），而不是「减一个
-/// shiftwidth」。9.1 实证：8 空格缩进上 `i0<C-d>` → "foo"。
+/// `0<C-d>`: the leading `0` is a command char, not text, and the backspace **clears
+/// all indent** (vim's ins_shift goes through change_indent's INDENT_SET arm) rather
+/// than "minus one shiftwidth". 9.1 evidence: on 8-space indent, `i0<C-d>` → "foo".
 #[test]
 fn insert_zero_ctrl_d_clears_all_indent() {
     let mut f = Fixture::new("        foo\n");
@@ -471,8 +486,8 @@ fn insert_zero_ctrl_d_clears_all_indent() {
     assert_eq!(f.cursor(), 0);
 }
 
-/// TAB 缩进在 `expandtab` 下被整体重写为空格（9.1 实证：`\t\tfoo` 上
-/// `0i<C-t>X` → 12 列宽缩进、X 落在字节 4）。
+/// TAB indents get rewritten entirely to spaces under `expandtab` (9.1 evidence: on
+/// `\t\tfoo`, `0i<C-t>X` → 12-column-wide indent, X lands at byte 4).
 #[test]
 fn insert_shift_rewrites_tab_indent_under_expandtab() {
     let (text, byte) = shift_then_type("\t\tfoo\n", 0, "<C-t>");

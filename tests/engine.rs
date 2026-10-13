@@ -279,8 +279,8 @@ fn misc_edit_commands() {
     assert_eq!(f.text(), "hello");
     let mut f = edit("keep tail", 0, 4, &["Y"]);
     f.feed(["p"]);
-    // noeol 文件的字节口径：vim 的 'fixendofline' 在写回时补末尾换行
-    // （2026-10-08 od 实证），缓冲文本带终结符
+    // Byte convention for noeol files: vim's 'fixendofline' appends the trailing newline on
+    // write-back (od-verified 2026-10-08), so the buffer text carries the terminator
     assert_eq!(f.text(), "keep tail\nkeep tail\n");
 }
 
@@ -791,13 +791,14 @@ fn cjk_visual_put_replace_cursor_on_last_char() {
 
 #[test]
 fn visual_put_selection_at_line_end_inserts_at_span_start() {
-    // clamp_cursor 停放语义回归：delete_span 把光标 clamp 到行内末字符，
-    // PutReplace 的插入位若跟着 cursor.offset 走，选区贴行尾时（v$ / viw）
-    // 会被回拉一位——粘贴插到行尾字符之前，行尾字符反落在粘贴文本之后。
-    // vim 的 {visual}p 恒落在删除区起点。
+    // clamp_cursor parking regression: delete_span clamps the cursor to the line's last
+    // in-line character; if PutReplace's insertion point followed cursor.offset, a selection
+    // touching line end (v$ / viw) would be pulled back one — the paste would insert before the
+    // line-end character and the line-end character would end up after the pasted text.
+    // vim's {visual}p always lands at the deletion span's start.
     let f = edit("hello world", 0, 0, &["y", "i", "w", "w", "v", "$", "p"]);
     assert_eq!(f.text(), "hello hello");
-    assert_eq!(f.cursor(), 10); // 粘贴文本末字符
+    assert_eq!(f.cursor(), 10); // last character of the pasted text
 
     let f = edit(
         "hello world",
@@ -807,7 +808,7 @@ fn visual_put_selection_at_line_end_inserts_at_span_start() {
     );
     assert_eq!(f.text(), "hello hello");
 
-    // 单行 buffer 整词替换（span.start == 0，老路径不受影响）
+    // whole-word replace on a single-line buffer (span.start == 0, the old path is unaffected)
     let f = edit("abc", 0, 0, &["y", "i", "w", "v", "$", "p"]);
     assert_eq!(f.text(), "abc");
 }
@@ -849,8 +850,8 @@ fn visual_marks_shift_and_gv_tracks_the_text() {
     let mut f = Fixture::at("aa\nbbbb\n", 1, 0);
     f.feed(["v", "l", "l", "y"]); // select bbb, sets '< '>
     assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(3));
-    // `'>` 解析到**最后选中字符**（vim 9.1，audit E3 —— 旧的排他端点 6
-    // 会让 `` `> `` 落到选中区之后一格）
+    // `'>` resolves to the **last selected character** (vim 9.1, audit E3 — the old exclusive
+    // endpoint 6 would make `` `> `` land one cell past the selection)
     assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(5));
                                                    // open a line above: everything shifts by 2 ("x\n")
     f.feed(["g", "g"]);
@@ -859,9 +860,9 @@ fn visual_marks_shift_and_gv_tracks_the_text() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "aa\nx\nbbbb\n");
     assert_eq!(f.vim.marks.resolve('<', &f.buf), Some(5));
-    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(7)); // 最后选中字符（E3）
-                                                   // gv restores the selection over the SHIFTED text（9.1 oracle 矩阵，
-    // audit C12：CHARWISE gv 是反向选区——锚点在末字符、光标在起点）
+    assert_eq!(f.vim.marks.resolve('>', &f.buf), Some(7)); // last selected character (E3)
+                                                   // gv restores the selection over the SHIFTED text (9.1 oracle matrix,
+    // audit C12: CHARWISE gv is a reversed selection — anchor at the last character, cursor at the start)
     f.feed(["g", "v"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
     assert_eq!(
@@ -1045,19 +1046,19 @@ fn dot_ignores_ex_substitute_and_replays_prior_change() {
     let mut f = Fixture::at("foo\nkeep foo\nmore\n", 0, 0);
     f.feed([":", "s", "/", "f", "o", "o", "/", "b", "a", "r", "/", "<CR>"]);
     assert_eq!(f.text(), "bar\nkeep foo\nmore\n");
-    // vim 9.1（round 30 typeahead 实证）：`.` 只重放普通模式改动——`:s`
-    // 不入重放。这里的最后改动是替换前键入的会话吗？没有——所以 `.` 在
-    // 另一行的普通改动（x）之后才可观测。先做一个普通改动，再 :s，再 `.`：
-    // `.` 必须重放那个普通改动，而不是替换。
+    // vim 9.1 (round 30 typeahead evidence): `.` replays only normal-mode changes — `:s` does not
+    // enter the replay ledger. Was the last change here the typed session before the substitution?
+    // No — so `.` is only observable after a normal change (x) on the other line. Make a normal
+    // change first, then :s, then `.`: `.` must replay that normal change, not the substitution.
     let mut f = Fixture::at("foo\nkaap\nboog\n", 0, 0);
-    f.feed(["x"]); // last_change = x（"foo"→"oo"）
+    f.feed(["x"]); // last_change = x ("foo"→"oo")
     f.feed([":", "2", ",", "2", "s", "/", "a", "/", "A", "/", "<CR>"]);
     assert_eq!(f.text(), "oo\nkAap\nboog\n");
     f.feed(["j", "."]);
     assert_eq!(
         f.text(),
         "oo\nkAap\noog\n",
-        "`.` 重放 x，忽略 :s（vim 语义）"
+        "`.` replays x and ignores :s (vim semantics)"
     );
 }
 
@@ -1104,8 +1105,8 @@ fn dot_ignores_visual_canceled_and_non_changes() {
     let mut f = Fixture::at("abc def\n", 0, 0);
     f.feed(["x"]); // last change = x
     assert_eq!(f.text(), "bc def\n");
-    // 9.1 oracle 复验（2026-10-08）：Esc 后光标停在可视光标端（audit C11
-    // ——"xvl<Esc>." → "b def"，光标 1,2），`.` 在光标端重放 x
+    // 9.1 oracle re-verified (2026-10-08): after Esc the cursor stays at the visual cursor end
+    // (audit C11 — "xvl<Esc>." → "b def", cursor 1,2); `.` replays x at the cursor end
     f.feed(["v", "l", "<Esc>"]);
     f.feed(["."]);
     assert_eq!(f.text(), "b def\n");
@@ -1129,17 +1130,17 @@ fn dot_ignores_visual_canceled_and_non_changes() {
 
 #[test]
 fn dot_repeats_visual_block_insert() {
-    // audit D11（vim 9.1 oracle b5）：块插入之后 `.` 重放原键序
-    // [C-v…, I, 文本, Esc]——重放路径重新走 begin_block_insert → exit_insert
-    // 的整条复制机制，光标行与块行各得一个 `#`。（旧行为把整条录制丢掉，
-    // `.` 只能重复更早的变更——与 vim 不符。）
+    // audit D11 (vim 9.1 oracle b5): after a block insert, `.` replays the original key sequence
+    // [C-v…, I, text, Esc] — the replay path runs the whole begin_block_insert → exit_insert
+    // duplication machinery again, so the cursor line and the block lines each get a `#`. (The old
+    // behavior dropped the entire recording, and `.` could only repeat an earlier change — not vim-faithful.)
     let mut f = Fixture::at("aa\nbb\ncc\n", 0, 0);
     f.feed(["<C-v>"]);
     f.feed(["j", "j"]);
     f.feed(["I"]);
     f.type_text("#");
     f.feed(["<Esc>"]);
-    // I 在块列**之前**插入："aa" → "#aa"
+    // I inserts **before** the block column: "aa" → "#aa"
     assert_eq!(f.text(), "#aa\n#bb\n#cc\n");
     f.feed(["w"]);
     f.feed(["."]);
@@ -1702,14 +1703,14 @@ fn gi_inserts_at_last_insert_exit() {
     let mut f = Fixture::at("one two\nthree\n", 0, 0);
     f.feed(["A"]);
     f.type_text("!");
-    f.feed(["<Esc>"]); // Esc 回退到 '!' 上，但 `^` 记在**后一位**（byte 8）
+    f.feed(["<Esc>"]); // Esc steps back onto the '!', but `^` is recorded one PAST it (byte 8)
     f.feed(["g", "g"]); // move away
     f.feed(["g", "i"]);
     assert_eq!(f.vim.mode(), vimcore::Mode::Insert);
-    assert_eq!(f.cursor(), 8, "gi 停在最后插入字符的后一位（vim 9.1，audit E9）");
+    assert_eq!(f.cursor(), 8, "gi parks one past the last inserted character (vim 9.1, audit E9)");
     f.type_text("?");
     f.feed(["<Esc>"]);
-    // gi 停在 '!' 的后一位（E9），输入的 ? 落在其后
+    // gi parks one past the '!' (E9), so the typed ? lands after it
     assert_eq!(f.text(), "one two!?\nthree\n");
 }
 
@@ -1720,15 +1721,15 @@ fn changelist_walks_changes() {
     f.feed(["j", "x"]); // change at line 1
     f.feed(["j", "x"]); // change at line 2
     assert_eq!(f.text(), "aaa\nbbb\nccc\n");
-    // g; 从**最新**变更开始向旧走（vim 9.1，audit E8/E9 —— 旧钉子按
-    // 最旧优先，oracle 已证伪）
+    // g; walks from the **newest** change toward older ones (vim 9.1, audit E8/E9 — the old pin
+    // assumed oldest-first, already falsified by the oracle)
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 2);
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 1);
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 0);
-    // 穷尽后驻留；g, 反向走回更新的变更
+    // stays put once exhausted; g, walks back toward newer changes
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 0);
     f.feed(["g", ","]);

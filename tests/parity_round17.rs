@@ -1,17 +1,21 @@
-//! 第十七轮回归：宏停止的 `q` 残留、`@a` 后的 `.` 语义、`"+` 寄存器
-//! roundtrip、句子对象 is/as 空白归属、文本对象 count、`g_` 纯空白行、
-//! insert `<C-w>` 空白段、`<</>>`列模型、Ex 裸偏移与 `:s`/`:d` 尾 count。
-//! 全部期望行为经 vim 9.1 探针实证（探针与输出见 NOTES 第十七轮 T 系列）。
+//! Round-17 regressions: the leftover `q` when macro recording stops, the `.`
+//! semantics after `@a`, the `"+` register roundtrip, sentence object is/as
+//! whitespace ownership, text object counts, `g_` on whitespace-only lines, insert
+//! `<C-w>` whitespace runs, the `<</>>` column model, bare Ex offsets and the
+//! trailing count of `:s`/`:d`.
+//! Every expected behaviour was proven with vim 9.1 probes (the probes and their
+//! output are in NOTES, round 17, the T series).
 
 mod common;
 
 use common::{edit, Fixture};
 use vimcore::key::Key;
 
-// ---- 宏录制停止的 `q` 残留（T1）---------------------------------------------
+// ---- the leftover `q` when macro recording stops (T1) ----------------------
 
-/// PROBE T1: `qaxq` 停止后 `J` —— `.` 必须重复 join（vim ['b cd ef']），
-/// 旧实现把 [q, J] 一起提交，`.` 重放 MacroRecord 并把引擎楔进录制态。
+/// PROBE T1: after `qaxq` stops, `J` -- `.` must repeat the join (vim gives
+/// ['b cd ef']); the old implementation committed [q, J] together, so `.` replayed
+/// the MacroRecord and wedged the engine into recording state.
 #[test]
 fn macro_stop_q_does_not_leak_into_dot() {
     let mut f = edit("ab\ncd\nef\n", 0, 0, &["q", "a", "x", "q"]);
@@ -26,8 +30,10 @@ fn macro_stop_q_does_not_leak_into_dot() {
     );
 }
 
-/// `"b` 前缀 + 录空宏 `"a qq`：宏停止必须清掉寄存器前缀，随后的 `p`
-/// 走匿名寄存器（= yy 的镜像，linewise 开新行），而不是残留的空 `"a`。
+/// The `"b` prefix plus an empty recorded macro `"a qq`: stopping the macro must
+/// clear the register prefix, so the following `p` reads the unnamed register
+/// (= the mirror of yy, linewise opening a new line) instead of the stale empty
+/// `"a`.
 #[test]
 fn register_prefix_cleared_by_macro_stop() {
     let mut f = edit("ab\ncd\n", 0, 0, &["\"", "b", "y", "y"]);
@@ -40,30 +46,33 @@ fn register_prefix_cleared_by_macro_stop() {
     );
 }
 
-// ---- @a 与 . 的 redo 语义（T2）----------------------------------------------
+// ---- the redo semantics of @a and . (T2) ----------------------------------
 
-/// PROBE T2: `qaxq` → `~` → `0@a` → `.` —— vim 重放宏内的 x（['def']），
-/// 旧实现 @ 期间抑制提交，`.` 重复的是宏前的 `~`（得到 'Cdef'）。
+/// PROBE T2: `qaxq` -> `~` -> `0@a` -> `.` -- vim replays the x inside the macro
+/// (['def']); the old implementation suppressed the commit while @ ran, so `.`
+/// repeated the pre-macro `~` (giving 'Cdef').
 #[test]
 fn dot_after_macro_replays_macro_last_change() {
     let f = edit("abcdef\n", 0, 0, &["q", "a", "x", "q"]);
     let mut f = f;
-    f.feed(["~"]); // 'b'→'B'
+    f.feed(["~"]); // 'b' -> 'B'
     assert_eq!(f.text(), "Bcdef\n");
-    f.feed(["0", "@", "a"]); // 宏内 x：删 'B'
+    f.feed(["0", "@", "a"]); // the x inside the macro: deletes 'B'
     assert_eq!(f.text(), "cdef\n");
     f.feed(["."]);
     assert_eq!(f.text(), "def\n", "T2: dot repeats the macro's x, not ~");
 }
 
-/// `.` 自身重放仍不自我扩展（T2 对照）：`x.` 之后 last_change 停在一份 x。
+/// `.` replaying itself still does not self-extend (the T2 control): after `x.`
+/// the last_change stays at a single x.
 #[test]
 fn dot_replay_still_does_not_self_extend() {
     let f = edit("abcdef\n", 0, 0, &["x", "."]);
     assert_eq!(f.text(), "cdef\n", "one repeat, not a self-feeding loop");
 }
 
-/// 宏内含 insert 会话时 `.` 同样重复整个会话（录制含 Text 步骤）。
+/// When the macro contains an insert session, `.` repeats the whole session as
+/// well (the recording includes the Text step).
 #[test]
 fn dot_after_macro_with_insert_replays_insert() {
     let mut f = edit("ab\n", 0, 0, &["q", "a", "i"]);
@@ -76,10 +85,11 @@ fn dot_after_macro_with_insert_replays_insert() {
     assert_eq!(f.text(), "XXXab\n", "dot repeats the macro's insert session");
 }
 
-// ---- "+ 寄存器 roundtrip（T3）-----------------------------------------------
+// ---- the "+ register roundtrip (T3) ---------------------------------------
 
-/// PROBE T3（结构缺陷，宿主无关）：`"+yy` 必须推送到宿主剪贴板，`"+p`
-/// 贴回同一内容。旧实现写进 get_for_paste 永远读不到的 named 槽。
+/// PROBE T3 (a structural defect, host-independent): `"+yy` must push to the host
+/// clipboard and `"+p` must paste the same content back. The old implementation
+/// wrote into a named slot that get_for_paste can never read.
 #[test]
 fn clipboard_register_roundtrip() {
     let mut f = Fixture::new("hello\nworld\n");
@@ -96,7 +106,7 @@ fn clipboard_register_roundtrip() {
         "linewise paste reads it back below"
     );
 
-    // 删除同样入剪贴板
+    // deletes go into the clipboard as well
     let mut f = Fixture::new("aaa\nbbb\n");
     f.feed(["\"", "+", "d", "d"]);
     assert_eq!(f.host.clipboard.as_deref(), Some("aaa\n"));
@@ -108,21 +118,24 @@ fn clipboard_register_roundtrip() {
     );
 }
 
-/// 宿主剪贴板为空（无真实剪贴板的宿主）时回退 named 槽，roundtrip 仍成立。
+/// With an empty host clipboard (a host without a real clipboard) it falls back to
+/// the named slot, so the roundtrip still holds.
 #[test]
 fn clipboard_paste_falls_back_to_named_slot() {
     let mut f = Fixture::new("abc\n");
     f.feed(["\"", "+", "y", "y"]);
-    // 把宿主侧剪贴板清空，模拟无剪贴板/被外部清空的宿主
+    // clear the host-side clipboard to emulate a host without one / one emptied by
+    // the outside world
     f.host.clipboard = None;
     f.feed(["\"", "+", "p"]);
     assert_eq!(f.text(), "abc\nabc\n", "named-slot mirror keeps the roundtrip");
 }
 
-// ---- 句子对象 is/as（T4）-----------------------------------------------------
+// ---- the sentence objects is/as (T4) ---------------------------------------
 
-/// PROBE T4a: `dis` 止于句末标点 —— "Aaa. Bbb." 光标 A 只删 "Aaa."，
-/// 旧实现吞掉句尾空格（得到 "Bbb." 而非 " Bbb."）。
+/// PROBE T4a: `dis` stops at the sentence terminator -- with the cursor on the A
+/// of "Aaa. Bbb." it deletes only "Aaa."; the old implementation swallowed the
+/// sentence's trailing space (leaving "Bbb." instead of " Bbb.").
 #[test]
 fn inner_sentence_stops_at_terminator() {
     let f = edit("Aaa. Bbb.\n", 0, 0, &["d", "i", "s"]);
@@ -131,7 +144,8 @@ fn inner_sentence_stops_at_terminator() {
     assert_eq!(f.text(), "Aaa.  Ccc.\n", "middle sentence, both spaces kept");
 }
 
-/// PROBE T4b: `das` = 句子+尾随空白（句中）；末句无尾随时回退取前导空白。
+/// PROBE T4b: `das` = the sentence plus its trailing whitespace (mid-paragraph);
+/// the last sentence, having no trailing whitespace, falls back to the leading one.
 #[test]
 fn outer_sentence_trailing_then_leading_fallback() {
     let f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["5", "l", "d", "a", "s"]);
@@ -140,30 +154,35 @@ fn outer_sentence_trailing_then_leading_fallback() {
     assert_eq!(f.text(), "Aaa.\n", "last sentence falls back to leading ws");
 }
 
-/// PROBE T4c: `as` 的尾随空白在段界（空行）封顶 —— 空行保留。
+/// PROBE T4c: the trailing whitespace of `as` is capped at a paragraph boundary
+/// (an empty line) -- the empty line survives.
 #[test]
 fn outer_sentence_blank_line_is_boundary() {
     let f = edit("Aaa.\n\nBbb.\n", 0, 0, &["d", "a", "s"]);
     assert_eq!(f.text(), "\nBbb.\n", "T4c: the empty line survives");
-    // 光标在 Bbb 上：无同行前导空白 → 只删句子（空行与换行都保留；
-    // vim 探针 ['Aaa.', '', '|'] 逐字节一致）
+    // with the cursor on Bbb: no same-line leading whitespace -> only the sentence
+    // is deleted (both the empty line and the newline survive; byte-for-byte equal
+    // to the vim probe ['Aaa.', '', '|'])
     let f = edit("Aaa.\n\nBbb.\n", 2, 0, &["d", "a", "s"]);
     assert_eq!(f.text(), "Aaa.\n\n\n", "sentence only; gap whitespace stays");
-    // 同行的前导空白可以带上（vim ['Aaa.', '', 'Bbb.']）
+    // leading whitespace on the same line can be taken along (vim ['Aaa.', '',
+    // 'Bbb.'])
     let f = edit("Aaa.\n\nBbb. Ccc.\n", 2, 9, &["d", "a", "s"]);
     assert_eq!(f.text(), "Aaa.\n\nBbb.\n", "same-line leading space goes too");
 }
 
-/// PROBE T4d: `2das` 删两句（连各自尾随空白）。
+/// PROBE T4d: `2das` deletes two sentences (each with its own trailing
+/// whitespace).
 #[test]
 fn outer_sentence_count_two() {
     let f = edit("Aaa. Bbb. Ccc.\n", 0, 0, &["2", "d", "a", "s"]);
     assert_eq!(f.text(), "Ccc.\n");
 }
 
-// ---- 文本对象 count（T5）-----------------------------------------------------
+// ---- text object counts (T5) -----------------------------------------------
 
-/// PROBE T5a: `d2aw` 删两个词（旧实现等价 `daw`）。
+/// PROBE T5a: `d2aw` deletes two words (the old implementation was equivalent to
+/// `daw`).
 #[test]
 fn count_repeats_text_object() {
     let f = edit("foo bar baz\n", 0, 0, &["d", "2", "a", "w"]);
@@ -176,8 +195,8 @@ fn count_repeats_text_object() {
     assert_eq!(f.text(), "X\n", "c3aw replaces all three");
 }
 
-/// PROBE T5b: count 的怪癖由重复扫描自然复现 —— `d2iw`=diw（"foo "）、
-/// `3iw` 到 "foo bar"。
+/// PROBE T5b: vim's quirk with counts falls out of the repeated scan naturally --
+/// `d2iw`=diw ("foo "), and `3iw` reaches "foo bar".
 #[test]
 fn inner_word_count_matches_vim_quirk() {
     let f = edit("foo bar baz\n", 0, 0, &["d", "2", "i", "w"]);
@@ -186,7 +205,8 @@ fn inner_word_count_matches_vim_quirk() {
     assert_eq!(f.text(), " baz\n", "3iw covers 'foo bar' (blank stays)");
 }
 
-/// PROBE T5c: visual 下同样扩展；`v2i(` 攀到外层括号。
+/// PROBE T5c: the same extension happens in visual mode; `v2i(` climbs to the
+/// outer parenthesis.
 #[test]
 fn visual_object_count_extends() {
     let f = edit("foo bar baz\n", 0, 0, &["v", "2", "a", "w", "y", "0", "P"]);
@@ -195,10 +215,11 @@ fn visual_object_count_extends() {
     assert_eq!(f.text(), "1 + (2)f (1 + (2)) g\n", "v2i( climbs one level");
 }
 
-// ---- g_ 于纯空白行（T6）------------------------------------------------------
+// ---- g_ on whitespace-only lines (T6) -------------------------------------
 
-/// PROBE T6: `dg_` 在 "   " 上 c1/c2/c3 分别删 1/2/3 字符 —— span 是
-/// [line_start, cursor)。旧实现 Inclusive(line_start) 把 c1 也删成空行。
+/// PROBE T6: on "   ", `dg_` from c1/c2/c3 deletes 1/2/3 characters -- the span is
+/// [line_start, cursor). The old implementation used Inclusive(line_start) and
+/// turned even c1 into an empty line.
 #[test]
 fn g_underscore_whitespace_line_spans_to_cursor() {
     let f = edit("   \nfoo\n", 0, 0, &["d", "g", "_"]);
@@ -211,15 +232,17 @@ fn g_underscore_whitespace_line_spans_to_cursor() {
     f.type_text("X");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "X \n", "cg_ replaces the run through the cursor");
-    // 非空白行不变：g_ 落最后非空白字符
+    // non-blank lines are unchanged: g_ lands on the last non-blank character
     let f = edit("a  b\n", 0, 1, &["d", "g", "_"]);
     assert_eq!(f.text(), "a\n");
 }
 
-// ---- insert <C-w> 空白段（T7）-----------------------------------------------
+// ---- insert <C-w> whitespace runs (T7) ------------------------------------
 
-/// PROBE T7: 行中空白上 `<C-w>` 一笔删掉行首到光标（自动缩进清除）；
-/// 旧实现落到并线分支每次剥 1 字节。并线只发生在 col 1。
+/// PROBE T7: on whitespace in the middle of a line, `<C-w>` removes the whole run
+/// from the start of the line to the cursor in one stroke (autoindent cleared); the
+/// old implementation fell into the join-lines branch and stripped 1 byte per call.
+/// Joining lines only happens at col 1.
 #[test]
 fn ctrl_w_deletes_whitespace_run_in_one_stroke() {
     let mut f = edit("x\n  y\n", 1, 2, &["i"]);
@@ -227,31 +250,31 @@ fn ctrl_w_deletes_whitespace_run_in_one_stroke() {
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "x\ny\n", "the whole run goes in one stroke");
 
-    // 半段空白：删到行首为止
+    // a partial run: deleted up to the start of the line
     let mut f = edit("x\n  y\n", 1, 1, &["i"]);
     f.feed_raw(Key::ctrl_char('w'));
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "x\n y\n", "only the run before the cursor");
 
-    // 打字后的 C-w 照常删词
+    // C-w after typed text deletes the word as usual
     let mut f = edit("x\n  y\n", 1, 2, &["i"]);
     f.type_text("hello");
     f.feed_raw(Key::ctrl_char('w'));
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "x\n  y\n", "typed word deleted, indent kept");
 
-    // 行中非空白前缀照常删词，不并线
+    // a non-blank prefix mid-line deletes the word as usual, without joining lines
     let mut f = edit("ab\ncd\n", 1, 1, &["i"]);
     f.feed_raw(Key::ctrl_char('w'));
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "ab\nd\n");
 }
 
-// ---- <</>>列模型（T8）-------------------------------------------------------
+// ---- the <</>> column model (T8) ------------------------------------------
 
 fn shift_fixture(initial: &str, line: usize, col: usize, opts: &str) -> Fixture {
     let mut f = Fixture::at(initial, line, col);
-    // 通过 :set 走真实选项管道（noet/ts/sw）
+    // go through :set so the real option pipeline is exercised (noet/ts/sw)
     for c in opts.chars() {
         f.feed([&c.to_string()]);
     }
@@ -259,8 +282,9 @@ fn shift_fixture(initial: &str, line: usize, col: usize, opts: &str) -> Fixture 
     f
 }
 
-/// PROBE T8a: noet ts=8 sw=4 的左移重表达 —— `\tx`→`    x`、
-/// `\t\tx`→`\t    x`（1 tab + 4 空格）。旧实现剥字节得 `\tx`。
+/// PROBE T8a: the left-shift re-expression under noet ts=8 sw=4 -- `\tx` ->
+/// `    x`, `\t\tx` -> `\t    x` (1 tab + 4 spaces). The old implementation
+/// stripped bytes and got `\tx`.
 #[test]
 fn shift_left_reexpresses_tabs() {
     let mut f = shift_fixture("\tx\n", 0, 0, ":set noet sw=4 ts=8");
@@ -274,8 +298,8 @@ fn shift_left_reexpresses_tabs() {
     assert_eq!(f.text(), "    x\n", "mixed space+tab collapses to column");
 }
 
-/// PROBE T8b: 右移按 tabstop 重表达 —— noet 下凑整 tab 余量空格；
-/// col 5 + sw 4 = col 9 → `\t `（1 tab + 1 空格）。
+/// PROBE T8b: the right shift re-expresses by tabstop -- under noet the remainder
+/// past a whole tab becomes spaces; col 5 + sw 4 = col 9 -> `\t ` (1 tab + 1 space).
 #[test]
 fn shift_right_reexpresses_by_tabstop() {
     let mut f = shift_fixture("x\n", 0, 0, ":set noet sw=4 ts=8");
@@ -292,7 +316,8 @@ fn shift_right_reexpresses_by_tabstop() {
     assert_eq!(f.text(), "    x\n", "et: spaces");
 }
 
-/// PROBE T8c: 纯空白行参与移位（`<<` 清空、`>>` 追加），真空行跳过。
+/// PROBE T8c: whitespace-only lines take part in the shift (`<<` empties them,
+/// `>>` appends), truly empty lines are skipped.
 #[test]
 fn shift_on_whitespace_only_and_empty_lines() {
     let mut f = shift_fixture("   \n", 0, 0, ":set et sw=4");
@@ -306,10 +331,10 @@ fn shift_on_whitespace_only_and_empty_lines() {
     assert_eq!(f.text(), "\nfoo\n", "EMPTY line stays empty");
 }
 
-// ---- Ex 裸偏移与尾 count（T9/T10）-------------------------------------------
+// ---- bare Ex offsets and trailing counts (T9/T10) --------------------------
 
-/// PROBE T9: 裸 `+`/`-` = ±1（vim :h :range "If a number is omitted, 1 is
-/// used"）。旧实现对空数字串报 E1247。
+/// PROBE T9: a bare `+`/`-` = ±1 (vim :h :range, "If a number is omitted, 1 is
+/// used"). The old implementation reported E1247 for the empty digit string.
 #[test]
 fn ex_bare_plus_minus_offsets() {
     let f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "+", "d", "<CR>"]);
@@ -325,23 +350,25 @@ fn ex_bare_plus_minus_offsets() {
     assert!(f.host.statuses.iter().any(|s| s.contains("E16")));
     let f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", ".", "-", "d", "<CR>"]);
     assert_eq!(f.text(), "bbb\nccc\n", ":.-d deletes the line above");
-    // 链式偏移里的裸符号：:+-d = +1-1 = 当前行
+    // bare signs inside a chained offset: :+-d = +1-1 = the current line
     let f = edit("aaa\nbbb\nccc\n", 1, 0, &[":", "+", "-", "d", "<CR>"]);
     assert_eq!(f.text(), "aaa\nccc\n", ":+-d re-anchors at the cursor line");
-    // 数字溢出仍报 E1247（round15 行为保持）
+    // a numeric overflow still reports E1247 (the round-15 behaviour is kept)
     let f = edit("aaa\nbbb\n", 0, 0, &[":", "1", "+", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "d", "<CR>"]);
     assert_eq!(f.text(), "aaa\nbbb\n", "huge offset still refused");
     assert!(f.host.statuses.iter().any(|s| s.contains("E1247")));
 }
 
-/// PROBE T10a: `:d2` 直连数字 = `:d 2`（vim ex 解析：数字终止命令名）。
+/// PROBE T10a: `:d2` with a directly attached digit = `:d 2` (the vim ex parser
+/// ends the command name at a digit).
 #[test]
 fn ex_packed_count_for_delete() {
     let f = edit("aaa\nbbb\nccc\n", 0, 0, &[":", "d", "2", "<CR>"]);
     assert_eq!(f.text(), "ccc\n", ":d2 deletes two lines");
 }
 
-/// PROBE T10b: `:s` 尾 count = 从范围末行起数 N 行。
+/// PROBE T10b: the trailing count of `:s` = N lines counted from the last line of
+/// the range.
 #[test]
 fn ex_substitute_trailing_count() {
     let f = edit("aaa\naaa\naaa\n", 0, 0, &[":", "s", "/", "a", "/", "X", "/", " ", "3", "<CR>"]);
@@ -356,29 +383,32 @@ fn ex_substitute_trailing_count() {
     assert_eq!(f.text(), "XXX\nXXX\n", "g flag + count combine");
 }
 
-/// `:s` 的报告格式对齐 vim：替换数 ≤ 'report'（默认 2）时静默；3+ 读
-/// "{n} substitutions on {m} lines"（单数 line）。
+/// The report format of `:s` matches vim: with the number of replacements <=
+/// 'report' (default 2) it stays silent; 3 or more reads
+/// "{n} substitutions on {m} lines" (singular line).
 #[test]
 fn substitute_report_format_matches_vim() {
-    // 1 处替换 = 静默（vim v:statusmsg 为空）
+    // one replacement = silent (vim's v:statusmsg is empty)
     let mut f = Fixture::new("aaa\n");
     f.feed([":", "s", "/", "a", "/", "X", "/", "<CR>"]);
     assert_eq!(f.text(), "Xaa\n");
     assert_eq!(f.host.statuses, Vec::<String>::new(), "single sub is silent");
-    // 同一行 2 处（g 旗标）≤ report 阈值 = 静默（oracle osr2）
+    // two replacements on one line (the g flag) <= the report threshold = silent
+    // (oracle osr2)
     let mut f = Fixture::new("aa\n");
     f.feed([":", "s", "/", "a", "/", "X", "/", "g", "<CR>"]);
     assert_eq!(f.text(), "XX\n");
     assert_eq!(f.host.statuses, Vec::<String>::new(), "2 subs is silent");
-    // 跨行 3 处 = "on N lines"
+    // three replacements across lines = "on N lines"
     let mut f = Fixture::new("a1\na2\na3\n");
     f.feed([":", "1", ",", "3", "s", "/", "a", "/", "X", "/", "<CR>"]);
     assert_eq!(f.host.statuses, ["3 substitutions on 3 lines"]);
 }
 
-// ---- :nohlsearch 缩写前缀（T11）---------------------------------------------
+// ---- the :nohlsearch abbreviation prefixes (T11) ---------------------------
 
-/// vim 缩写规则：nohlsearch 的全部无歧义前缀可用（旧实现停在 nohls）。
+/// vim's abbreviation rule: every unambiguous prefix of nohlsearch works (the old
+/// implementation stopped at nohls).
 #[test]
 fn nohlsearch_prefix_abbreviations() {
     for spelling in ["noh", "nohl", "nohls", "nohlse", "nohlsea", "nohlsear", "nohlsearc"] {

@@ -1,21 +1,25 @@
-//! 第十轮扩展 fuzz：覆盖审查补漏后的路径 + 分配上限守卫的常驻压力。
+//! Round-10 extended fuzz: paths added after the review gap-fill + standing
+//! pressure on the allocation-cap guards.
 //!
-//! 相对 round9 的增量键表：
-//! - cmdline 历史浏览（`<Up>`/`<Down>` 在 `/`/`?`/`:` 提示符）与 `/x<CR>` 搜索；
-//! - 文本对象全集（`i"/a"/i'/a'/iW/aW/is/as/i[/a[/i{/a{/iB/aB/i</a<`）；
-//! - count-repeat insert（`2i`/`3o`/`5a`/`9I`/`7A`/`4gi`/`2gI`）——本轮
-//!   修复的分配上限路径；
-//! - `:set` 数值/布尔选项（改 ts/sw/et/ai/tw，改变缩进与格式化行为）；
-//! - 缩进与大小写操作计数（`>>`/`<<`/`3>>`/`guw`/`gUw`/`g~w`/`gugu`/`gUU`/`g~~`/
-//!   `gww`）、visual 端点交换（`o`/`O`）；
-//! - insert 模式 `<C-r>` 寄存器粘贴；Ex 的 `:y`/`:d` 变体、`:sort` 旗标、
-//!   `:s` 旗标（`g`/`i`）与 `:&`、`:action`、`:w`/`:q`；
-//! - 句子/段落/屏幕行 motion（`(`/`)`/`{`/`}`/`H`/`M`/`L`/`+`/`-`/`|`）与
-//!   `<C-e>`/`<C-y>` 滚动；
-//! - IME 注入文本新增带换行变体（autoindent 路径）。
+//! Key-table delta over round9:
+//! - cmdline history browsing (`<Up>`/`<Down>` at the `/`/`?`/`:` prompts) and
+//!   `/x<CR>` searches;
+//! - the full text-object set (`i"/a"/i'/a'/iW/aW/is/as/i[/a[/i{/a{/iB/aB/i</a<`);
+//! - count-repeat insert (`2i`/`3o`/`5a`/`9I`/`7A`/`4gi`/`2gI`) — the
+//!   allocation-cap path fixed this round;
+//! - `:set` numeric/boolean options (ts/sw/et/ai/tw, changing indent and
+//!   formatting behavior);
+//! - indent and case-operation counts (`>>`/`<<`/`3>>`/`guw`/`gUw`/`g~w`/`gugu`/
+//!   `gUU`/`g~~`/`gww`), visual endpoint swap (`o`/`O`);
+//! - insert-mode `<C-r>` register paste; Ex `:y`/`:d` variants, `:sort` flags,
+//!   `:s` flags (`g`/`i`) and `:&`, `:action`, `:w`/`:q`;
+//! - sentence/paragraph/screen-line motions (`(`/`)`/`{`/`}`/`H`/`M`/`L`/`+`/
+//!   `-`/`|`) and `<C-e>`/`<C-y>` scrolling;
+//! - IME-injected text gains newline-carrying variants (the autoindent path).
 //!
-//! 不变量沿用 round9，另加 search 缓存匹配可寻址：光标/全部 mark/
-//! `last_visual`/live 选区/`gv` 重建选区/`last_matches` 的偏移全部可寻址。
+//! Invariants carry over from round9, plus search-cache match addressability:
+//! the cursor / all marks / `last_visual` / the live selection / the `gv`
+//! rebuilt selection / offsets in `last_matches` must all be addressable.
 
 mod common;
 
@@ -32,13 +36,13 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
 }
 
 const KEYS: &[&str] = &[
-    // 本轮新增：历史浏览与搜索
+    // new this round: history browsing and search
     "<Up>",
     "<Down>",
     "/x<CR>",
     "?a<CR>",
     "/<CR>",
-    // 本轮新增：count-repeat insert（分配上限路径）
+    // new this round: count-repeat insert (allocation-cap path)
     "2i",
     "3o",
     "5a",
@@ -46,7 +50,7 @@ const KEYS: &[&str] = &[
     "7A",
     "4gi",
     "2gI",
-    // 本轮新增：:set 选项（改变缩进/换行行为）
+    // new this round: :set options (change indent/line-breaking behavior)
     ":set ts=8",
     ":set sw=2",
     ":set noet",
@@ -54,7 +58,7 @@ const KEYS: &[&str] = &[
     ":set tw=20",
     ":set noai",
     ":set ts?",
-    // 本轮新增：缩进/大小写/格式化的计数与变体
+    // new this round: indent/case/format counts and variants
     ">>",
     "<<",
     "3>>",
@@ -68,13 +72,13 @@ const KEYS: &[&str] = &[
     "g~~",
     "gww",
     "Vgq",
-    // 本轮新增：visual 端点交换
+    // new this round: visual endpoint swap
     "o",
     "O",
-    // 本轮新增：insert 寄存器粘贴（正常模式下 <C-r> 是 redo，两边都压）
+    // new this round: insert register paste (<C-r> is redo in normal mode; stress both)
     "<C-r>",
     "yiw",
-    // 本轮新增：Ex yank/delete/sort/substitute 变体与杂项
+    // new this round: Ex yank/delete/sort/substitute variants and misc
     ":y a",
     ":2y",
     ":%y",
@@ -90,7 +94,7 @@ const KEYS: &[&str] = &[
     ":q",
     ":5",
     ":'<,'>d",
-    // 本轮新增：句子/段落/屏幕行/滚动
+    // new this round: sentence/paragraph/screen-line/scroll
     "(",
     ")",
     "{",
@@ -106,7 +110,7 @@ const KEYS: &[&str] = &[
     "<C-e>",
     "<C-y>",
     "Y",
-    // 本轮新增：文本对象全集
+    // new this round: the full text-object set
     "i\"",
     "a\"",
     "i'",
@@ -126,12 +130,12 @@ const KEYS: &[&str] = &[
     "daw",
     "das",
     "dap",
-    // 本轮新增：mark 交互
+    // new this round: mark interactions
     "ma",
     "mb",
     "'a",
     "`a",
-    // 既有覆盖（round9 键表节选，保持回归压力）
+    // existing coverage (round9 key-table excerpt, keeping regression pressure)
     "<C-w>",
     "3D",
     "3C",
@@ -254,11 +258,11 @@ const KEYS: &[&str] = &[
     "\"_dd",
 ];
 
-/// 校验一个偏移在 `text` 上可寻址（字符边界或末尾）。
+/// Check that an offset is addressable in `text` (a char boundary or the end).
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} not addressable in {text:?}"
     );
 }
 
@@ -269,7 +273,7 @@ fn fuzz_round10_holds_invariants() {
         "a",
         "中",
         "中文\nwide line\n",
-        // 引号/标签/括号丰富：文本对象与 :s 旗标的轰炸场
+        // quote/tag/bracket-rich: the bombing ground for text objects and :s flags
         "let s = \"hi\"; // <div id=\"x\">t</div>\nf(a, [b], {c})\n",
         "foo bar 中文 baz 👨‍👩‍👧 tail\nsecond 中文 line\n\nlast",
         "aaaa\nbbbb\ncccc\ndddd",
@@ -293,8 +297,8 @@ fn fuzz_round10_holds_invariants() {
                 for key in parse_key_sequence(k) {
                     f.feed_raw(key);
                 }
-                // IME 打字路径：insert/replace 模式下随机注入（含多行文本，
-                // 走 autoindent 展开）
+                // IME typing path: random injection in insert/replace mode
+                // (including multiline text, going through autoindent expansion)
                 if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
                     && fuzz_xorshift(&mut state).is_multiple_of(4)
                 {
@@ -304,7 +308,8 @@ fn fuzz_round10_holds_invariants() {
                         f.type_text("t中x");
                     }
                 }
-                // 宿主点击：随机落点（刻意含非字符边界——入口须 floor）
+                // host clicks: random landing points (deliberately including
+                // non-char boundaries — the entry must floor)
                 if fuzz_xorshift(&mut state).is_multiple_of(11) {
                     let raw = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 2);
                     f.vim.set_cursor_offset(&f.buf, raw);
@@ -332,10 +337,11 @@ fn fuzz_round10_holds_invariants() {
     }
 }
 
-// ---- Ex 参数面轰炸：固定命令串之外的任意参数组合 ------------------------------
+// ---- Ex argument-surface bombing: arbitrary argument combos beyond fixed command strings --
 
-/// Ex 命令面 + 任意参数组合的 panic 猎捕：正则注入、怪分隔符、巨行号、
-/// 负偏移、mark 名注入、非 ASCII 参数。
+/// Panic hunt over the Ex command surface + arbitrary argument combinations:
+/// regex injection, odd delimiters, huge line numbers, negative offsets, mark
+/// name injection, non-ASCII arguments.
 #[test]
 fn ex_argument_fuzz_holds() {
     let cmds = [
@@ -402,7 +408,7 @@ fn ex_argument_fuzz_holds() {
             let mut f = Fixture::new(buffers[round % buffers.len()]);
             let cur = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 1);
             f.vim.set_cursor_offset(&f.buf, cur);
-            // 随机 1-4 条 Ex 命令串行执行
+            // run a random 1-4 Ex commands in sequence
             for _ in 0..1 + fuzz_xorshift(&mut state) % 4 {
                 let cmd = cmds[(fuzz_xorshift(&mut state) as usize) % cmds.len()];
                 for c in cmd.chars() {

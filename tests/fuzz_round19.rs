@@ -1,18 +1,23 @@
-//! 第十九轮 fuzz：本轮修复面的路径轰炸。
+//! Round-19 fuzz: path barrage over this round's fix surface.
 //!
-//! 相对 round17 的增量（全部是本轮改过的路径）：
-//! - **D/C 行模型**：`D`/`C` 的 count 形态在行首 / 行中 / 末行 / 唯一行
-//!   上任意轰炸（`delete_to_end_span` 重写——count≥2 行首整行消失、
-//!   count=1 清空、C 恒清空保行；旧模型在这里既丢文件 eol 又留幻影行）；
-//! - **`Nr<CR>` 单换行塌缩**（`3r<CR>` 曾产出 N 个换行）；
-//! - **`r<C-E>`/`r<C-Y>` 邻行取字符**（新功能；任一侧越界的整条取消）；
-//! - **char-arg 非可打印键取消**（r/f/'/m 等待中按方向键——此前注释与
-//!   代码不符，行为钉住为「取消 + 响铃」）；
-//! - **未设 mark 跳转的 E20 消息**、**`:j` 末行 no-op 不污染 changelist**。
+//! Delta relative to round17 (all paths changed this round):
+//! - **D/C line model**: barrage the count shapes of `D`/`C` at line start / mid-line /
+//!   last line / sole line (`delete_to_end_span` rewritten — count≥2 at line start makes
+//!   the whole line vanish, count=1 clears the line, C always clears but keeps the line;
+//!   the old model both lost the file eol and left phantom lines here);
+//! - **`Nr<CR>` single-newline collapse** (`3r<CR>` once produced N newlines);
+//! - **`r<C-E>`/`r<C-Y>` char fetch from neighboring lines** (new feature; if either
+//!   side is out of bounds the whole command is canceled);
+//! - **char-arg cancel on non-printable keys** (pressing an arrow key while r/f/'/m
+//!   awaits its char — the comment previously disagreed with the code; behavior pinned
+//!   as "cancel + bell");
+//! - **E20 message for jumping to an unset mark**, **`:j` last-line no-op does not
+//!   pollute the changelist**.
 //!
-//! 不变量沿用 round13-17：光标/mark/`last_visual`/live 选区全部可寻址、
-//! 行数 ≥ 1；另加本轮专属不变量：任何 D/C 序列之后缓冲的首行仍然存在
-//! （≥1 行）且 `.` 重放路径不 panic。
+//! Invariants carried over from round13-17: cursor/mark/`last_visual`/live selection all
+//! addressable, line count ≥ 1; plus this round's extra invariant: after any D/C
+//! sequence the buffer's first line still exists (≥1 line) and the `.` replay path does
+//! not panic.
 
 mod common;
 
@@ -28,13 +33,13 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// 16 seeds × 60 rounds × 120 steps ≈ 11.5 万步（与 round13-17 同预算）
+// 16 seeds × 60 rounds × 120 steps ≈ 115k steps (same budget as round13-17)
 const SEEDS: u64 = 16;
 const ROUNDS: usize = 60;
 const STEPS: usize = 120;
 
 const KEYS: &[&str] = &[
-    // ---- 本轮修复面：D/C 行模型（行首/行中/末行/唯一行 × count）----
+    // ---- this round's fix surface: D/C line model (line start/mid/last/sole line × count) ----
     "D",
     "2D",
     "3D",
@@ -47,14 +52,14 @@ const KEYS: &[&str] = &[
     "c$",
     "dd",
     "3dd",
-    // ---- Nr<CR> 塌缩与 r 邻行 ----
+    // ---- Nr<CR> collapse and r neighbor lines ----
     "r<CR>",
     "3r<CR>",
     "r<C-e>",
     "r<C-y>",
     "3r<C-e>",
     "2rx",
-    // ---- char-arg 等待键（r/f/'/m/q/@ + 取消键/方向键交错）----
+    // ---- char-arg pending keys (r/f/'/m/q/@ interleaved with cancel/arrow keys) ----
     "r",
     "f",
     "F",
@@ -71,14 +76,14 @@ const KEYS: &[&str] = &[
     "right",
     "home",
     "end",
-    // ---- 未设 mark 与已设 mark 跳转 ----
+    // ---- unset-mark vs set-mark jumps ----
     "'a",
     "'z",
     "`z",
     "m1",
     "ma",
     "'a",
-    // ---- Ex 面：:j no-op、:d、:s、:sort 的范围/计数形态 ----
+    // ---- Ex surface: :j no-op, range/count shapes of :d, :s, :sort ----
     ":3j\n",
     ":2,2j\n",
     ":1,2j\n",
@@ -89,7 +94,7 @@ const KEYS: &[&str] = &[
     ":%s/x/Y/g\n",
     ":2sort\n",
     ":5\n",
-    // ---- 既有覆盖节选（管线压力：`.`/宏/寄存器/对象）----
+    // ---- excerpt of existing coverage (pipeline pressure: `.`/macros/registers/objects) ----
     ".",
     "x",
     "X",
@@ -160,22 +165,22 @@ const KEYS: &[&str] = &[
     "gi",
     "R",
     "zh",
-    // insert-mode 编辑键（C-w/C-u 与 ai/BS 的交互）
+    // insert-mode editing keys (C-w/C-u and their interaction with ai/BS)
     "<C-w>",
     "<C-u>",
     "<BS>",
     "<Del>",
     "<Tab>",
     "<C-h>",
-    // 宿主事件注入（round16 起）：任意模式下的点击/拖选/IME
+    // host event injection (since round16): click/drag-select/IME in any mode
     "host:click",
     "host:drag",
     "host:ime",
     "host:ime_replace",
 ];
 
-// fuzz 缓冲种子：短行/1 字符行/多字节/空行/带 eol 的混合——D/C 行模型的
-// 全部分支形状都要在种子池里常态出现
+// fuzz buffer seeds: short lines / 1-char lines / multibyte / empty lines / mixed with
+// eol — every branch shape of the D/C line model must occur routinely in the seed pool
 const BUFFERS: &[&str] = &[
     "a\nb\nc\n",
     "aaaa\nbbbb\ncccc\ndddd\n",
@@ -198,10 +203,11 @@ fn buffer_reset(f: &mut Fixture, seed: u64) {
     f.vim.cursor.desired_col = None;
 }
 
-/// 契约内的缓冲重置：宿主只能换「引擎可见的整段文本」，而引擎的会话
-/// 状态（insert/visual/cmdline/算子悬挂）从不跨越宿主的文本交换——真实
-/// 宿主都经 undo/redo 路径（引擎侧有 sanitize）。裸换文本只在引擎
-/// idle 且 Normal 时合法。
+/// Contract-legit buffer reset: the host may only swap the whole engine-visible text,
+/// and the engine's session state (insert/visual/cmdline/pending operator) never
+/// crosses a host text exchange — real hosts all go through the undo/redo path (the
+/// engine side has sanitize). Swapping the text bare is only legal when the engine is
+/// idle and in Normal.
 fn buffer_reset_when_idle(f: &mut Fixture, seed: u64) -> bool {
     if !f.vim.is_idle() || !matches!(f.vim.mode(), vimcore::mode::Mode::Normal) {
         return false;
@@ -217,17 +223,20 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
     if buf.line_count() == 0 {
         return Err("line_count == 0".into());
     }
-    // 光标可寻址（字符边界 + 行内）
+    // cursor addressable (char boundary + within line)
     let cur = f.vim.cursor.offset;
     if cur > len || !text.is_char_boundary(cur) {
         return Err(format!("cursor {cur} unaddressable (len={len})"));
     }
     let line = buf.offset_to_line(cur);
-    // 插入模式的光标合法地停在 line_end（行尾插入位）甚至缓冲幻影末位
-    // （append 打字 / `<Del>` 并线之后）——只有普通/可视模式要求「不越行尾」。
-    // 普通模式的唯一例外是 `cur == len`：本宿主行模型折叠末尾 \n，vim 模型
-    // 里 `o<Esc>`（末行开行）留下的「新空行行首」在这里表现为幻影末位
-    // （round25 起 exit_insert 宁可停 len 也不停在 \n 上——那里 `x` 会并线）
+    // in insert mode the cursor legitimately sits at line_end (the insert position at
+    // end of line) or even at the buffer's phantom last position (after typing with
+    // `append` or after `<Del>` joins lines) — only normal/visual require "not past the
+    // line end". The single exception in normal mode is `cur == len`: this host's line
+    // model folds the trailing \n, so in the vim model the "start of the new empty line"
+    // left by `o<Esc>` (opening a line at the end) appears here as the phantom last
+    // position (since round25 exit_insert prefers to stop at len rather than on the \n —
+    // where `x` would join lines)
     if matches!(
         f.vim.mode(),
         vimcore::mode::Mode::Insert | vimcore::mode::Mode::Replace
@@ -238,7 +247,7 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
     } else if cur != len && cur > buf.line_end(line) {
         return Err(format!("cursor {cur} past line {line} end"));
     }
-    // 存储偏移可寻址（marks / changelist / jumplist / last_visual）
+    // stored offsets addressable (marks / changelist / jumplist / last_visual)
     let floor = |off: usize| {
         let mut o = off.min(len);
         while o > 0 && !text.is_char_boundary(o) {
@@ -255,7 +264,7 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
     Ok(())
 }
 
-/// 主轰炸循环（round16 的宿主事件注入 + 本轮键表）。
+/// The main barrage loop (round16's host event injection + this round's key table).
 #[test]
 fn fuzz_round19_d_c_line_model_holds_invariants() {
     for seed in 0..SEEDS {
@@ -263,7 +272,7 @@ fn fuzz_round19_d_c_line_model_holds_invariants() {
         for round in 0..ROUNDS {
             let mut f = Fixture::new("seed");
             buffer_reset(&mut f, seed); // fresh fixture: engine starts idle
-            // 一半种子预置一个 mark + changelist 条目（E20/`'a` 面常态可达）
+            // half the seeds pre-set a mark + a changelist entry (E20/`'a` surface routinely reachable)
             if seed % 2 == 0 {
                 f.feed(["m", "a"]);
                 f.feed(["x"]);
@@ -301,8 +310,9 @@ fn fuzz_round19_d_c_line_model_holds_invariants() {
                 } else {
                     f.feed([key]);
                 }
-                // 每步 1/16 概率重置缓冲（本轮的 D/C 行模型对缓冲形状
-                // 高度敏感——短行/唯一行/eol 形状要高频轮换）
+                // 1/16 chance per step to reset the buffer (this round's D/C line model
+                // is highly sensitive to buffer shape — short-line/sole-line/eol shapes
+                // must rotate at high frequency)
                 rng = fuzz_xorshift(&mut rng);
                 if rng % 16 == 0 {
                     buffer_reset_when_idle(&mut f, rng >> 8);
@@ -318,8 +328,8 @@ fn fuzz_round19_d_c_line_model_holds_invariants() {
     }
 }
 
-/// 定向：D/C 的全部（行位置 × count × col）形态在 1-4 行缓冲上不 panic
-/// 且行数 ≥ 1——`delete_to_end_span` 的真值表轰炸。
+/// Targeted: all (line position × count × col) shapes of D/C on 1-4 line buffers never
+/// panic and line count ≥ 1 — the truth-table barrage over `delete_to_end_span`.
 #[test]
 fn fuzz_d_c_shapes_never_break_line_invariant() {
     for buf_text in ["a\n", "a\nb\n", "a\nb\nc\n", "aaaa\nbbbb\ncccc\ndddd\n", ""] {
@@ -342,7 +352,7 @@ fn fuzz_d_c_shapes_never_break_line_invariant() {
                         f.buf.line_count() >= 1,
                         "buf={buf_text:?} line={line} col={col} keys={count_key:?}: no lines left"
                     );
-                    // 撤销回路也要能吃下结果（undo 恢复宿主文本）
+                    // the undo circuit must also digest the result (undo restores host text)
                     f.feed(["u"]);
                     assert!(f.buf.line_count() >= 1);
                 }
@@ -351,8 +361,8 @@ fn fuzz_d_c_shapes_never_break_line_invariant() {
     }
 }
 
-/// 定向：`.` 重放在 D/C 修复后的 span 模型上不 panic（记录的重放键穿过
-/// 同一条 delete_to_end_span 路径）。
+/// Targeted: `.` replay never panics on the span model after the D/C fix (the recorded
+/// replay keys go through the very same delete_to_end_span path).
 #[test]
 fn fuzz_dot_replay_of_d_c_shapes() {
     for seed in 0..32u64 {

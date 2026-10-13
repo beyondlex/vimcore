@@ -1,13 +1,14 @@
-//! 第六轮审计探针（Ex / 命令行 / :s / :set / marks / registers 域）。
+//! Round-6 audit probes (Ex / command line / :s / :set / marks / registers domains).
 //!
-//! 每个探针先用 `/usr/bin/vim`（VIM 9.1）实证，再钉住引擎行为；修复前
-//! 应当失败，修复后转为回归。全部为绿即代表本轮新增 bug 已清零。
+//! Every probe is first verified against `/usr/bin/vim` (VIM 9.1), then pinned as engine behavior;
+//! it should fail before the fix and becomes a regression after. All green means this round's new
+//! bugs are zeroed out.
 
 mod common;
 
 use common::Fixture;
 
-/// 把一条 Ex 命令行逐字符送进提示符（`f.feed` 的 item 是「一个键」）。
+/// Feed one Ex command line character by character into the prompt (each item of `f.feed` is "one key").
 fn ex(f: &mut Fixture, line: &str) {
     let mut keys: Vec<String> = vec![":".to_owned()];
     keys.extend(line.chars().map(|c| c.to_string()));
@@ -19,12 +20,12 @@ fn last_status(f: &Fixture) -> String {
     f.host.statuses.last().cloned().unwrap_or_default()
 }
 
-// ======================================================== :set 数值语法
+// ======================================================== :set numeric syntax
 
-// oracle（`vim -Nu NONE -N -i NONE -n -s`，`:set ts=-1`）：
+// oracle (`vim -Nu NONE -N -i NONE -n -s`, `:set ts=-1`):
 //   E487: Argument must be positive: ts=-1
-// 引擎旧行为：`value.parse::<usize>("-1")` 失败 → E521（把负号当语法错误）。
-// 数值选项的解析语法 = 可选 `-` + 数字、整串消费；负值一律 E487。
+// Old engine behavior: `value.parse::<usize>("-1")` failed → E521 (treated the minus sign as a syntax error).
+// The parse grammar of numeric options = optional `-` + digits, whole string consumed; negative values always E487.
 #[test]
 fn set_negative_value_is_e487_not_e521() {
     for (opt, val) in [("ts", "-1"), ("sw", "-1"), ("tw", "-1"), ("so", "-1")] {
@@ -33,14 +34,14 @@ fn set_negative_value_is_e487_not_e521() {
         assert_eq!(
             last_status(&f),
             format!("E487: Argument must be positive: {opt}={val}"),
-            "`:{opt}={val}` 应报 E487（oracle）；实际 {:?}",
+            "`:{opt}={val}` should report E487 (oracle); actual {:?}",
             f.host.statuses
         );
     }
 }
 
-// oracle：`:set ts=+4` → E521: Number required after =: ts=+4
-// 引擎旧行为：Rust 的 `"+4".parse::<usize>()` = Ok(4)，静默接受。
+// oracle: `:set ts=+4` → E521: Number required after =: ts=+4
+// Old engine behavior: Rust's `"+4".parse::<usize>()` = Ok(4), silently accepted.
 #[test]
 fn set_leading_plus_is_e521() {
     let mut f = Fixture::new("a\n");
@@ -48,13 +49,13 @@ fn set_leading_plus_is_e521() {
     assert_eq!(
         last_status(&f),
         "E521: Number required after =: ts=+4",
-        "`+4` 不是合法数字（oracle E521）：{:?}",
+        "`+4` is not a legal number (oracle E521): {:?}",
         f.host.statuses
     );
 }
 
-// oracle：`-0` 解析为 0，故 `:set ts=-0` → E487（tabstop 必须为正），
-// 而 `:set sw=-0` → 接受（0 合法）。负号标记法会把 `-0` 误判为负。
+// oracle: `-0` parses as 0, so `:set ts=-0` → E487 (tabstop must be positive), while `:set sw=-0`
+// → accepted (0 is legal). A sign-flag check would misjudge `-0` as negative.
 #[test]
 fn set_negative_zero_follows_zero_rules() {
     let mut f = Fixture::new("a\n");
@@ -62,21 +63,21 @@ fn set_negative_zero_follows_zero_rules() {
     assert_eq!(
         last_status(&f),
         "E487: Argument must be positive: ts=-0",
-        "`:set ts=-0` = ts=0 → E487：{:?}",
+        "`:set ts=-0` = ts=0 → E487: {:?}",
         f.host.statuses
     );
     let mut f = Fixture::new("a\n");
     ex(&mut f, "set sw=-0");
     assert!(
         !f.host.statuses.iter().any(|s| s.contains("E4")),
-        "`:set sw=-0` = sw=0 → 合法：{:?}",
+        "`:set sw=-0` = sw=0 → legal: {:?}",
         f.host.statuses
     );
 }
 
-// oracle：E487/E474 消息引用**用户键入的名字**（别名或全名）：
+// oracle: E487/E474 messages quote the name **the user typed** (alias or full name):
 //   `:set tabstop=0` → "E487: Argument must be positive: tabstop=0"
-// 引擎旧行为把名字硬编码成 "ts"。
+// The old engine hardcoded the name as "ts".
 #[test]
 fn set_error_message_quotes_typed_name() {
     let mut f = Fixture::new("a\n");
@@ -84,7 +85,7 @@ fn set_error_message_quotes_typed_name() {
     assert_eq!(
         last_status(&f),
         "E487: Argument must be positive: tabstop=0",
-        "消息应引用键入名 tabstop：{:?}",
+        "the message should quote the typed name tabstop: {:?}",
         f.host.statuses
     );
     let mut f = Fixture::new("a\n");
@@ -92,20 +93,20 @@ fn set_error_message_quotes_typed_name() {
     assert_eq!(
         last_status(&f),
         "E474: Invalid argument: tabstop=10000",
-        "消息应引用键入名 tabstop：{:?}",
+        "the message should quote the typed name tabstop: {:?}",
         f.host.statuses
     );
 }
 
-// oracle：'tabstop' 的真正上界是 9999（`:set ts=9999` 接受，`:set ts=10000`
-// → "E474: Invalid argument: ts=10000"）；引擎旧上界 1e6 让 10000 悄悄通过。
+// oracle: the real upper bound of 'tabstop' is 9999 (`:set ts=9999` accepted, `:set ts=10000` →
+// "E474: Invalid argument: ts=10000"); the engine's old ceiling of 1e6 let 10000 slip through.
 #[test]
 fn set_tabstop_ceiling_is_9999() {
     let mut f = Fixture::new("a\n");
     ex(&mut f, "set ts=9999");
     assert!(
         !f.host.statuses.iter().any(|s| s.contains("E474")),
-        "`:set ts=9999` 合法：{:?}",
+        "`:set ts=9999` is legal: {:?}",
         f.host.statuses
     );
     let mut f = Fixture::new("a\n");
@@ -113,16 +114,16 @@ fn set_tabstop_ceiling_is_9999() {
     assert_eq!(
         last_status(&f),
         "E474: Invalid argument: ts=10000",
-        "`:set ts=10000` 超上界（oracle E474）：{:?}",
+        "`:set ts=10000` exceeds the ceiling (oracle E474): {:?}",
         f.host.statuses
     );
 }
 
-// ======================================================== :marks 过滤
+// ======================================================== :marks filtering
 
-// oracle（redir）：`:marks z`（z 是合法但未设的名字）→
-//   E283: No marks matching "z"（无表头）
-// 引擎旧行为：无条件先打表头，然后一行不列，静默。
+// oracle (redir): `:marks z` (z is a legal but unset name) →
+//   E283: No marks matching "z" (no header)
+// Old engine behavior: unconditionally printed the header first, then listed no lines, silently.
 #[test]
 fn marks_unknown_filter_reports_e283() {
     let mut f = Fixture::new("aa\n");
@@ -132,7 +133,7 @@ fn marks_unknown_filter_reports_e283() {
             .statuses
             .iter()
             .any(|s| s == "E283: No marks matching \"z\""),
-        "`:marks z` 应报 E283：{:?}",
+        "`:marks z` should report E283: {:?}",
         f.host.statuses
     );
     assert!(
@@ -140,12 +141,12 @@ fn marks_unknown_filter_reports_e283() {
             .statuses
             .iter()
             .any(|s| s == "mark line  col file/text"),
-        "E283 时不应输出表头：{:?}",
+        "no header should be printed on E283: {:?}",
         f.host.statuses
     );
 }
 
-// oracle：`:marks az`（a 存在、z 不存在）→ 表头 + a 行，无 E283。
+// oracle: `:marks az` (a exists, z does not) → header + the a line, no E283.
 #[test]
 fn marks_partial_filter_lists_existing_without_error() {
     let mut f = Fixture::new("aa\nbb\n");
@@ -156,7 +157,7 @@ fn marks_partial_filter_lists_existing_without_error() {
             .statuses
             .iter()
             .any(|s| s == "mark line  col file/text"),
-        "`:marks az` 应输出表头：{:?}",
+        "`:marks az` should print the header: {:?}",
         f.host.statuses
     );
     assert!(
@@ -164,40 +165,40 @@ fn marks_partial_filter_lists_existing_without_error() {
             .statuses
             .iter()
             .any(|s| s.starts_with(" a") && s.contains("aa")),
-        "`:marks az` 应列出 a：{:?}",
+        "`:marks az` should list a: {:?}",
         f.host.statuses
     );
     assert!(
         !f.host.statuses.iter().any(|s| s.contains("E283")),
-        "`:marks az` 有命中，不报 E283：{:?}",
+        "`:marks az` has hits, must not report E283: {:?}",
         f.host.statuses
     );
 }
 
 // ======================================================== :delmarks
 
-// oracle：`:2m/c`（**搜索地址**作目标）→ 行 2 移到 /c 命中行之后：
-//   [a,c,b,d,e]，无报错。引擎旧行为把 `/c` 当非法地址报 E16。
+// oracle: `:2m/c` (a **search address** as target) → line 2 moves after the /c hit line:
+//   [a,c,b,d,e], no error. The old engine treated `/c` as an invalid address and reported E16.
 #[test]
 fn move_to_search_address() {
     let mut f = Fixture::new("a\nb\nc\nd\ne\n");
     ex(&mut f, "2m/c");
-    assert_eq!(f.text(), "a\nc\nb\nd\ne\n", "`:2m/c` 应移到 /c 之后");
+    assert_eq!(f.text(), "a\nc\nb\nd\ne\n", "`:2m/c` should move after /c");
     assert!(
         !f.host.statuses.iter().any(|s| s.contains("E16")),
-        "搜索地址合法：{:?}",
+        "a search address is legal: {:?}",
         f.host.statuses
     );
-    // `:2t/c` 复制到 /c 之后
+    // `:2t/c` copies after the /c hit
     let mut f = Fixture::new("a\nb\nc\nd\ne\n");
     ex(&mut f, "2t/c");
-    assert_eq!(f.text(), "a\nb\nc\nb\nd\ne\n", "`:2t/c` 应复制到 /c 之后");
+    assert_eq!(f.text(), "a\nb\nc\nb\nd\ne\n", "`:2t/c` should copy after /c");
 }
 
-// oracle：`:m` 目标地址的错误消息各不相同（引擎旧行为一律 E16）：
-//   `:2m'a`（未设）→ E20: Mark not set；`:2m'@` → E78: Unknown mark；
-//   `:2m/`（无上次搜索）→ E35: No previous regular expression；
-//   `:2m/zzz`（未命中）→ E486: Pattern not found: zzz。
+// oracle: the error messages for `:m` destination addresses each differ (the old engine always gave E16):
+//   `:2m'a` (unset) → E20: Mark not set; `:2m'@` → E78: Unknown mark;
+//   `:2m/` (no previous search) → E35: No previous regular expression;
+//   `:2m/zzz` (no hit) → E486: Pattern not found: zzz.
 #[test]
 fn move_destination_error_messages() {
     let mut f = Fixture::new("a\nb\nc\nd\ne\n");
@@ -214,7 +215,7 @@ fn move_destination_error_messages() {
     assert_eq!(last_status(&f), "E486: Pattern not found: zzz");
 }
 
-// 引擎旧行为：把 `!` 当"清空 a-z"、再把 x 删掉，无报错。
+// Old engine behavior: treated `!` as "clear a-z", then deleted x anyway, with no error.
 #[test]
 fn delmarks_bang_with_argument_is_e474() {
     let mut f = Fixture::new("a\nb\n");
@@ -223,17 +224,17 @@ fn delmarks_bang_with_argument_is_e474() {
     assert_eq!(
         last_status(&f),
         "E474: Invalid argument",
-        "`:delmarks! x` 应报 E474：{:?}",
+        "`:delmarks! x` should report E474: {:?}",
         f.host.statuses
     );
-    // a 未被删除（命令整体失败）
+    // a was not deleted (the whole command failed)
     f.feed([":", "'", "a", "<CR>"]);
-    assert_eq!(f.line(), 0, "失败后标记 a 仍在原位");
+    assert_eq!(f.line(), 0, "after the failure mark a is still in place");
 }
 
-// oracle：`:delmarks !`（空格后的 ! 不是 forceit，是非法字符）→
+// oracle: `:delmarks !` (the ! after a space is not forceit, it is an invalid character) →
 //   E475: Invalid argument: !
-// 引擎旧行为：token "!" 触发清空 a-z。
+// Old engine behavior: the token "!" triggered clearing a-z.
 #[test]
 fn delmarks_spaced_bang_is_e475() {
     let mut f = Fixture::new("a\nb\n");
@@ -242,13 +243,13 @@ fn delmarks_spaced_bang_is_e475() {
     assert_eq!(
         last_status(&f),
         "E475: Invalid argument: !",
-        "`:delmarks !` 应报 E475：{:?}",
+        "`:delmarks !` should report E475: {:?}",
         f.host.statuses
     );
 }
 
-// oracle：`:delmarks @` → E475: Invalid argument: @（引擎旧行为静默忽略）。
-// `:delmarks a @` → 先删 a，再在 @ 处 E475（消息 = 从该字节起的剩余参数）。
+// oracle: `:delmarks @` → E475: Invalid argument: @ (the old engine silently ignored it).
+// `:delmarks a @` → deletes a first, then E475 at @ (message = the remaining arguments from that byte on).
 #[test]
 fn delmarks_invalid_char_is_e475_with_tail() {
     let mut f = Fixture::new("a\nb\n");
@@ -257,7 +258,7 @@ fn delmarks_invalid_char_is_e475_with_tail() {
     assert_eq!(
         last_status(&f),
         "E475: Invalid argument: @",
-        "`:delmarks @` 应报 E475：{:?}",
+        "`:delmarks @` should report E475: {:?}",
         f.host.statuses
     );
 
@@ -267,13 +268,13 @@ fn delmarks_invalid_char_is_e475_with_tail() {
     assert_eq!(
         last_status(&f),
         "E475: Invalid argument: @",
-        "`:delmarks a @` 应报 E475（尾部 = @）：{:?}",
+        "`:delmarks a @` should report E475 (tail = @): {:?}",
         f.host.statuses
     );
 }
 
-// oracle：`:delmarks ab` 逐字符处理 → 同时删 a 和 b（引擎旧行为按空白切分
-// 后把 "ab" 当尾随字符报错）。
+// oracle: `:delmarks ab` is processed character by character → deleting both a and b (the old
+// engine split on whitespace and then treated "ab" as a trailing-character error).
 #[test]
 fn delmarks_concatenated_names_delete_each() {
     let mut f = Fixture::new("a\nb\nc\n");
@@ -282,15 +283,15 @@ fn delmarks_concatenated_names_delete_each() {
     f.feed([":", "'", "a", "<CR>"]);
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E20")),
-        "a 应被删除（跳转报 E20）：{:?}",
+        "a should be deleted (jump reports E20): {:?}",
         f.host.statuses
     );
     f.feed([":", "'", "c", "<CR>"]);
-    assert_eq!(f.line(), 2, "c 未被删除，仍可跳转");
+    assert_eq!(f.line(), 2, "c was not deleted and is still jumpable to");
 }
 
-// oracle：`"` 起注释，终止参数 → `:delmarks a " note` 只删 a（不误删
-// c/o/m/e/n/t），`:delmarks "` → E471。
+// oracle: `"` starts a comment and terminates the arguments → `:delmarks a " note` deletes only a
+// (not mistakenly c/o/m/e/n/t), and `:delmarks "` → E471.
 #[test]
 fn delmarks_double_quote_starts_comment() {
     let mut f = Fixture::new("a\nb\nc\n");
@@ -299,18 +300,18 @@ fn delmarks_double_quote_starts_comment() {
     f.feed([":", "'", "a", "<CR>"]);
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E20")),
-        "a 应被删除：{:?}",
+        "a should be deleted: {:?}",
         f.host.statuses
     );
     f.feed([":", "'", "c", "<CR>"]);
-    assert_eq!(f.line(), 2, "c 不应被注释文本误删");
+    assert_eq!(f.line(), 2, "c must not be deleted by the comment text");
 
     let mut f = Fixture::new("a\nb\n");
     ex(&mut f, "delmarks \"");
     assert_eq!(
         last_status(&f),
         "E471: Argument required",
-        "`:delmarks \"` 注释后参数为空 → E471：{:?}",
+        "`:delmarks \"` has empty arguments after the comment → E471: {:?}",
         f.host.statuses
     );
 }
