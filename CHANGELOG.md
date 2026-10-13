@@ -1,75 +1,99 @@
 # CHANGELOG
 
-本文件只记录**面向宿主的 API 变化**。各轮语义修复的逐项明细在
-`NOTES.md`（按轮次，含各轮独立审计摘要），发布前以其为准。
+This file records only **host-facing API changes**. The itemized detail
+of each round's semantic fixes lives in `NOTES.md` (organized by round,
+each round with its own audit summary), which is authoritative before a
+release.
 
-格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号与 `Cargo.toml` 一致。
+The format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
+and the version numbers match `Cargo.toml`.
 
 ## [0.2.1] - 2026-10-13
 
-只读管线的一处补漏：宿主在引擎之下换掉文本后（多视图布局切窗格/窗口），
-`hlsearch` 的高亮需要重新对齐到新缓冲——此前只能喂一个合成按键。
+One gap closed in the read-only pipeline: after the host swaps the text
+underneath the engine (multi-view layouts switching pane/window), the
+`hlsearch` highlights need to be realigned to the new buffer — until now
+the only option was feeding a synthetic key.
 
 ### Added
 
-- **`VimState::refresh_highlights_ro`**：与 `handle_key_ro` 同样的封装
-  （`RoBuffer` + `RoHost`，强制关闭 `modifiable`），内部调用
-  `republish_search_inner`。没有活动搜索模式时是空操作。
-- 回归测试 `tests/readonly_pipeline.rs`：重新发布的是**新缓冲的坐标**
-  （不是陈旧的偏移）、缓冲保持逐字节未改动、无模式时确认为空操作。
+- **`VimState::refresh_highlights_ro`**: the same wrapper as
+  `handle_key_ro` (`RoBuffer` + `RoHost`, `modifiable` forced off),
+  calling `republish_search_inner` internally. A no-op when there is no
+  active search pattern.
+- Regression test `tests/readonly_pipeline.rs`: what gets republished
+  are the **coordinates of the new buffer** (not stale offsets), the
+  buffer stays byte-for-byte unmodified, and no pattern is confirmed to
+  be a no-op.
 
 ### Changed
 
-- `Cargo.toml` 版本 0.2.0 → 0.2.1。
+- `Cargo.toml` version 0.2.0 → 0.2.1.
 
 ## [0.2.0] - 2026-10-12
 
-只读管线（read-only pipeline）与宿主 motion 拦截点——`PLAN_READONLY.md`
-M1–M4。动机：diff / 日志 / 预览类纯查看宿主接不进来（`Ctx` 要求
-`&mut dyn VimBufferMut`），此前只能伪造写原语或放弃整台引擎。
+The read-only pipeline and the host motion interception point —
+`PLAN_READONLY.md` M1–M4. Motivation: pure viewing hosts such as diff /
+logs / previews could not hook in (`Ctx` requires
+`&mut dyn VimBufferMut`); previously the only options were faking the
+write primitives or abandoning the whole engine.
 
 ### Added
 
-- **只读管线**：`VimHostRo`（`VimHost` 的查看侧钩子子集）、`CtxRo { buf:
-  &dyn VimBuffer, host: &mut dyn VimHostRo }`、`VimState::handle_key_ro`。
-  主管线与 `handle_key` 共用，不复制 state.rs。缓冲以共享引用进入，
-  改动在构造上不可能。
-- **`MotionHook`**（独立 opt-in trait）+ `VimHost::motion_hook()` 取用器
-  （默认 `None`）：宿主可接管个别 motion（diff 的 `]c`/`[c`、折叠感知的
-  `j/k`），插入点在 `Motion::target` 最外层；算子待决与可视扩展免费获得。
-- **`'modifiable'`**：`VimState::set_modifiable` / `is_modifiable`，
-  `:set [no|inv]ma[?|!|&]` 可用。为 `false` 时编辑类命令在执行点按 vim
-  9.1 的 E21 语义拒绝（响铃 + `status_message`，按键记 `Consumed`）。
-- **tck 新契约**：`tck::readonly_contract`（A 步）与
-  `tck::readonly_pipeline_contract`（B 步）——41 条编辑键位断言 E21 +
-  缓冲逐字节不变 + 拒绝后状态机健康；10 条查看键位不得误报。
-- `RoBuffer` / `RoHost` 适配器（`&dyn VimBuffer` → `VimBufferMut`、
-  `&dyn VimHostRo` → `VimHost`），宿主自己的类型无需改动即可接入。
+- **Read-only pipeline**: `VimHostRo` (the viewing-side subset of
+  `VimHost`'s hooks), `CtxRo { buf: &dyn VimBuffer, host: &mut dyn
+  VimHostRo }`, `VimState::handle_key_ro`. The main pipeline is shared
+  with `handle_key`; state.rs is not duplicated. The buffer enters by
+  shared reference, so mutation is impossible by construction.
+- **`MotionHook`** (a standalone opt-in trait) + the `VimHost::motion_hook()`
+  accessor (default `None`): the host can take over individual motions
+  (diff's `]c`/`[c`, fold-aware `j/k`); the insertion point is the
+  outermost layer of `Motion::target`; pending operators and visual
+  extension come for free.
+- **`'modifiable'`**: `VimState::set_modifiable` / `is_modifiable`,
+  `:set [no|inv]ma[?|!|&]` available. When `false`, editing commands are
+  rejected at the execution point with vim 9.1's E21 semantics (bell +
+  `status_message`, the key recorded as `Consumed`).
+- **New tck contracts**: `tck::readonly_contract` (step A) and
+  `tck::readonly_pipeline_contract` (step B) — the 41 editing keys are
+  asserted to yield E21 + a byte-identical buffer + a healthy state
+  machine after rejection; the 10 viewing keys must not false-positive.
+- `RoBuffer` / `RoHost` adapters (`&dyn VimBuffer` → `VimBufferMut`,
+  `&dyn VimHostRo` → `VimHost`) so hosts can integrate without changing
+  their own types.
 
-### Changed（**源级破坏**）
+### Changed (**source-breaking**)
 
-- `VimBufferMut::insert_text` / `delete_range` / `replace_range` 的返回类型
-  由 `()` 改为 **`bool`**，且**默认实现返回 `false`（拒绝）**。
-  编辑型宿主的迁移是机械替换：两个方法各加 `-> true`。
-  只读宿主的接入成本变成 `impl VimBufferMut for X {}`（零方法）。
-- `Cargo.toml` 版本 0.1.30 → 0.2.0。
+- The return type of `VimBufferMut::insert_text` / `delete_range` /
+  `replace_range` changed from `()` to **`bool`**, and the **default
+  implementation returns `false` (refuse)**. Migration for editing
+  hosts is a mechanical substitution: add `-> true` to each method.
+  Onboarding cost for read-only hosts becomes
+  `impl VimBufferMut for X {}` (zero methods).
+- `Cargo.toml` version 0.1.30 → 0.2.0.
 
-### 设计取舍（相对计划的偏离）
+### Design trade-offs (deviations from the plan)
 
-- `VimHost` **不做** `VimHostRo` 的 supertrait（会逼编辑宿主多写一个 impl
-  块，违背零迁移；且默认值钩子会让查看侧静默拿到错视口）——改用 `RoHost`
-  适配器。
-- 缓冲区用 `RoBuffer` 适配器而非计划中的 `BufferRef` 枚举——枚举方案要改
-  `ctx.buf` 的 589 处引用，适配器方案主管线零改动。
+- `VimHost` does **not** make `VimHostRo` a supertrait (it would force
+  editing hosts to write an extra impl block, violating zero migration;
+  and default-value hooks would silently hand the viewing side the
+  wrong viewport) — the `RoHost` adapter was used instead.
+- The buffer uses the `RoBuffer` adapter rather than the planned
+  `BufferRef` enum — the enum approach would require changing 589
+  references to `ctx.buf`, while the adapter approach leaves the main
+  pipeline untouched.
 
-理由与 oracle 实证记录在 `NOTES.md` 的「只读管线（PLAN_READONLY P1/P2）」段。
+Rationale and oracle evidence are recorded in the "read-only pipeline
+(PLAN_READONLY P1/P2)" section of `NOTES.md`.
 
-## [0.1.30] - 2026-10-11 及以前
+## [0.1.30] - 2026-10-11 and earlier
 
-0.1.x（0.1.1 → 0.1.30）是与 vim 9.1 的逐轮语义对齐：三十余轮检视/独立审计，
-累计 300+ 项语义修复，全部经 `/usr/bin/vim`（9.1 patches 1-1752）实证。
-每轮的修复清单见 `NOTES.md` 对应轮次；测试按轮次落在
-`tests/audit*`、`tests/parity_round*`、`tests/probe_round*`、`tests/fuzz_*`。
+0.1.x (0.1.1 → 0.1.30) was round-by-round semantic alignment with vim
+9.1: over thirty review/independent-audit rounds, 300+ cumulative
+semantic fixes, all evidenced against `/usr/bin/vim` (9.1 patches
+1-1752). Each round's fix list is in the corresponding round of
+`NOTES.md`; tests land per round in `tests/audit*`,
+`tests/parity_round*`, `tests/probe_round*`, `tests/fuzz_*`.
 
-0.1.x 内无面向宿主的破坏性变更（宿主侧 API 稳定至 0.1.30）。
+No host-facing breaking changes within 0.1.x (the host-side API is
+stable through 0.1.30).

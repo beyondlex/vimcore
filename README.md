@@ -1,32 +1,34 @@
 # vimcore
 
-纯 Rust 的**宿主无关 Vim 引擎**：模式机、motions、operators、text objects、
-寄存器、搜索、marks、宏、`.` 重放、Ex 命令。零 GUI、零终端依赖（运行时仅
-`regex` + `unicode-width`），通过两个宿主 trait 接入任何 Rust UI——gpui、
-ratatui、自绘 ANSI 皆可。
+A **host-agnostic Vim engine in pure Rust**: mode machine, motions,
+operators, text objects, registers, search, marks, macros, `.` repeat,
+Ex commands. Zero GUI, zero terminal dependencies (runtime deps are only
+`regex` + `unicode-width`), wired into any Rust UI through two host
+traits — gpui, ratatui, or your own ANSI renderer.
 
 ```
-┌──────────────────────────────────────────────┐
-│ 你的应用（gpui / ratatui / 自绘 ANSI / …）    │
-├──────────────────────────────────────────────┤
-│ 前端集成 crate（各管一段）                    │
-│  · gpui-vim      keystroke 拦截 + 模式 UI    │
-│  · crossterm-vim 键转换 + 缓冲 + 宿主副作用  │
-│  · ratatui-vim   状态绘制层                  │
-├──────────────────────────────────────────────┤
-│ vimcore（本 crate）  纯引擎：                │
-│  · 模式机 · 按键流水线 · Trie 命令表         │
-│  · motion · operator · text object          │
-│  · 寄存器 · 搜索 · marks · 宏 · `.` · Ex    │
-├──────────────────────────────────────────────┤
-│ 宿主 trait：VimBuffer(Mut) + VimHost（你实现）│
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Your app (gpui / ratatui / custom ANSI / ...)                │
+├──────────────────────────────────────────────────────────────┤
+│ Front-end integration crates (each owns a slice)             │
+│  - gpui-vim      keystroke interception + mode UI            │
+│  - crossterm-vim key translation + buffer + host side effects│
+│  - ratatui-vim   state rendering layer                       │
+├──────────────────────────────────────────────────────────────┤
+│ vimcore (this crate)  pure engine:                           │
+│  - mode machine - key pipeline - Trie command table          │
+│  - motion - operator - text object                           │
+│  - registers - search - marks - macros - `.` - Ex            │
+├──────────────────────────────────────────────────────────────┤
+│ Host traits: VimBuffer(Mut) + VimHost (you implement them)   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-分层形态承自 IdeaVim 的 `vim-engine`：引擎持有光标与模式，宿主只实现
-buffer 读写与视口/剪贴板/undo 钩子。
+The layered shape is inherited from IdeaVim's `vim-engine`: the engine
+owns the cursor and modes; the host only implements buffer read/write
+plus viewport/clipboard/undo hooks.
 
-## 用法
+## Usage
 
 ```rust
 use vimcore::buffer::VimBufferMut;
@@ -34,51 +36,58 @@ use vimcore::key::Key;
 use vimcore::state::{Ctx, KeyResult, VimState};
 
 let mut vim = VimState::new();
-let mut buf = MyBuffer::default();   // 实现 VimBuffer + VimBufferMut
-let mut host = MyHost::default();    // 实现 VimHost（视口/剪贴板/undo 钩子）
+let mut buf = MyBuffer::default();   // implements VimBuffer + VimBufferMut
+let mut host = MyHost::default();    // implements VimHost (viewport/clipboard/undo hooks)
 
 let mut ctx = Ctx { buf: &mut buf, host: &mut host };
 match vim.handle_key(&mut ctx, Key::parse("dd")) {
-    KeyResult::Handled => {}   // 引擎已处理，状态与 buffer 已更新
-    KeyResult::Unknown => {}   // 引擎不要这个键，还给宿主
+    KeyResult::Handled => {}   // engine handled it; state and buffer updated
+    KeyResult::Unknown => {}   // engine does not want this key; give it back to the host
 }
 ```
 
-引擎内部统一 UTF-8 字节偏移，渲染所需的全部状态（模式、光标、可视选区、
-搜索高亮）都可读。
+Internally the engine uses UTF-8 byte offsets uniformly, and all state
+needed for rendering (mode, cursor, visual selection, search highlight)
+is readable.
 
-## 只读宿主（diff view / 日志 / 预览）
+## Read-only hosts (diff view / logs / previews)
 
-纯查看类宿主拿不出 `VimBufferMut` 的写原语，但它们要的是同一台引擎的
-motion / text object / 搜索 / marks / 滚动。只读路径就是为此存在的：
+Pure viewing hosts cannot provide `VimBufferMut`'s write primitives, yet
+what they want is the same engine's motions / text objects / search /
+marks / scrolling. The read-only path exists for exactly this:
 
 ```rust,ignore
 use vimcore::buffer::VimBuffer;
 use vimcore::host::VimHostRo;
 use vimcore::state::{CtxRo, VimState};
 
-impl VimBuffer for MyView { /* 只读访问 */ }
-impl VimHostRo for MyHost { /* 视口 / 剪贴板写 / 高亮 / 状态消息 */ }
+impl VimBuffer for MyView { /* read-only access */ }
+impl VimHostRo for MyHost { /* viewport / clipboard write / highlight / status messages */ }
 
 let mut ctx = CtxRo { buf: &my_view, host: &mut my_host };
 vim.handle_key_ro(&mut ctx, key);
 ```
 
-- 编辑类命令按 vim 的 **E21** 拒绝（响铃 + `E21: Cannot make changes,
-  'modifiable' is off`），不会 panic 也不会静默 no-op；
-- `y`（yank）、`m{a}`、搜索、`n`/`N`、滚动、`:q` 全部照常；
-- 只想用完整 `VimHost` 的宿主也能走兼容层：`impl VimBufferMut for X {}`
-  （零方法，写原语默认拒绝）+ `vim.set_modifiable(false)`；
-- 折叠 / 合成行投影这类"宿主自己的行模型"通过 `MotionHook` 接管个别
-  motion（`j`/`k` 走可见行、`]c` 跳 diff chunk），算子待决与可视扩展免费
-  获得，折叠概念不进引擎。
+- Editing commands are rejected with vim's **E21** (bell +
+  `E21: Cannot make changes, 'modifiable' is off`); no panic and no
+  silent no-op;
+- `y` (yank), `m{a}`, search, `n`/`N`, scrolling, `:q` all work as usual;
+- A host that wants to keep the full `VimHost` can also use the
+  compatibility layer: `impl VimBufferMut for X {}` (zero methods, the
+  write primitives reject by default) + `vim.set_modifiable(false)`;
+- Host-side row models such as folding / synthetic line projection take
+  over individual motions via `MotionHook` (`j`/`k` walk visible lines,
+  `]c` jumps diff chunks); pending operators and visual extension come
+  for free, and the folding concept stays out of the engine.
 
-细节与 vim 9.1 实证见 `PLAN_READONLY.md` 与 `NOTES.md` 的只读管线一节。
+Details and vim 9.1 evidence: see `PLAN_READONLY.md` and the read-only
+pipeline section of `NOTES.md`.
 
-## 接入质量有测试下限（TCK）
+## Integration quality has a tested floor (TCK)
 
-宿主在自己的 buffer / host 实现上跑引擎自带的契约测试，把「接入质量靠读
-文档」变成「有可执行验收」：
+Hosts run the engine's built-in contract tests against their own buffer
+/ host implementations, turning "integration quality relies on reading
+docs" into "there is an executable acceptance":
 
 ```rust,ignore
 #[test]
@@ -89,7 +98,7 @@ fn my_buffer_meets_engine_contract() {
     vimcore::tck::engine_smoke_contract(&mut buf, &mut host).unwrap();
 }
 
-// 只读宿主：41 条编辑键位必须被 E21 拒绝且缓冲逐字节不变
+// Read-only host: the 41 editing keys must be rejected with E21 and the buffer stay byte-identical
 #[test]
 fn my_readonly_view_meets_engine_contract() {
     let buf = MyView::new("alpha\nbeta\ngamma\n");
@@ -97,26 +106,28 @@ fn my_readonly_view_meets_engine_contract() {
 }
 ```
 
-## 实际消费方
+## Actual consumers
 
-- [gpui-vim](https://github.com/beyondlex/gpui_vim)：GPUI 集成（[PandaGit](https://github.com/beyondlex/pandagit) 在用）
-- [crossterm-vim](https://github.com/beyondlex/crossterm_vim)：crossterm 通用集成 → ratatui-vim 绘制层（[jk](https://github.com/beyondlex/jks) 在用）
+- [gpui-vim](https://github.com/beyondlex/gpui_vim): GPUI integration (used by [PandaGit](https://github.com/beyondlex/pandagit))
+- [crossterm-vim](https://github.com/beyondlex/crossterm_vim): general crossterm integration → ratatui-vim rendering layer (used by [jk](https://github.com/beyondlex/jks))
 
-## 开发
+## Development
 
 ```bash
-cargo test            # 无头测试：引擎全量 + TCK 契约 + 随机 fuzz
-cargo run --release --example bench_probe   # 宿主实现的性能探针
+cargo test            # headless tests: full engine + TCK contracts + randomized fuzz
+cargo run --release --example bench_probe   # performance probe for host implementations
 ```
 
-`NOTES.md` 记录审查结论：已修复的 bug（vim 9.1 探针实证）、与 vim 的
-已知分歧、性能与体验备注——接入前值得通读。
+`NOTES.md` records the review conclusions: fixed bugs (evidenced by vim
+9.1 probes), known divergences from vim, and performance/UX notes —
+worth reading through before integrating.
 
-## 名字沿革
+## Name history
 
-`vim-core` → `gpui-vim-core`（2026-09-20，随 gpui_vim 上 crates.io）→
-`vimcore`（2026-09-28，独立建仓）。引擎从来不属于任何一个前端，名字不再
-锚定 gpui。
+`vim-core` → `gpui-vim-core` (2026-09-20, published to crates.io with
+gpui_vim) → `vimcore` (2026-09-28, standalone repository). The engine
+never belonged to any single front end, so the name no longer anchors to
+gpui.
 
 ## License
 

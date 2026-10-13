@@ -9,7 +9,7 @@ repository = "https://github.com/beyondlex/vimcore"
 readme = "README.md"
 keywords = ["vim", "editor", "engine", "modal", "tui"]
 categories = ["text-processing", "command-line-interface"]
-# 仓库内的中文→英文迁移计划，工作约定用，不随 crate 发布
+# in-repo Chinese-to-English migration plan; working conventions only, not published with the crate
 exclude = ["I18N_PLAN.md"]
 
 [dependencies]
@@ -24,8 +24,10 @@ ropey = "1"
 [profile.dev]
 opt-level = 1
 
-# fuzz 套件（fuzz_round7-13）在 test profile 下跑满管线预算（宏自递归的
-# @a 队列可重放 10 万键），opt-level 1 的调试构建要 78s——测试配置提到
-# 3，把重放路径压回秒级（增量编译代价可接受，见 NOTES 性能节）
+# the fuzz suites (fuzz_round7-13) exhaust the pipeline budget under the test
+# profile (macro self-recursion: the @a queue can replay 100k keys); an
+# opt-level 1 debug build takes 78s — the test profile is raised to 3 to push
+# the replay path back to seconds (incremental-compilation cost acceptable,
+# see the performance section of NOTES)
 [profile.test]
 opt-level = 3
