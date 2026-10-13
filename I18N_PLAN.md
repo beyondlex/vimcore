@@ -93,7 +93,9 @@ vimcore 拆分：`src/` 276 · `tests/` 5,179 · 文档 2,341 · `Cargo.toml` 3
 | alacer | 干净 | `main` | ✅ 已同步 `origin/main` |
 | crossterm_vim | 干净 | `main`（+ 备份 ref） | ✅ 已同步，见 §8.5 ③ |
 | gpui_vim | 干净 | `main` `fork-gpui-pre` | ✅ 分支 5 → 2，见 §3.1 |
-| vimcore | 干净 | `main` | ✅ 5 个提交待推送（归档 + 发布准备） |
+| vimcore | 干净 | `main` | ✅ 已推送 `1ad63f7..6ae45c4`（6 个提交：归档 2 + 发布准备 2 + 计划 2） |
+
+四个仓库当前**全部与远端同步、工作树干净**，这是 Phase A 的起点。
 
 > 历史重写**不会**自动处理未提交的工作树改动。带着脏工作树跑 filter-branch
 > 会让改动悬空——所以每批翻译**必须先提交**再进入 Phase B。
@@ -730,7 +732,14 @@ Phase B 重写的是 message 不是 tree，不影响发布；但**新版本要�
 新发现提交了，造成 `ahead 1 / behind 1` 分叉。
 
 **处置**：`backup/dup-prev-char-offset-fix` 留 ref → `git reset --hard
-origin/main` → 分叉消除，版本回到 0.1.2，`cargo test` 97 全绿。
+origin/main` → 分叉消除，版本回到 0.1.2，`cargo test` 97 全绿，
+四仓库全部与远端同步（2026-10-14 推送复核）。
+
+> 📌 **Phase B 注意**：crossterm_vim 现在多一个本地分支
+> `backup/dup-prev-char-offset-fix`（指向已回退的 `c51ccd4`，仅本地、未推送）。
+> §5.7 的 `--branches` 会把它一起重写（内容不变，SHA 变），无实质影响；
+> 若想让重写历史更干净，可在 Phase B 前 `git branch -D` 掉它——
+> `c51ccd4` 的代码改动已确认与 `cb86295` 完全一致，无独立价值。
 
 > ⚠️ **教训（写进流程）**：提交前必须 `git fetch` 并确认 origin 上**没有
 > 同一改动的另一个提交**。本地脏工作树 ≠ 未提交的新工作——它可能是已经
