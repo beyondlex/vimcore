@@ -461,11 +461,29 @@ Phase B 重写的是 message 不是 tree，不影响发布；但**新版本要�
 
 ### 8.5 发布前必须处理的三件事
 
-1. **`I18N_PLAN.md` 会被打进包**（`cargo package --list` 已确认在 108 个
-   文件里）。它是中文的**内部**迁移计划，不该进 crates.io。
-   → `Cargo.toml` 加 `exclude = ["I18N_PLAN.md"]`。
-2. **`CHANGELOG.md` 缺 0.2.1 条目**（只有 0.2.0）。CHANGELOG 自称
-   「版本号与 Cargo.toml 一致」，现在不一致。→ 发版前补。
-3. **`crossterm-vim` 本地 0.1.1 落后 crates.io 0.1.2**。得先查清 0.1.2
-   是在哪个 worktree/分支发的（本地无对应 bump 提交），再决定发 0.1.2
-   （会冲突，crates.io 不允许重发）还是 **0.1.3**。
+✅ **1. `I18N_PLAN.md` 不再进包**（已办，`b15567f`）
+
+`Cargo.toml` 加了 `exclude = ["I18N_PLAN.md"]`。用真实 `cargo package`
+验证过（不只是 `--list`）：打包文件 108 → **107**，产物里已无该文件。
+
+> 顺带一个可量化的进度指标——**本地新打的包含中文 7,823 行 / 89 文件**
+> （已发布 0.2.1 是 8,658 行 / 93 文件）。差额主要是归档掉的 4 个
+> BUG_AUDIT。Phase A 翻译完，这个数会再降到 ~350。
+
+✅ **2. `CHANGELOG.md` 补上 0.2.1 条目**（已办，`b15567f`）
+
+0.2.1 实际只发了一个东西：`VimState::refresh_highlights_ro`（`aff0f60`），
+已按 Added / Changed 两节补上，位置在 0.2.0 之上（新版在上）。
+
+⬜ **3. `crossterm-vim` 版本漂移**——本地 0.1.1 落后 crates.io 0.1.2。
+得先查清 0.1.2 是在哪个 worktree/分支发的（本地 `366bcab` 之后无 bump
+提交），再决定发 0.1.2（会冲突，crates.io 不允许重发）还是 **0.1.3**。
+`c51ccd4` 的 `prev_char_offset` 多字节边界修复目前仍未发布。
+
+### 8.6 已发布 vs 本地构建（对照）
+
+| | 含中文行数 | 文件数 | 说明 |
+|---|---|---|---|
+| crates.io **0.2.1**（已发布） | **8,658** | 93 | 不可变，永久保留 4 个 BUG_AUDIT |
+| 本地新构建（未发布） | **7,823** | 89 | 扣掉 BUG_AUDIT + exclude I18N_PLAN |
+| Phase A 完成后（预期） | **~350** | — | 只剩 L4 CJK 测试数据 + NOTES 归档说明 |
