@@ -6,6 +6,23 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号与 `Cargo.toml` 一致。
 
+## [0.2.1] - 2026-10-13
+
+只读管线的一处补漏：宿主在引擎之下换掉文本后（多视图布局切窗格/窗口），
+`hlsearch` 的高亮需要重新对齐到新缓冲——此前只能喂一个合成按键。
+
+### Added
+
+- **`VimState::refresh_highlights_ro`**：与 `handle_key_ro` 同样的封装
+  （`RoBuffer` + `RoHost`，强制关闭 `modifiable`），内部调用
+  `republish_search_inner`。没有活动搜索模式时是空操作。
+- 回归测试 `tests/readonly_pipeline.rs`：重新发布的是**新缓冲的坐标**
+  （不是陈旧的偏移）、缓冲保持逐字节未改动、无模式时确认为空操作。
+
+### Changed
+
+- `Cargo.toml` 版本 0.2.0 → 0.2.1。
+
 ## [0.2.0] - 2026-10-12
 
 只读管线（read-only pipeline）与宿主 motion 拦截点——`PLAN_READONLY.md`

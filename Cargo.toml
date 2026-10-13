@@ -9,6 +9,8 @@ repository = "https://github.com/beyondlex/vimcore"
 readme = "README.md"
 keywords = ["vim", "editor", "engine", "modal", "tui"]
 categories = ["text-processing", "command-line-interface"]
+# 仓库内的中文→英文迁移计划，工作约定用，不随 crate 发布
+exclude = ["I18N_PLAN.md"]
 
 [dependencies]
 regex = "1"
