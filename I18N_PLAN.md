@@ -350,7 +350,7 @@ git push --force --tags
 | 风险 | 说明 | 缓解 |
 |---|---|---|
 | L4 测试数据被误译 | 测试仍绿但覆盖率失效 | §1.1 自查模式 + §4.4 计数验收 |
-| crates.io 已发布版本改不了 | vimcore 0.1.0/0.2.0、gpui-vim-pre 0.1.1、gpui-vim-x 0.2.0 已上架，包内中文无法撤回 | **历史重写不解决此项**。要覆盖只能发新版本 |
+| crates.io 已发布版本改不了 | 实测 `vimcore-0.2.1.crate` 含 **8,658 行中文 / 93 文件**（含 4 个已归档的 BUG_AUDIT） | **历史重写不解决此项**。要覆盖只能发新版本，见 **§8** |
 | gpui_vim 多分支分叉 | 5 个分支，漏一个就保留旧历史 | §3 先确认范围，§5.3 用 `--branches` 全覆盖 |
 | force push 不可逆 | 推送后无本地回滚点 | §5.1 bundle 备份 + 推送前 `git log` 复核 |
 | 文档机翻失真 | `NOTES.md` 是 vim 语义审计笔记 | §4.3 强制逐篇精译 |
@@ -396,4 +396,76 @@ git branch --no-merged main
 git -C <worktree> switch --detach
 git branch -d <branch>          # -d 会校验，基准是当前 HEAD
 git push origin --delete <branch>   # 远端删除，慎用
+
+# --- 发布相关 ---
+cargo package --list            # 看哪些文件会被打进包（归档后验证）
+cargo publish --dry-run         # 发布前必跑
+curl -s https://crates.io/api/v1/crates/<crate> -H 'User-Agent: x' | jq '.crate.max_stable_version'
 ```
+
+---
+
+## 8. 发布事项（2026-10-14 补充，原计划缺此节）
+
+原计划只在 §6 风险表提了一句「crates.io 已发布版本改不了」，**没有发布流程**。
+这是缺口——迁移的价值有一半取决于发布出去的新版本是否干净。
+
+### 8.1 当前发布状态
+
+| crate | 本地版本 | crates.io 最新 | 状态 |
+|---|---|---|---|
+| `vimcore` | 0.2.1 | **0.2.1**（10-12） | 版本一致；包内含 884 行中文审计档案 |
+| `crossterm-vim` | **0.1.1** | **0.1.2**（10-09） | ⚠️ **本地落后已发布版本**，且 `c51ccd4` 修复未发布 |
+| `gpui-vim-pre` | 0.1.1 | 0.1.1 | 一致（tk 的 Bench 在消费） |
+| `gpui-vim-x` | — | 0.2.0 | 服务 pandagit；本次未核本地 |
+| `alacer` | 0.1.0 | **未发布**（0 版） | 无需发布 |
+
+### 8.2 已发布包里到底有多少中文（实测）
+
+下载 `vimcore-0.2.1.crate` 解包统计：
+
+```
+合计 8,658 行中文 / 93 文件
+   1,905  NOTES.md
+     409  BUG_AUDIT2.md   ← 已归档，但 0.2.1 包里还在
+     240  PLAN_READONLY.md
+     199  BUG_AUDIT3.md   ← 同上
+     165  BUG_AUDIT4.md   ← 同上
+     ...  tests/ 86 个文件
+```
+
+**这是「历史重写不解决已发布包」这条风险的量化版本**：crates.io 不可变，
+0.2.1 会永远带着这 8,658 行中文。要让公开产物变干净，**唯一办法是发新版本**。
+
+### 8.3 要不要发布？分三档
+
+| crate | 结论 | 理由 |
+|---|---|---|
+| **`vimcore`** | **建议发 0.2.2**，但**等 Phase A 之后** | 删文档不构成 semver 强制发布；但 0.2.1 包里带 884 行中文档案，只有新版能覆盖 |
+| **`crossterm-vim`** | **应该发** | `c51ccd4` 是真 bug（多字节字符边界落点），下游拿不到 |
+| `alacer` | 不需要 | 从未发布 |
+| `gpui-vim-x` | 待核 | 需先确认 main 分支相对 0.2.0 有无新改动 |
+
+### 8.4 顺序：翻译完再发布（关键）
+
+**发布必须排在 Phase A 之后。** 现在发 0.2.2，包里依然是全中文；
+翻译完再发，公开产物才真正变干净。
+
+```
+Phase A 翻译 → 推送 GitHub → Phase B 历史重写 → force push
+                                              → 发布新版本（此时源码已英文化）
+```
+
+Phase B 重写的是 message 不是 tree，不影响发布；但**新版本要在重写后的
+提交上发**，否则 git 历史与 crate 内容对不上。
+
+### 8.5 发布前必须处理的三件事
+
+1. **`I18N_PLAN.md` 会被打进包**（`cargo package --list` 已确认在 108 个
+   文件里）。它是中文的**内部**迁移计划，不该进 crates.io。
+   → `Cargo.toml` 加 `exclude = ["I18N_PLAN.md"]`。
+2. **`CHANGELOG.md` 缺 0.2.1 条目**（只有 0.2.0）。CHANGELOG 自称
+   「版本号与 Cargo.toml 一致」，现在不一致。→ 发版前补。
+3. **`crossterm-vim` 本地 0.1.1 落后 crates.io 0.1.2**。得先查清 0.1.2
+   是在哪个 worktree/分支发的（本地无对应 bump 提交），再决定发 0.1.2
+   （会冲突，crates.io 不允许重发）还是 **0.1.3**。
