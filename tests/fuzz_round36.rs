@@ -1,16 +1,19 @@
-//! 第三十六轮 fuzz：模板会话（可视/插入/宏/算子待决）× 更怪缓冲
-//! （独立审计第五轮伴随赛道）。
+//! Round-36 fuzz: template sessions (visual/insert/macro/operator-pending) × weirder buffers
+//! (companion lane of the fifth independent audit round).
 //!
-//! 与 round35（Ex 随机组装为主）互补，本文件的生成器偏置：
-//! - **模板会话**占 40%：可视三态会话、插入控制键会话、宏录制→重放→
-//!   重录、算子×计数×motion/对象组合，一次性灌 3-8 键；
-//! - 单键表加入确认循环键（y/n/q/l）、`q` 录制、`g?`、`ga`、`ZZ` 等
-//!   round35 未覆盖的角落（仍无 `!` 过滤、无 `:q`/`:w`/`:e` 会话级命令）；
-//! - 缓冲池换血：ZWJ emoji、组合字符行首、孤立 CR、星面字符、行尾
-//!   空白密排、TAB+宽字符混排。
+//! Complementary to round35 (mostly random Ex assembly), this file's generator is biased:
+//! - **template sessions** take 40%: three visual-mode sessions, insert control-key
+//!   sessions, macro record→replay→re-record, operator × count × motion/object combos,
+//!   poured 3-8 keys at a time;
+//! - the single-key table adds confirmation-loop keys (y/n/q/l), `q` recording, `g?`,
+//!   `ga`, `ZZ` and other corners round35 did not cover (still no `!` filter, no
+//!   session-level `:q`/`:w`/`:e` commands);
+//! - buffer pool replaced: ZWJ emoji, combining chars at line start, lone CR, astral
+//!   chars, dense trailing whitespace, TAB + wide chars mixed.
 //!
-//! 安全阀不变：`!` 过滤算子不进键表（不得触发 shell），`<`/`>` 只以
-//! 单键出现。不变量沿用渲染契约：光标/mark/高亮可寻址、line_count ≥ 1。
+//! Safety valve unchanged: the `!` filter operator stays out of the key table (must not
+//! trigger a shell), `<`/`>` appear only as single keys. Invariants follow the rendering
+//! contract: cursor/marks/highlights addressable, line_count ≥ 1.
 
 mod common;
 
@@ -31,7 +34,7 @@ const SEEDS: u64 = 40;
 const ROUNDS: usize = 40;
 const STEPS: usize = 100;
 
-/// 单键表（round36 增补：确认循环、录制、冷门 g 族）。
+/// Single-key table (round36 additions: confirmation loops, recording, obscure g-family).
 const KEYS: &[&str] = &[
     "d", "c", "y", ">", "<", "=", "~", "gu", "gU", "g?", "2", "3", "0", "J",
     "w", "e", "b", "ge", "j", "k", "h", "l", "^", "$", "g_", "gg", "G", "|",
@@ -43,14 +46,14 @@ const KEYS: &[&str] = &[
     "']", "'{", "'}", "'^", "'.", "g;", "g,", "z<CR>", "z.", "zz", "v", "V",
     "<C-v>", "gv", "\"ayy", "\"add", "\"ap", "\"aP", "\"0p", "\"2p", "\"_dd",
     "\"Ay", "\"+yiw", "/", "?", "y", "n", "q", "l", "ga", "ZZ", "g&", "U",
-    // 插入会话散键（idle 时多半落 normal 侧或响铃，无妨）
+    // Insert-session scatter keys (when idle most land normal-side or bell; harmless)
     "i", "a", "A", "I", "R", "<Esc>", "<BS>", "<Del>", "<Tab>", "<CR>",
     "<C-w>", "<C-u>", "<C-t>", "<C-d>", "<C-y>", "<C-e>", "<C-r>a", "<C-o>",
     "<Up>", "<Down>", "<Left>", "<Right>", "<Home>", "<End>", "<PageUp>",
     "<PageDown>",
 ];
 
-/// Ex 整句（生成器之外的高价值形态）。
+/// Full Ex sentences (high-value shapes beyond the generator).
 const EX_LINES: &[&str] = &[
     ":1,3d<CR>", ":3,1d<CR>", ":$-1,$m0<CR>", ":1t$<CR>", ":2,4y a<CR>",
     ":g/\\v</d<CR>", ":v/./d<CR>", ":%s/a/b/g<CR>", ":1,2j 3<CR>",
@@ -62,10 +65,10 @@ const EX_LINES: &[&str] = &[
     ":set ts?<CR>", ":set sw=2<CR>", ":.y a<CR>", ":\"ap<CR>",
 ];
 
-/// 可视会话的进入键。
+/// Entry keys of visual sessions.
 const VISUAL_ENTER: &[&str] = &["v", "V", "<C-v>"];
 
-/// 可视会话的走位与算子。
+/// Moves and operators inside visual sessions.
 const VISUAL_MOVES: &[&str] =
     &["j", "k", "h", "l", "w", "e", "b", "$", "0", "}", "{", "gg", "G", "f\"", "iw", "ap"];
 
@@ -74,14 +77,14 @@ const VISUAL_OPS: &[&str] = &[
     "I", "A", "x", "s", "r", "o", "O", "gv",
 ];
 
-/// 插入会话的载荷键。
+/// Payload keys of insert sessions.
 const INSERT_KEYS: &[&str] = &[
     "x", "中", "ｱ", "<Tab>", "<CR>", "<C-w>", "<C-u>", "<C-t>", "<C-d>",
     "<C-y>", "<C-e>", "<C-r>a", "<C-r>\"", "<C-o>x", "<C-v>u4e2d",
     "<C-v>65", "<BS>", "<Del>", "<Up>", "<Down>", "<Left>", "<Right>",
 ];
 
-/// 算子待决会话的算子与对象。
+/// Operators and objects of operator-pending sessions.
 const OP_PEND_OPS: &[&str] = &["d", "c", "y", "gu", "gU", "g?", ">", "<", "="];
 
 const OP_PEND_TARGETS: &[&str] = &[
@@ -89,7 +92,7 @@ const OP_PEND_TARGETS: &[&str] = &[
     "ap", "is", "as", "it", "at", "j", "k", "$", "0", "gg", "G", "gn", "%",
 ];
 
-/// 宏会话的寄存器名。
+/// Register names for macro sessions.
 const MACRO_REGS: &[&str] = &["a", "b", "z"];
 
 const BUFFERS: &[&str] = &[
@@ -164,7 +167,7 @@ fn panic_msg(p: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "opaque panic".to_owned())
 }
 
-/// 守护一段会话：panic 时带上完整 trace 报 P0。
+/// Guard a session stretch: on panic, report P0 with the full trace.
 fn guarded(f: &mut Fixture, trace: &[String], label: &str, body: impl FnOnce(&mut Fixture)) {
     let guard =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(f)));
@@ -193,13 +196,13 @@ fn fuzz_round36_template_sessions_hold_invariants() {
                 }
                 let roll = fuzz_xorshift(&mut rng) % 10;
                 if roll < 4 {
-                    // 模板会话：一次灌 3-8 键
+                    // Template session: pour 3-8 keys at once
                     let kind = fuzz_xorshift(&mut rng) % 4;
                     let mut keys: Vec<String> = Vec::new();
                     let label;
                     match kind {
                         0 => {
-                            // 可视会话
+                            // Visual session
                             label = "visual".to_owned();
                             keys.push(pick(&mut rng, VISUAL_ENTER).to_owned());
                             for _ in 0..1 + fuzz_xorshift(&mut rng) % 3 {
@@ -211,7 +214,7 @@ fn fuzz_round36_template_sessions_hold_invariants() {
                             }
                         }
                         1 => {
-                            // 插入会话
+                            // Insert session
                             label = "insert".to_owned();
                             keys.push(pick(&mut rng, &["i", "a", "A", "I", "o", "O", "R"]).to_owned());
                             for _ in 0..2 + fuzz_xorshift(&mut rng) % 4 {
@@ -220,7 +223,7 @@ fn fuzz_round36_template_sessions_hold_invariants() {
                             keys.push("<Esc>".to_owned());
                         }
                         2 => {
-                            // 宏会话：录制 → 重放 → 追加重录
+                            // Macro session: record → replay → append re-record
                             label = "macro".to_owned();
                             let reg = pick(&mut rng, MACRO_REGS);
                             keys.push("q".to_owned());
@@ -236,7 +239,7 @@ fn fuzz_round36_template_sessions_hold_invariants() {
                             }
                         }
                         _ => {
-                            // 算子待决组合
+                            // Operator-pending combo
                             label = "op-pend".to_owned();
                             keys.push(pick(&mut rng, OP_PEND_OPS).to_owned());
                             if fuzz_xorshift(&mut rng).is_multiple_of(2) {
@@ -256,7 +259,7 @@ fn fuzz_round36_template_sessions_hold_invariants() {
                         let _ = f.line();
                     });
                 } else if roll == 4 {
-                    // IME 提交路径
+                    // IME commit path
                     let s = ["中", "中文x", "x漢字", "ｱｲｳ", "🀄xx"][(fuzz_xorshift(&mut rng) % 5) as usize];
                     trace.push(format!("IME({s})"));
                     guarded(&mut f, &trace, "ime", |f| {
@@ -272,7 +275,7 @@ fn fuzz_round36_template_sessions_hold_invariants() {
                         let _ = f.cursor();
                     });
                 } else if roll == 5 {
-                    // Ex 整句
+                    // Full Ex sentence
                     let line = pick(&mut rng, EX_LINES);
                     trace.push((*line).to_owned());
                     let keys: Vec<String> = if line.starts_with(':') {

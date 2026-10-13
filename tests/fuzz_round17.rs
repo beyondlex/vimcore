@@ -1,21 +1,23 @@
-//! 第十七轮 fuzz：覆盖本轮修复面的路径轰炸。
+//! Round-17 fuzz: path barrage over the surfaces fixed in this round.
 //!
-//! 相对 round16 的增量（全部是本轮改过的路径，回归在此先炸）：
-//! - **宏/`.`/`@` 三方交互**：q 录制起停、`@a` 回放、`.` 重放在任意
-//!   交错下进行——`replay_records` 让 `@` 期间录制保持活跃，录制/提交
-//!   状态机多了真分支；
-//! - **文本对象 count**：`d2aw`/`v3i(`/`2ip` 的重复扫描与攀爬合并；
-//! - **句子对象**：`dis`/`das`/`2as` 在句间空白、空行段界、缓冲末尾的
-//!   新端点规则（尾随空白、前导回退、末换行排除）；
-//! - **`<<`/`>>` 列模型**：`/ts/sw/noet/et` 的重表达路径（edit_replace
-//!   替换缩进，marks/搜索缓存平移）；
-//! - **insert `<C-w>` 空白段一笔删除**与**Ex 裸 `+`/`-` 偏移**、
-//!   **`:s`/`:d` 尾 count**；
-//! - **`"+` 寄存器 roundtrip**（clipboard_write 钩子）。
+//! Increments over round16 (all are paths this round changed, so regressions blast here first):
+//! - **macro / `.` / `@` three-way interaction**: q record start/stop, `@a` replay, `.` repeat
+//!   under arbitrary interleaving — `replay_records` keeps recording active during `@`, adding
+//!   real branches to the record/commit state machine;
+//! - **text-object counts**: repeated scanning and inner-block climbing for `d2aw`/`v3i(`/`2ip`;
+//! - **sentence objects**: the new endpoint rules (trailing whitespace, leading backward,
+//!   last-newline exclusion) for `dis`/`das`/`2as` across inter-sentence whitespace, blank-line
+//!   segment boundaries, and the buffer end;
+//! - **`<<`/`>>` column model**: the re-expression paths over `/ts/sw/noet/et` (edit_replace
+//!   replaces the indent, marks/search cache shift along);
+//! - **insert `<C-w>` deleting one whitespace run in a stroke**, **Ex bare `+`/`-` offsets**,
+//!   and **`:s`/`:d` trailing count**;
+//! - **the `"+` register roundtrip** (the clipboard_write hook).
 //!
-//! 不变量沿用 round13-16：光标/mark/`last_visual`/live 选区全部可寻址、
-//! 行数 ≥ 1、模式与指示器一致；另加本轮专属不变量：宏录制状态只在
-//! `q` 会话内为真（`.` 重放不得楔进录制态）。
+//! Invariants carry over from round13-16: cursor/mark/`last_visual`/live selection all
+//! addressable, line count >= 1, mode and indicator consistent; plus this round's dedicated
+//! invariant: macro recording state is true only within a `q` session (`.` replay must not
+//! wedge into the recording state).
 
 mod common;
 
@@ -32,32 +34,32 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// 16 seeds × 60 rounds × 120 steps ≈ 11.5 万步（与 round13-16 同预算）
+// 16 seeds x 60 rounds x 120 steps ~= 115k steps (same budget as round13-16)
 const SEEDS: u64 = 16;
 const ROUNDS: usize = 60;
 const STEPS: usize = 120;
 
 const KEYS: &[&str] = &[
-    // 本轮修复面：宏录制/回放/`.` 三方
+    // this round's fixed surface: macro record/replay/`.` three-way
     "qa", "q", "qaxq", "qbxq", "@a", "@b", "@@", "@:", "2@a", ".", "2.", "J",
     "qxq", "qq", "qazq", "d2aw",
-    // 本轮修复面：文本对象 count（重复扫描 + 内层块攀爬）
+    // this round's fixed surface: text-object count (repeat scan + inner-block climb)
     "d2aw", "d3aw", "d2iw", "d3iw", "v2aw", "v3i(", "2ip", "c2aw", "y3aw",
     "di(", "da(", "v2i\"", "v2a\"",
-    // 本轮修复面：句子对象（新端点规则）
+    // this round's fixed surface: sentence objects (new endpoint rules)
     "dis", "das", "2das", "cis", "vis", "vas", "yis",
-    // 本轮修复面：shift 列模型
+    // this round's fixed surface: shift column model
     ">>", "<<", "2>>", "2<<", ">j", "<j", "Vj>", ":set noet ts=8 sw=4<CR>",
     ":set et sw=4<CR>", ":set ts=4<CR>", ":set sw=8<CR>",
-    // 本轮修复面：insert C-w 空白段
+    // this round's fixed surface: insert C-w whitespace run
     "i", "a", "o", "<C-w>", "<C-u>",
-    // 本轮修复面：Ex 裸偏移 + 尾 count
+    // this round's fixed surface: Ex bare offset + trailing count
     ":+d<CR>", ":-d<CR>", ":5+d<CR>", ":.-d<CR>", ":+-d<CR>", ":d2<CR>",
     ":y2<CR>", ":j2<CR>", ":s/a/X/ 3<CR>", ":s/a/X/2<CR>", ":1,2s/a/X/2<CR>",
     ":1,2d 2<CR>", ":nohlse<CR>", ":+<CR>", ":-<CR>",
-    // 本轮修复面：+ 寄存器
+    // this round's fixed surface: + register
     "\"+yy", "\"+dd", "\"+p", "\"+P", "\"_dd", "\"+yiw",
-    // round16 键表节选（既有压力面不丢）
+    // round16 key-table excerpt (existing pressure surface not lost)
     "o", "O", "<CR>", "<BS>", "<Esc>", "cc", "S", "3o<Esc>", "2O<Esc>",
     "x", "X", "D", "C", "s", "J", "gJ", "99J", ":sort u<CR>", "&",
     ":1+99999999999999999999d<CR>", "}", "{", "d}", "d{", "ci\"", "ca\"",
@@ -75,12 +77,12 @@ const KEYS: &[&str] = &[
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} unaddressable in {text:?}"
     );
 }
 
 fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
-    assert!(!text.is_empty() || f.buf.line_count() == 1, "{ctx}: 行数 >= 1");
+    assert!(!text.is_empty() || f.buf.line_count() == 1, "{ctx}: line count >= 1");
     assert_addressable("cursor", f.vim.cursor_offset(), text, ctx);
     for (name, off) in f.vim.marks.items() {
         assert_addressable(&format!("mark {name}"), off, text, ctx);
@@ -103,19 +105,20 @@ fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
                     | vimcore::mode::Mode::Visual { .. }
                     | vimcore::mode::Mode::CommandLine { .. }
             ),
-            "{ctx}: normal 模式指示器必须为空"
+            "{ctx}: the normal-mode indicator must be empty"
         ),
         other => assert!(
             !other.is_empty(),
-            "{ctx}: 非 normal 模式必须有指示器 ({other})"
+            "{ctx}: a non-normal mode must have an indicator ({other})"
         ),
     }
 }
 
 #[test]
 fn fuzz_round17_holds_invariants() {
-    // 缓冲池围绕本轮修复面：句间空白（句子对象）、空行段界、缩进混合
-    // （shift 重表达）、多字节（边界回归）、可扩展多行
+    // the buffer pool centers on this round's fixed surfaces: inter-sentence whitespace
+    // (sentence objects), blank-line segment boundaries, mixed indentation (shift
+    // re-expression), multi-byte (boundary regression), extendable multi-line
     let buffers = [
         "Aaa. Bbb.\n",
         "Aaa.\n\nBbb.\n",
@@ -140,7 +143,7 @@ fn fuzz_round17_holds_invariants() {
             let initial = buffers[round % buffers.len()];
             let mut f = common::Fixture::new(initial);
             f.vim.set_hlsearch_live_update(false);
-            // 一半种子带 `nnoremap j gj`（round14 先例）
+            // half the seeds carry `nnoremap j gj` (round14 precedent)
             if seed % 2 == 0 {
                 f.vim.keymaps.map_str_noremap(
                     vimcore::keymap::ModeClass::Normal,
@@ -149,7 +152,7 @@ fn fuzz_round17_holds_invariants() {
                     true,
                 );
             }
-            // 一半种子预录宏 a = x（@a/@@ 路径立刻可达）
+            // half the seeds pre-record macro a = x (the @a/@@ path is instantly reachable)
             if seed % 3 == 0 {
                 for key in vimcore::key::parse_key_sequence("qaxq") {
                     let mut ctx = Ctx {
@@ -175,7 +178,8 @@ fn fuzz_round17_holds_invariants() {
                     }
                 }
                 let roll = fuzz_xorshift(&mut state);
-                // 宿主事件注入（~1/8 步）：IME 文本与拖选/点击任意模式投递
+                // host-event injection (~1/8 of steps): IME text and drag-select/click
+                // delivered in arbitrary modes
                 match roll % 8 {
                     0 => {
                         let a = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 1);
@@ -213,8 +217,8 @@ fn fuzz_round17_holds_invariants() {
     }
 }
 
-/// 巨 count 文本对象：`<巨值>aw` 的重复扫描必须在 span 到达缓冲末尾时
-/// 终止，不线性扫描 O(count) 次（每次无进展即 break）。
+/// Huge-count text object: the repeat scan for `<huge-value>aw` must terminate once the span
+/// reaches the buffer end, not scan linearly O(count) times (break on the first no-progress).
 #[test]
 fn fuzz_round17_huge_object_count_terminates() {
     let start = std::time::Instant::now();

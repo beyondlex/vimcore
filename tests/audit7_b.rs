@@ -1,22 +1,28 @@
-//! audit7_b: 第六轮独立审计·智能体 B 域的对拍 fuzz runner（motion/算子/
-//! 可视 × 随机键序 vs `/usr/bin/vim` 实测）。`#[ignore]`，发现新 bug 用，
-//! 默认不跑；抓到的形状转成定点断言另立文件（如 `audit8_a.rs`）。
+//! audit7_b: differential fuzz runner for domain B of the sixth independent
+//! audit round (motions/operators/visual × random key sequences vs `/usr/bin/vim`
+//! measured output). `#[ignore]`, used for discovering new bugs, not run by
+//! default; shapes it catches get converted into targeted assertions in
+//! separate files (e.g. `audit8_a.rs`).
 //!
-//! 采样纪律两侧对齐：vim 侧全程 typeahead（`:set binary` → `:w!` →
-//! `writefile(line2byte+col-1)` → `:qa!`，startup 命令不参与，8s 看门狗
-//! 兜住阻塞），**控制键一律原始字节**（`-s` 不展开 `\<C-v>` 记法，见
-//! [`vim_keys`]），方向键不生成（那条通道要 expect PTY）；引擎侧把选项
-//! 钉成 vim 出厂值（`ts=8 sw=8 noet`），且记号**逐字符**进键管道（见
-//! [`engine_tokens`]，多字符记号整块喂 `Key::parse` 会变成未知键被吃掉）。
-//! 键序不进插入模式打字（进 insert 就 `<Esc>` 收尾），避免把「宿主文本
-//! 通道」的字符丢掉造成假阳。
+//! Sampling discipline aligned on both sides: the vim side runs fully through
+//! typeahead (`:set binary` → `:w!` → `writefile(line2byte+col-1)` → `:qa!`,
+//! startup commands excluded, an 8s watchdog catches blocking), **control keys
+//! always as raw bytes** (`-s` does not expand `\<C-v>` notation, see
+//! [`vim_keys`]), arrow keys are never generated (that channel needs expect
+//! PTY); on the engine side options are pinned to vim factory values
+//! (`ts=8 sw=8 noet`), and tokens enter the key pipeline **character by
+//! character** (see [`engine_tokens`]; feeding a multi-char token whole into
+//! `Key::parse` turns it into an unknown key that gets swallowed). Key
+//! sequences do not type inside insert mode (they exit insert with `<Esc>`),
+//! to avoid losing characters through the "host text channel" and producing
+//! false positives.
 
 mod common;
 
 use common::Fixture;
 
 // ---------------------------------------------------------------------------
-// 对拍 fuzz（发现新 bug 用，默认不跑）
+// Differential fuzz (for discovering new bugs, not run by default)
 // ---------------------------------------------------------------------------
 
 use std::cell::RefCell;
@@ -154,12 +160,14 @@ fn gen_seq() -> Vec<String> {
     v
 }
 
-/// 命名键 → **原始控制字节**。`-s {scriptin}` 读的是原始键入流，vim 的
-/// `\<C-v>` 记法在这里**不展开**：旧实现把 `\<C-v>` 当文本喂进去，oracle
-/// 侧收到的是 `\`、`<`、`C`、`-`、`v`、`>` 六个字符（块可视根本没开始，
-/// 缓冲还被 `\`/`<` 这些 normal 键搅了），一整批「引擎错」其实是假阳。
-/// 方向键同理不能走这条通道（NOTES 多轮有案：必须 expect PTY），生成器
-/// 不产它们。
+/// Named keys → **raw control bytes**. `-s {scriptin}` reads a raw keystream;
+/// vim's `\<C-v>` notation is **not expanded** here: the old implementation fed
+/// `\<C-v>` as text, so the oracle side received the six characters `\`, `<`,
+/// `C`, `-`, `v`, `>` (blockwise visual never started and the buffer got messed
+/// up by normal keys like `\`/`<`) — a whole batch of "engine errors" was
+/// actually false positives. Arrow keys likewise cannot use this channel
+/// (on record across many NOTES rounds: must go through expect PTY), so the
+/// generator never produces them.
 fn vim_keys(tokens: &[String]) -> String {
     let mut s = String::new();
     for t in tokens {
@@ -190,11 +198,13 @@ fn vim_keys(tokens: &[String]) -> String {
     s
 }
 
-/// 生成器的多字符记号（`gg`/`ge`/`aw`/`iW`…）在 vim 侧是**逐字符**的键流，
-/// 引擎侧也必须逐字符进 `Key::parse`：`Key::parse("aw")` 落进
-/// `KeyKind::Named("aw")`（未知键，直接被吃掉），于是整条 text object/motion
-/// 在引擎侧**根本没发生**，vim 侧却照常执行——旧 runner 那批「差异」就是这个
-/// 粒度错配批量造的假阳（`<...>` 与单字符本来就已对齐）。
+/// The generator's multi-char tokens (`gg`/`ge`/`aw`/`iW`…) are a **char-by-char**
+/// keystream on the vim side, so the engine side must also feed them char by char
+/// into `Key::parse`: `Key::parse("aw")` falls into `KeyKind::Named("aw")` (an
+/// unknown key, swallowed directly), so the whole text object/motion **never
+/// happened** on the engine side while vim executed it normally — that granularity
+/// mismatch mass-produced the old runner's batch of "diffs" (`<...>` and single
+/// chars were already aligned).
 fn engine_tokens(tokens: &[String]) -> Vec<String> {
     let mut v = Vec::with_capacity(tokens.len());
     for t in tokens {
@@ -275,7 +285,7 @@ fn engine_run(initial: &str, tokens: &[String]) -> (String, usize) {
 }
 
 #[test]
-#[ignore = "对拍 fuzz：发现新 bug"]
+#[ignore = "differential fuzz: for discovering new bugs"]
 fn diff_fuzz() {
     let samples: Vec<&str> = vec![
         "abc def ghi\njkl mno\n",

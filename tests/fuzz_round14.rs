@@ -1,22 +1,23 @@
-//! 第十四轮 fuzz：覆盖本轮修复面的路径轰炸。
+//! Round-14 fuzz: path barrage covering this round's fix surface.
 //!
-//! 相对 round13 的增量键表：
-//! - till 家族重复（`;`/`,`/count 与 t/T 交错）——round14 修复了
-//!   「重复原地假成功」并重定义了 count 语义（fresh 数不同目标、
-//!   repeat 跳过紧邻目标后按查找次数）；
-//! - till operator span（`dt{c}`/`ct{c}`/`yt{c}`）——span 现延伸到目标位；
-//! - `"{reg}` 前缀进 x/X/s/Del、`""` 归一化——寄存器路由面；
-//! - visual `o`/`O`（块 O 是同线换列，char/line O 等同 o）；
-//! - cmdline 的 count（`3:`、`3/pat`、取消路径）与 Ex 新错误面
-//!   （E488 尾参、E477 bang、E16 越界、`n` 标志、转义分隔符、
-//!   `:se`/`:setlocal`/`ts&`/`ts ?`）；
-//! - Replace 会话的方向键 + BS 交错（位置栈）。
+//! Key-table delta relative to round13:
+//! - till family repeats (`;`/`,`/count interleaved with t/T) — round14 fixed the
+//!   "repeat fakes success in place" and redefined count semantics (fresh counts
+//!   distinct targets; repeat counts finds after skipping an immediately adjacent target);
+//! - till operator spans (`dt{c}`/`ct{c}`/`yt{c}`) — the span now reaches the target position;
+//! - `"{reg}` prefixes into x/X/s/Del, `""` normalization — the register-routing surface;
+//! - visual `o`/`O` (block O swaps columns on the same line; char/line O equal o);
+//! - cmdline counts (`3:`, `3/pat`, cancel paths) and Ex's new error surfaces
+//!   (E488 trailing args, E477 bang, E16 out-of-range, the `n` flag, escaped delimiters,
+//!   `:se`/`:setlocal`/`ts&`/`ts ?`);
+//! - arrow keys + BS interleaved inside a Replace session (the position stack).
 //!
-//! 一部分种子预注册 `:nnoremap j gj`：让新的「部分命令续键不查映射」
-//! 守卫（cmd_seq 非空时 FallThrough）与展开重放持续接受随机轰炸。
+//! Half of the seeds pre-register `:nnoremap j gj`: keeping the new "partial command
+//! continuation keys do not consult mappings" guard (FallThrough when cmd_seq is
+//! non-empty) and the expansion replay under constant random barrage.
 //!
-//! 不变量沿用 round13：光标/mark/`last_visual`/live 选区/`last_matches`
-//! 全部可寻址；`*` 之后 pattern 与高亮必须同步。
+//! Invariants carried over from round13: cursor/mark/`last_visual`/live selection/
+//! `last_matches` all addressable; after `*` the pattern and the highlights must be in sync.
 
 mod common;
 
@@ -34,13 +35,13 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// 16 seeds × 60 rounds × 120 steps ≈ 11.5 万步（与 round13 同预算）
+// 16 seeds × 60 rounds × 120 steps ≈ 115k steps (same budget as round13)
 const SEEDS: u64 = 16;
 const ROUNDS: usize = 60;
 const STEPS: usize = 120;
 
 const KEYS: &[&str] = &[
-    // round14 修复路径：till 重复与 span
+    // round14 fix paths: till repeats and spans
     "t2",
     "t2;",
     "t2;;",
@@ -58,7 +59,7 @@ const KEYS: &[&str] = &[
     "dfx",
     "2fx",
     "d2t3",
-    // round14 修复路径：寄存器前缀路由
+    // round14 fix paths: register-prefix routing
     "\"ax",
     "\"aX",
     "\"as",
@@ -69,7 +70,7 @@ const KEYS: &[&str] = &[
     "\"\"p",
     "\"ap",
     "\"ayiw",
-    // round14 修复路径：visual o / O
+    // round14 fix paths: visual o / O
     "<C-v>jlo",
     "<C-v>jlO",
     "<C-v>jklO",
@@ -79,7 +80,7 @@ const KEYS: &[&str] = &[
     "Vj o",
     "o",
     "O",
-    // round14 修复路径：cmdline count
+    // round14 fix paths: cmdline counts
     "3:",
     "2:",
     "3:<CR>",
@@ -88,7 +89,7 @@ const KEYS: &[&str] = &[
     "3/foo<CR>",
     "?x<CR>",
     "V3v:",
-    // round14 修复路径：Ex 新错误面
+    // round14 fix paths: Ex new error surfaces
     ":1,2d 3x",
     ":d a b",
     ":y a3",
@@ -109,7 +110,7 @@ const KEYS: &[&str] = &[
     ":bne",
     ":bp",
     ":ju",
-    // round13 键表节选（保持回归压力）
+    // excerpt of the round13 key table (keeping the regression pressure)
     "<C-v>jI",
     "<C-v>jA",
     "Vjd",
@@ -236,11 +237,11 @@ const KEYS: &[&str] = &[
     "<C-c>",
 ];
 
-/// 校验一个偏移在 `text` 上可寻址(字符边界或末尾)。
+/// Checks that an offset is addressable on `text` (a char boundary or the end).
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} unaddressable in {text:?}"
     );
 }
 
@@ -248,9 +249,9 @@ fn addressable(off: usize, text: &str) -> bool {
     off <= text.len() && (off == text.len() || text.is_char_boundary(off))
 }
 
-/// `check_matches=false`：hlsearch_live_update 关闭时 `last_matches` 允许
-/// 在两次 refresh_highlights 之间过期（generation 机制保证 n/N 消费前
-/// 重扫——round13 同款约束）。
+/// `check_matches=false`: when hlsearch_live_update is off, `last_matches` is allowed to
+/// go stale between two refresh_highlights calls (the generation mechanism guarantees a
+/// rescan before n/N consumes them — same constraint as round13).
 fn check_invariants_mode(f: &Fixture, text: &str, ctx: &str, check_matches: bool) {
     assert_addressable("cursor", f.vim.cursor_offset(), text, ctx);
     for (name, off) in f.vim.marks.items() {
@@ -305,7 +306,7 @@ fn fuzz_round14_holds_invariants() {
         for round in 0..ROUNDS {
             let initial = buffers[round % buffers.len()];
             let mut f = common::Fixture::new(initial);
-            // 一半种子带 `nnoremap j gj`：cmd_seq 守卫 + 展开重放持续受轰
+            // half the seeds carry `nnoremap j gj`: the cmd_seq guard + expansion replay stay under barrage
             if seed.is_multiple_of(2) {
                 f.vim.keymaps.map_str_noremap(
                     vimcore::keymap::ModeClass::Normal,
@@ -316,8 +317,8 @@ fn fuzz_round14_holds_invariants() {
             }
             let cur = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 1);
             f.vim.set_cursor_offset(&f.buf, cur);
-            // 大缓冲宿主模式：关逐编辑重扫（与 round13 同理，自递归宏会
-            // 撑满管线预算）
+            // large-buffer host mode: turn off per-edit rescan (same reason as round13,
+            // self-recursive macros would exhaust the pipeline budget)
             f.vim.set_hlsearch_live_update(false);
             for step in 0..STEPS {
                 if f.buf.len() > 4 * 1024 {
@@ -364,9 +365,10 @@ fn fuzz_round14_holds_invariants() {
     }
 }
 
-/// 随机键轰炸之间持续检查 round14 修复的核心语义：
-/// 1. till 重复永远前进或失败——不允许「moved 但原地不动」的假成功；
-/// 2. yank 之后 `g;` 不落在 yank 处（changelist 不被纯 yank 污染）。
+/// Between the random-key barrages, continuously check the core semantics fixed in round14:
+/// 1. a till repeat must always advance or fail — no "moved but stayed in place" fake success;
+/// 2. after a yank, `g;` must not land on the yank spot (the changelist is not polluted
+///    by pure yanks).
 #[test]
 fn fuzz_round14_semantic_invariants() {
     let mut state: u64 = 0x00D0_0D14;
@@ -380,8 +382,8 @@ fn fuzz_round14_semantic_invariants() {
         let initial = buffers[(fuzz_xorshift(&mut state) as usize) % buffers.len()];
         let mut f = common::Fixture::new(initial);
         for step in 0..60 {
-            // 1) till 重复语义：停车位之后 `;` 必须前进或失败（ bell），
-            //    绝不允许 moved=true 且偏移不变
+            // 1) till-repeat semantics: after parking, `;` must advance or fail (bell);
+            //    never allow moved=true with an unchanged offset
             let find_char = ['2', '3', 'x', '中']
                 [(fuzz_xorshift(&mut state) as usize) % 4];
             f.feed(["t"]);
@@ -393,13 +395,13 @@ fn fuzz_round14_semantic_invariants() {
             if after == before {
                 assert!(
                     f.host.bells > bells_before,
-                    "round {round} step {step}: `;` 原地假成功（bells 未增）"
+                    "round {round} step {step}: `;` faked success in place (bells did not increase)"
                 );
             }
-            // 2) yank 不进 changelist：记录 x 编辑位置，yiw 后 g; 必须落
-            //    在编辑处而非 yank 处
+            // 2) yank stays out of the changelist: record the x edit position; after yiw,
+            //    g; must land on the edit, not the yank
             let mut f2 = common::Fixture::new("line1\nline2\nline3\n");
-            f2.feed(["j", "x"]); // 真编辑在 line2
+            f2.feed(["j", "x"]); // the real edit is on line2
             f2.feed(["g", "g"]);
             f2.feed(["3", "G"]);
             f2.feed(["y", "i", "w"]); // yank line3
@@ -408,7 +410,7 @@ fn fuzz_round14_semantic_invariants() {
             assert_eq!(
                 f2.vim.cursor_offset(),
                 f2.buf.line_start(1),
-                "round {round}: g; 必须落在 x 的编辑处（line2），不是 yank 处"
+                "round {round}: g; must land on the x edit (line2), not the yank spot"
             );
             let _ = &mut f;
         }

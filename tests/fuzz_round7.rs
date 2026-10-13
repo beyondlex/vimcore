@@ -1,9 +1,10 @@
-//! 第七轮扩展 fuzz：多种子确定性按键轰炸（第七轮审查引入）。
+//! Round-7 extended fuzz: deterministic multi-seed key-bombardment (introduced by the round-7 review).
 //!
-//! 既有 `fuzz_random_key_sequences_hold_invariants` 是单种子 500 轮；这里
-//! 用多种子扩大覆盖（第七轮两种子就抓到两个新 bug：`gn` 多字节匹配光标
-//! mid-char、块插入会话后光标偏移陈旧）。不变量与既有 fuzz 相同：
-//! 不 panic、光标与全部存储偏移恒可寻址。
+//! The existing `fuzz_random_key_sequences_hold_invariants` is a single-seed 500-round
+//! run; this widens coverage with multiple seeds (round 7's two seeds already caught two
+//! new bugs: `gn` multibyte-match cursor mid-char, stale cursor offset after a block
+//! insert session). Invariants identical to the existing fuzz: no panic, cursor and all
+//! stored offsets always addressable.
 
 mod common;
 
@@ -57,7 +58,7 @@ fn fuzz_multi_seed_holds_invariants() {
                 for key in parse_key_sequence(k) {
                     f.feed_raw(key);
                 }
-                // IME 打字路径：insert/replace 模式下随机注入组合文本
+                // IME typing path: random composed-text injection in insert/replace mode
                 if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
                     && fuzz_xorshift(&mut state).is_multiple_of(4)
                 {

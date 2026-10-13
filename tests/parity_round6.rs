@@ -85,8 +85,8 @@ fn substitute_line_applies_the_count() {
 #[test]
 fn linewise_put_cursor_lands_on_pasted_line_without_trailing_newline() {
     let f = edit("abc", 0, 0, &["y", "y", "p"]);
-    // 字节口径随 'fixendofline'：vim 写回 noeol 文件时补末尾换行
-    // （2026-10-08 od 实证 "abc" yy+p → "abc\nabc\n"）
+    // Byte accounting follows 'fixendofline': vim appends the trailing newline when
+    // writing a noeol file back (2026-10-08 od evidence: "abc" yy+p → "abc\nabc\n")
     assert_eq!(f.text(), "abc\nabc\n");
     assert_eq!(f.line(), 1);
 
@@ -185,7 +185,7 @@ fn set_query_reports_current_value_without_changing_it() {
     assert!(f.vim.options_mut().ignorecase, "query leaves the value");
 
     // `no{opt}?` is just another SPELLING of `{opt}?`: vim reports the
-    // option's real state, the prefix never inverts it (9.1 实证 with
+    // option's real state, the prefix never inverts it (9.1 evidence via
     // `execute()`: `:set ic` then `:set noic?` → "  ignorecase"; the old
     // engine-shaped expectation `noignorecase` was the bug, audit8 A-1).
     let mut f = Fixture::new("text\n");
@@ -242,7 +242,7 @@ fn marks_command_lists_named_and_special_marks() {
     f.feed(["m", "a", "G"]);
     ex(&mut f, "marks");
     let joined = f.host.statuses.join("\n");
-    // vim 9.1（oracle redir）：表头 + ` a      1    0 alpha`（1 基行号）
+    // vim 9.1 (oracle redir): title row + ` a      1    0 alpha` (1-based line number)
     assert!(
         joined.contains("mark line  col file/text"),
         "title row: {joined}"

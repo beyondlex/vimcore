@@ -1,12 +1,14 @@
-//! 第三十四轮探针：第三十三轮审计挂账清结的回归（2026-10-08）。
+//! Round-34 probes: regressions clearing the round-33 audit ledger (2026-10-08).
 //!
-//! 覆盖三组修复：
-//! * 未闭合搜索地址（`:/pat`/`:?pat`）——整个行尾都是模式（挂账 5；
-//!   oracle：`:?,3d` → `E486: Pattern not found: ,3d`，命令不执行；
-//!   命中则落匹配行首非空白；空模式复用上次搜索，无历史报 E35）。
-//! * `:reg` 的 vim 版式（挂账 6）：`  l  ""   second line^J`——两空格 +
-//!   类型符 + 两空格 + 引号名 + 三空格 + 内容（linewise 尾显示 ^J）。
-//! * `:undo` 到底：纯响铃、无报文（9.1 oracle v:errmsg 为空，销账）。
+//! Covers three fix groups:
+//! * Unterminated search addresses (`:/pat`/`:?pat`) — the rest of the line is the pattern
+//!   (ledger item 5; oracle: `:?,3d` → `E486: Pattern not found: ,3d`, the command does not
+//!   execute; on a hit the cursor lands on the first non-blank of the matching line; an empty
+//!   pattern reuses the previous search, with no history it reports E35).
+//! * The vim layout of `:reg` (ledger item 6): `  l  ""   second line^J` — two spaces + type
+//!   char + two spaces + register name + three spaces + content (linewise ends displayed as ^J).
+//! * `:undo` at the bottom: a pure bell, no message (the 9.1 oracle has an empty v:errmsg —
+//!   ledger item closed).
 
 mod common;
 
@@ -21,53 +23,55 @@ fn ex(f: &mut Fixture, line: &str) {
 
 #[test]
 fn open_search_address_consumes_the_rest_of_the_line() {
-    // `:? ,3d`：`,3d` 整体成为模式，搜索失败 E486、什么都不执行
+    // `:? ,3d`: `,3d` as a whole becomes the pattern, the search fails with E486 and nothing runs
     let mut f = Fixture::at("aaa\nbbb\nccc\n", 0, 0);
     ex(&mut f, "?,3d");
     assert_eq!(
         f.host.statuses.last().map(|s| s.as_str()),
         Some("E486: Pattern not found: ,3d"),
-        "vim 9.1: 未闭合 ? 的行尾全是模式"
+        "vim 9.1: everything to the end of the line is the pattern after an unterminated ?"
     );
-    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "命令从未解析，缓冲不动");
-    assert_eq!(f.vim.cursor_offset(), 0, "原地不动");
+    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "the command was never parsed, the buffer is untouched");
+    assert_eq!(f.vim.cursor_offset(), 0, "the cursor stays put");
 
-    // `:/ba` 命中：落匹配行的首个非空白；后续 `n` 沿用该模式
+    // `:/ba` hits: lands on the first non-blank of the matching line; a following `n` reuses the
+    // pattern
     let mut f = Fixture::at("aaa\nbar fizz\nccc\n", 0, 0);
     ex(&mut f, "/ba");
-    assert_eq!(f.vim.cursor_offset(), 4, "落 bar 行行首（offset 4）");
-    assert!(f.host.statuses.is_empty(), "命中无报文");
+    assert_eq!(f.vim.cursor_offset(), 4, "lands at the start of the bar line (offset 4)");
+    assert!(f.host.statuses.is_empty(), "a hit reports no message");
     f.feed(["n"]);
     assert_eq!(
         f.host.statuses.iter().any(|s| s.contains("E486")),
         false,
-        "模式已激活，n 不应报 E35/E486 类错误（无更多匹配时回绕或响铃）"
+        "the pattern is active, so n must not report an E35/E486 class error (wrap or bell when no further match)"
     );
 
-    // 空模式：无历史 → E35
+    // Empty pattern: no history → E35
     let mut f = Fixture::at("aaa\nbbb\n", 0, 0);
     ex(&mut f, "/");
     assert_eq!(
         f.host.statuses.last().map(|s| s.as_str()),
         Some("E35: No previous regular expression"),
-        "vim 9.1: :// 无历史报 E35"
+        "vim 9.1: :/ with no history reports E35"
     );
 
-    // 空模式：有历史 → 复用；前向无更多匹配行时回绕到首个匹配行
+    // Empty pattern: with history → reuse; when there is no further matching line forward it
+    // wraps to the first matching line
     let mut f = Fixture::at("foo\nbar foo\n", 0, 0);
     ex(&mut f, "/bar");
-    assert_eq!(f.vim.cursor_offset(), 4, "/bar 落 bar 行");
+    assert_eq!(f.vim.cursor_offset(), 4, "/bar lands on the bar line");
     ex(&mut f, "/");
     assert_eq!(
         f.vim.cursor_offset(),
         4,
-        ":// 复用模式 bar；前向无更多匹配行 → 回绕到首个匹配行（同一行）"
+        ":// reuses the pattern bar; no further matching line forward → wrap to the first matching line (the same line)"
     );
 }
 
 #[test]
 fn undo_at_oldest_change_is_silent() {
-    // 9.1 oracle：`:undo` 在最老变更处 v:errmsg 为空——纯响铃即正确
+    // 9.1 oracle: at the oldest change `:undo` leaves v:errmsg empty — a pure bell is correct
     let mut f = Fixture::at("abc\n", 0, 0);
     f.feed(["x"]);
     ex(&mut f, "undo");
@@ -78,7 +82,7 @@ fn undo_at_oldest_change_is_silent() {
         .statuses
         .iter()
         .any(|s| s.contains("E") && !s.contains("E492"));
-    assert!(!noisy, "vim 9.1: :undo 到底无报文（{:?}）", f.host.statuses);
+    assert!(!noisy, "vim 9.1: :undo at the bottom emits no message ({:?})", f.host.statuses);
 }
 
 #[test]
@@ -86,13 +90,13 @@ fn reg_listing_uses_vim_layout() {
     let mut f = Fixture::at("hello world\nsecond line\n", 0, 0);
     f.feed(["y", "y", "j", "\"", "a", "d", "d"]);
     ex(&mut f, "reg");
-    // `  l  ""   second line^J`（两空格 + 类型 + 两空格 + 引号名 + 三空格）
+    // `  l  ""   second line^J` (two spaces + type + two spaces + register name + three spaces)
     assert!(
         f.host
             .statuses
             .iter()
             .any(|s| s.starts_with("  l  \"\"   second line^J")),
-        "vim 9.1: :reg 行版式（无名寄存器、linewise ^J 尾），实际 {:?}",
+        "vim 9.1: the :reg line layout (unnamed register, linewise ^J tail), actual {:?}",
         f.host.statuses
     );
     assert!(
@@ -100,28 +104,29 @@ fn reg_listing_uses_vim_layout() {
             .statuses
             .iter()
             .any(|s| s.starts_with("  l  \"a   second line")),
-        "命名寄存器 a 同版式"
+        "named register a uses the same layout"
     );
 }
 
 #[test]
 fn redo_unsets_marks_undo_restores_again() {
-    // 9.1 oracle：`ma dd u` 恢复 mark（行末字符），`<C-r>` 把它**取消**
-    // （getpos("'a") = 0,0），再 `u` 又恢复。旧行为 redo 后 mark 滞留
-    // 在恢复位（列漂移形状）。
+    // 9.1 oracle: `ma dd u` restores the mark (the last char of the line), `<C-r>` **unsets** it
+    // (getpos("'a") = 0,0), and `u` again restores it. The old behavior left the mark stranded at
+    // the restored position (a column-drift shape).
     let mut f = Fixture::at("  foo\nbar\nbaz\n", 0, 2);
     f.feed(["m", "a", "d", "d", "u"]);
     assert_eq!(f.text(), "  foo\nbar\nbaz\n");
-    // u 后光标在 undo 提示位（行首）；mark 本身恢复到行末字符
-    assert_eq!(f.vim.marks.resolve('a', &f.buf), Some(4), "E4：mark 恢复");
+    // After u the cursor is at the undo hint position (line start); the mark itself is restored to
+    // the last char of the line
+    assert_eq!(f.vim.marks.resolve('a', &f.buf), Some(4), "E4: mark restored");
     f.feed(["<C-r>"]); // C-r
-    assert_eq!(f.text(), "bar\nbaz\n", "redo 重新删除");
+    assert_eq!(f.text(), "bar\nbaz\n", "redo deletes again");
     f.feed(["`", "a"]);
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E20")),
-        "redo 后 mark 'a 未设置（vim 9.1 oracle getpos = 0,0）"
+        "after redo mark 'a is unset (vim 9.1 oracle getpos = 0,0)"
     );
     f.feed(["u"]);
     f.feed(["`", "a"]);
-    assert_eq!(f.cursor(), 4, "再 undo 又恢复（oracle 1,3 = 行末字符）");
+    assert_eq!(f.cursor(), 4, "undoing again restores it (oracle 1,3 = the last char of the line)");
 }

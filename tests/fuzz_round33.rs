@@ -1,14 +1,16 @@
-//! 第三十三轮 fuzz：嵌套宏 × 寄存器互写 × `.` 重放（第三十三轮审计挂账 7）。
+//! Round-33 fuzz: nested macros × register cross-writes × `.` replay (carried-over item 7 of the round-33 audit).
 //!
-//! 宏=寄存器统一（audit D4）后有三条新账本在互动：macros 键缓存、
-//! 寄存器写代数同步、`"."` 的 count 替换重放。本轮专打它们的交叉：
-//! `qa…q` 录制中嵌 `@a`/`@@`、播放中 `"ayy`/`"add` 覆写正在跑的宏、
-//! `"ap` 粘宏文本、`[count].` 与 `@` 互嵌、`q"` 无名槽宏。
-//! 不变量沿用渲染契约：光标/mark/高亮全部可寻址。
+//! After the macro=register unification (audit D4), three new ledgers interact: the
+//! macro key cache, the register write-generation sync, and the count-replacing replay
+//! of `"."`. This round targets their crossings specifically: `@a`/`@@` embedded inside
+//! `qa…q` recording, `"ayy`/`"add` overwriting the macro currently playing, `"ap`
+//! pasting macro text, `[count].` and `@` mutually nested, `q"` unnamed-slot macros.
+//! Invariants follow the rendering contract: cursor/marks/highlights all addressable.
 //!
-//! 关键安全阀（继承 round13-20 的教训）：重放队列的预算靠
-//! MAX_PIPELINE_STEPS 兜底；本测试额外在每步后检查 is_idle 状态不得
-//! 卡在重放中超过一个软上限，防止互递归宏把测试挂死。
+//! Key safety valve (inheriting the round13-20 lessons): the replay queue budget falls
+//! back on MAX_PIPELINE_STEPS; this test additionally checks after each step that the
+//! is_idle state must not stay stuck mid-replay beyond one soft limit, preventing
+//! mutually recursive macros from hanging the test.
 
 mod common;
 
@@ -30,8 +32,9 @@ const SEEDS: u64 = 12;
 const ROUNDS: usize = 40;
 const STEPS: usize = 80;
 
-/// 宏体与寄存器交互的键表：录制边界、播放、寄存器前缀写、无名槽、
-/// 点重放、插入小段（Text 步进路径）、行级与字符级删除。
+/// Key table for macro-body/register interactions: recording boundaries, replay,
+/// register-prefixed writes, the unnamed slot, dot-repeat, small insertions (the Text
+/// step path), linewise and charwise deletes.
 const MACRO_KEYS: &[&str] = &[
     "qa", "q", "qb", "qq", "q\"", "@a", "@b", "@@", "@:", "2@a", "3@b",
     "\"ayy", "\"byy", "\"add", "\"bdd", "\"a\"_d", "\"ap", "\"bp", "\"aP",
@@ -117,8 +120,8 @@ fn fuzz_round33_nested_macros_and_registers_hold_invariants() {
                 let k = MACRO_KEYS[(fuzz_xorshift(&mut rng) as usize) % MACRO_KEYS.len()];
                 trace.push(k.to_owned());
                 if k.chars().count() == 1 && k.chars().next().is_some_and(|c| c.is_ascii_lowercase()) && rand_pick(&mut rng, 4) {
-                    // 单字母小写键有 1/4 概率以「打字文本」形态进插入会话
-                    //（宿主 IME 路径），其余按命令键喂
+                    // A single lowercase ASCII letter has a 1/4 chance of entering an insert
+                    // session as "typed text" (the host IME path); otherwise fed as a command key
                     f.feed(["i"]);
                     f.vim.record_typed_text(k);
                     let mut ctx = Ctx {

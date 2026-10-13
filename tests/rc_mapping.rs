@@ -73,11 +73,11 @@ impl VimHost for H {
 
 #[test]
 fn user_style_three_key_leader_mapping_fires() {
-    // 复现用户场景：~/.config/pandagit/vimrc 里 `map <Leader>ah :action AcceptLeft<CR>`
-    //（文件内无 let mapleader → <Leader> = 库默认反斜杠）
+    // Reproduce the user scenario: `map <Leader>ah :action AcceptLeft<CR>` in
+    // ~/.config/pandagit/vimrc (no let mapleader in the file → <Leader> = library-default backslash)
     let text = "map <Leader>ah :action AcceptLeft<CR>\nmap <Leader>al :action AcceptRight<CR>";
     let cfg = vimcore::config::parse(text);
-    assert_eq!(cfg.mappings.len(), 4, "两条 map × Normal/Visual");
+    assert_eq!(cfg.mappings.len(), 4, "two maps × Normal/Visual");
 
     let mut vim = VimState::new();
     vim.apply_config(&cfg);
@@ -94,7 +94,7 @@ fn user_style_three_key_leader_mapping_fires() {
     assert_eq!(
         host.actions.borrow().as_slice(),
         ["AcceptLeft"],
-        "三键 leader 和弦应派发 :action"
+        "the three-key leader chord should dispatch :action"
     );
 }
 
@@ -108,7 +108,7 @@ fn leader_mapping_parses_and_fires() {
             m.class, m.lhs, m.rhs, m.noremap
         );
     }
-    assert!(!cfg.mappings.is_empty(), "rc 映射应被解析");
+    assert!(!cfg.mappings.is_empty(), "rc mappings should be parsed");
 
     let mut vim = VimState::new();
     vim.apply_config(&cfg);
@@ -131,6 +131,6 @@ fn leader_mapping_parses_and_fires() {
     assert_eq!(
         host.actions.borrow().as_slice(),
         ["Foo"],
-        "映射 RHS 的 :action 应派发到宿主"
+        "the :action in the mapping RHS should dispatch to the host"
     );
 }

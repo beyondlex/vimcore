@@ -1,10 +1,12 @@
-//! 第八轮扩展 fuzz：覆盖本轮修复路径与新算子的多种子确定性轰炸。
+//! Round-8 extended fuzz: deterministic multi-seed bombardment covering the paths fixed this round and new operators.
 //!
-//! 相对 `fuzz_round7` 的增量：
-//! - 键表补齐本轮改动路径：`gq}`/`gw`/块选 `U`/`u`/`~`、`Vp`/`vp`、`&`、
-//!   非法 `:s`、宏录放夹 Ex 命令（`qa:xq@a`）、裸行号 `:2`、`g;`/`g,`；
-//! - 不变量加两条：visual 选区两端可寻址；`gv` 重建的选区可寻址；
-//! - 注入宿主点击（`set_cursor_offset` 随机落点，含非边界偏移）。
+//! Delta relative to `fuzz_round7`:
+//! - key table completes this round's changed paths: `gq}`/`gw`/block-selection `U`/`u`/`~`,
+//!   `Vp`/`vp`, `&`, illegal `:s`, macros recording+replaying Ex commands (`qa:xq@a`), bare
+//!   line number `:2`, `g;`/`g,`;
+//! - two invariants added: both ends of the live visual selection are addressable; the
+//!   selection rebuilt by `gv` is addressable;
+//! - host clicks injected (`set_cursor_offset` random landing points, incl. non-boundary offsets).
 
 mod common;
 
@@ -20,10 +22,10 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
 }
 
 const KEYS: &[&str] = &[
-    // 本轮修复路径
+    // Paths fixed this round
     "gq}", "gqq", "gww", "gqgq", "v$gq", "<C-v>jU", "<C-v>ju", "<C-v>j~", "Vp", "vp", "VP", "&",
     ":s/(/x/", ":2", ":noh", "qa", "q", "@a", ":", "g;", "g,",
-    // 既有覆盖（节选 round7 键表，保持回归压力）
+    // Existing coverage (round7 key-table excerpt, keeps regression pressure)
     "h", "j", "k", "l", "w", "b", "e", "0", "$", "^", "g", "G", "d", "c", "y", "p", "P", "x", "X",
     "s", "S", "D", "C", "r", "a", "i", "o", "O", "v", "V", "<C-v>", "u", "<Esc>", "J", "gJ", ">",
     "<", "gu", "gU", "g~", "~", "f", "t", "F", "T", ";", "%", "n", "N", "*", "#", "iw", "aw",
@@ -33,11 +35,11 @@ const KEYS: &[&str] = &[
     "<Del>", "<C-c>", "gv", "gn", "gN", "R", "gi", "gI", "\"a", "\"1p", "\"_dd",
 ];
 
-/// 校验一个偏移在 `text` 上可寻址（字符边界或末尾）。
+/// Verify an offset is addressable in `text` (a char boundary or the end).
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} not addressable in {text:?}"
     );
 }
 
@@ -71,13 +73,13 @@ fn fuzz_round8_holds_invariants() {
                 for key in parse_key_sequence(k) {
                     f.feed_raw(key);
                 }
-                // IME 打字路径：insert/replace 模式下随机注入（含多行文本）
+                // IME typing path: randomly injected in insert/replace mode (incl. multiline text)
                 if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
                     && fuzz_xorshift(&mut state).is_multiple_of(4)
                 {
                     f.type_text("t中x");
                 }
-                // 宿主点击：随机落点（刻意含非字符边界——入口须 floor）
+                // Host click: random landing point (deliberately incl. non-char-boundaries — the entry must floor)
                 if fuzz_xorshift(&mut state).is_multiple_of(11) {
                     let raw = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 2);
                     f.vim.set_cursor_offset(&f.buf, raw);
@@ -92,7 +94,7 @@ fn fuzz_round8_holds_invariants() {
                     assert_addressable("last_visual.lo", lo, &text, &ctx);
                     assert_addressable("last_visual.hi", hi, &text, &ctx);
                 }
-                // live 选区与 gv 重建选区的两端都可寻址
+                // Both ends of the live selection and the gv-rebuilt selection are addressable
                 if let Some((a, c, _)) = f.vim.visual_selection() {
                     assert_addressable("visual.anchor", a, &text, &ctx);
                     assert_addressable("visual.cursor", c, &text, &ctx);

@@ -1,12 +1,15 @@
-//! 第二十轮 fuzz：命令行面（`:` `/` `?` 提示符）的路径轰炸。
+//! Round-20 fuzz: path bombardment of the command-line face (`:` `/` `?` prompts).
 //!
-//! 相对 round19 的增量：round16-19 的键表里 Ex 行是**整串命名键**
-//! （`:3j\n` 这类固定拼写），本轮改成「进提示符 → 逐字符喂恶意字母表 →
-//! Enter/Esc 收尾」的爆发式输入，专打 `parse_range`/`ex_substitute`/
-//! `parse_reg_count`/history/C-w/C-u 这些只在 cmdline 内部走到的解析器。
-//! 另加本轮专属不变量：**发布给宿主的高亮区间必须整体可寻址**（起止在
-//! 字符边界且 ≤ 缓冲长）——搜索缓存失配/偏移调整出错时宿主 slice 会
-//! panic，这是引擎对宿主的渲染契约。
+//! Delta relative to round19: in the round16-19 key tables Ex lines were
+//! **whole named-key strings** (fixed spellings like `:3j\n`); this round
+//! switches to burst-style input ("enter prompt → feed malicious alphabet
+//! char by char → finish with Enter/Esc"), specifically targeting the
+//! `parse_range`/`ex_substitute`/`parse_reg_count`/history/C-w/C-u parsers
+//! that are only reached inside the cmdline. Plus a round-specific invariant:
+//! **highlight ranges published to the host must be fully addressable**
+//! (start/end on char boundaries and ≤ buffer length) — a search-cache
+//! mismatch or offset-adjustment bug makes the host slice panic; this is the
+//! engine's rendering contract toward the host.
 
 mod common;
 
@@ -24,15 +27,15 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// 16 seeds × 50 rounds × 100 steps = 8 万步（与 round13-19 同量级）
+// 16 seeds × 50 rounds × 100 steps = 80k steps (same order as round13-19)
 const SEEDS: u64 = 16;
 const ROUNDS: usize = 50;
 const STEPS: usize = 100;
 
-/// 提示符恶意字母表：范围语法/分隔符/寄存器名/正则元字符/多字节。
-// 安全阀（与 round35 同款）：字母表**不含 `!`**——ex 的 `:{range}!{filter}`
-// 分支会把后续字符交给 `sh -c` 真实执行（`>` 等元字符会在 cwd 落文件）。
-// `!` 形态的确定性覆盖在 tests/ex_filter.rs。
+/// Malicious prompt alphabet: range syntax/separators/register names/regex metachars/multibyte.
+// Safety valve (same as round35): the alphabet contains **no `!`** — ex's `:{range}!{filter}`
+// branch hands subsequent chars to a real `sh -c` execution (`>` and other metachars would drop
+// files in cwd). Deterministic coverage of the `!` form lives in tests/ex_filter.rs.
 const EX_ALPHABET: &[char] = &[
     '0', '1', '2', '3', '9', '$', '%', '.', '\'', '+', '-', ',', ';', ' ', '/', '?', '\\',
     '&', '|', '~', '{', '}', '(', ')', '[', ']', '<', '>', '#', '*', '^', '=', '"', 'a', 'b', 'd',
@@ -40,7 +43,7 @@ const EX_ALPHABET: &[char] = &[
     'J', 'S', 'D', '中', '文', '\u{1f600}',
 ];
 
-/// 普通模式打散键（保持管线不总停在同一状态；不需要 Ex 完整拼写）。
+/// Normal-mode scatter keys (keep the pipeline from parking in the same state; no full Ex spellings needed).
 const MODE_KEYS: &[&str] = &[
     "w", "b", "e", "0", "$", "j", "k", "h", "l", "gg", "G", "x", "dd", "yy", "p", "P", "u",
     "<C-r>", "v", "V", "o", "O", "i", "a", "A", "escape", "n", "N", "*", "%", ".", ">>", "gqj",
@@ -69,8 +72,9 @@ fn buffer_reset_when_idle(f: &mut Fixture, seed: u64) -> bool {
     *f.buf.0.borrow_mut() = text.to_owned();
     f.vim.cursor.offset = 0;
     f.vim.cursor.desired_col = None;
-    // 宿主换缓冲必然丢弃旧视图——先让引擎对新文本重发布，之后抓到
-    // 的越界高亮才是引擎自身的责任（而非 reset 前的陈账）
+    // When the host swaps buffers it must drop old views — first let the engine republish for the
+    // new text, so any out-of-bounds highlight captured afterwards is the engine's own fault
+    // (not stale accounting from before the reset)
     let mut ctx = Ctx {
         buf: &mut f.buf,
         host: &mut f.host,
@@ -97,7 +101,7 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
             return Err(format!("mark {name} at {o} past last line"));
         }
     }
-    // 渲染契约：宿主拿到的每个高亮区间都必须可直接 slice
+    // Rendering contract: every highlight range the host receives must be directly sliceable
     for hl in f.host.highlights.iter().chain(f.host.current_highlight.iter()) {
         if hl.end > len || !text.is_char_boundary(hl.start) || !text.is_char_boundary(hl.end) {
             return Err(format!(
@@ -108,12 +112,12 @@ fn invariants_hold(f: &Fixture) -> Result<(), String> {
     Ok(())
 }
 
-/// 一次命令行爆发：prompt + 若干恶意字符 + 收尾键。
+/// One command-line burst: prompt + several malicious chars + a finishing key.
 fn cmdline_burst(f: &mut Fixture, rng: &mut u64, prompt: char, trace: &mut Vec<String>) {
     let mut keys: Vec<String> = vec![prompt.to_string()];
     let n = (fuzz_xorshift(rng) % 24) as usize + 1;
     for _ in 0..n {
-        // 每步 1/6 概率塞一个 <...> 编辑键，其余取字母表字符
+        // 1/6 chance per step to inject a <...> editing key, otherwise take a char from the alphabet
         if fuzz_xorshift(rng).is_multiple_of(6) {
             keys.push(
                 ["<BS>", "<C-w>", "<C-u>", "<up>", "<down>", "<left>", "<right>", "<Esc>", "<Tab>"]
@@ -124,18 +128,18 @@ fn cmdline_burst(f: &mut Fixture, rng: &mut u64, prompt: char, trace: &mut Vec<S
             keys.push(EX_ALPHABET[(fuzz_xorshift(rng) as usize) % EX_ALPHABET.len()].to_string());
         }
     }
-    // 2/3 概率回车执行，否则 Esc 取消（两条尾路径的记账都要炸到）
+    // 2/3 chance to execute with Enter, otherwise cancel with Esc (both tail paths' accounting get bombed)
     keys.push(if !fuzz_xorshift(rng).is_multiple_of(3) {
         "<CR>".to_owned()
     } else {
         "<Esc>".to_owned()
     });
-    // 逐 token 喂：字母表单字符，<...> 为整体命名键（与 feed 的 Key::parse 域一致）
+    // Feed token by token: single alphabet chars, <...> as whole named keys (matching feed's Key::parse domain)
     trace.extend(keys.iter().cloned());
     f.feed(keys);
 }
 
-/// 逐字符喂一条 Ex 行（`:` + 字符 + Enter）。
+/// Feed one Ex line character by character (`:` + chars + Enter).
 fn feed_ex(f: &mut Fixture, line: &str) {
     let mut keys: Vec<String> = vec![":".to_owned()];
     keys.extend(line.chars().map(|c| c.to_string()));
@@ -170,7 +174,7 @@ fn fuzz_round20_cmdline_face_holds_invariants() {
                 } else if roll < 60 {
                     let c = ['\n', '\x7f', '\x08', '\t'][(roll % 4) as usize];
                     trace.push(format!("raw {:?}", c));
-                    // 直接字符喂（含 ctrl 原始形态）：IME 归一键
+                    // Direct char feeding (including raw ctrl forms): IME normalization keys
                     f.feed_raw(Key::char(c));
                 } else {
                     let k = MODE_KEYS[(roll as usize * 7) % MODE_KEYS.len()];
@@ -185,7 +189,7 @@ fn fuzz_round20_cmdline_face_holds_invariants() {
     }
 }
 
-/// 定向：`:s` 尾随 count 的每个截断形态都不得越出 [range 末行, EOF]。
+/// Directed: every truncation form of the `:s` trailing count must not slide outside [range end line, EOF].
 #[test]
 fn fuzz_substitute_count_never_slides_start_upward() {
     for n in [1usize, 2, 3, 7, 8, 9, 10, 11, 99, 1_000_000] {
@@ -193,7 +197,7 @@ fn fuzz_substitute_count_never_slides_start_upward() {
             let mut f = Fixture::new("a1\na2\na3\na4\na5\na6\na7\na8\na9\na10\n");
             feed_ex(&mut f, &format!("{}s/a/X/{}", start + 1, n));
             let changed = f.text().lines().filter(|l| l.starts_with('X')).count();
-            // vim 模型：从 start 行起、min(n, 剩余) 行被改，且都 ≥ start
+            // vim model: from the start line, min(n, remaining) lines get changed, all ≥ start
             let expect = (start..start + n).take_while(|&i| i < 10).count();
             assert_eq!(
                 changed, expect,

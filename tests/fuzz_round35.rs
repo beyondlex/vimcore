@@ -1,16 +1,19 @@
-//! 第三十五轮 fuzz：Ex 命令随机组装 × 不寻常缓冲（独立审计第四轮伴随赛道）。
+//! Round-35 fuzz: random Ex command assembly × unusual buffers (companion lane of the fourth independent audit round).
 //!
-//! 与 audit5 智能体的语义审计互补：本文件只抓**不变量违规与 panic**
-//! （P0 级），语义对错交给 oracle 探针。新维度：
-//! - Ex 行由「地址段 × 命令段」随机组装（倒序区间、偏移流、搜索地址、
-//!   mark 地址、`g`/`v` 嵌套 `:s`、`retab`/`sort`/`ce`/`ri`/`le` 全上）；
-//! - 缓冲池加入 TAB 密排、CJK、组合字符、^M、noeol、空行阵、单字符；
-//! - 算子 × 计数 × motion × 文本对象自由组合（2c3ap 一类）。
+//! Complementary to the audit5 agent's semantic audit: this file only catches
+//! **invariant violations and panics** (P0 level); semantic correctness is left to
+//! oracle probes. New dimensions:
+//! - Ex lines are randomly assembled from "address part × command part" (reversed
+//!   ranges, offset streams, search addresses, mark addresses, `g`/`v` nested `:s`,
+//!   `retab`/`sort`/`ce`/`ri`/`le` all included);
+//! - buffer pool adds dense TABs, CJK, combining chars, ^M, noeol, empty-line fields,
+//!   single chars;
+//! - operator × count × motion × text object freely combined (the 2c3ap family).
 //!
-//! 安全阀：键表**不含 `!` 过滤算子**（`!!` 会把后续随机字符交给
-//! `sh -c` 执行，fuzz 不得触发真实 shell）；不含 `:q`/`:w`/`:e` 一类
-//! 会话级命令。不变量沿用渲染契约：光标/mark/高亮全部可寻址、
-//! line_count ≥ 1。
+//! Safety valve: the key table **contains no `!` filter operator** (`!!` hands
+//! subsequent random chars to `sh -c`; fuzz must not trigger a real shell); no
+//! session-level commands like `:q`/`:w`/`:e`. Invariants follow the rendering
+//! contract: cursor/marks/highlights all addressable, line_count ≥ 1.
 
 mod common;
 
@@ -32,38 +35,38 @@ const SEEDS: u64 = 48;
 const ROUNDS: usize = 48;
 const STEPS: usize = 90;
 
-/// Normal/可视/插入键表：算子×计数×对象自由拼、寄存器前缀、marks、
-/// z/g 族、搜索、插入控制键。
+/// Normal/visual/insert key table: operator×count×object free splicing, register prefixes,
+/// marks, the z/g families, search, insert control keys.
 const KEYS: &[&str] = &[
-    // 算子与计数
+    // Operators and counts
     "d", "c", "y", ">", "<", "=", "~", "gu", "gU", "g??", "2", "3", "7", "0",
     // motion
     "w", "e", "b", "ge", "j", "k", "h", "l", "0", "^", "$", "g_", "gg", "G",
     "|", "f", "t", "F", "T", ";", ",", "%", "n", "N", "*", "#", "gd", "gD",
     "go", "gm", "gj", "gk", "gn", "gN",
-    // 文本对象（跟在算子后随机命中）
+    // Text objects (randomly hit after an operator)
     "iw", "aw", "i\"", "a\"", "i'", "a'", "i(", "a(", "i)", "a)", "i{",
     "a{", "i[", "a[", "ip", "ap", "is", "as", "it", "at",
-    // 行操作
+    // Line operations
     "x", "X", "s", "S", "D", "C", "J", "gJ", "dd", "yy", "cc", "yy", "p",
     "P", "gp", "gP", "o", "O", "r", "u", "<C-r>", ".",
-    // marks 与跳转
+    // Marks and jumps
     "ma", "mb", "mA", "'a", "'b", "`a", "`<", "'>", "'[", "']", "'{", "'}",
     "'^", "'.", "'0", "g;", "g,",
-    // z 族（视口语义，单缓冲应全部无害）
+    // z family (screen-relative semantics; all should be harmless on a single buffer)
     "z<CR>", "z.", "z-", "zt", "zz", "zb",
-    // 可视
+    // Visual
     "v", "V", "<C-v>", "o", "O", "gv", "iw", "<Esc>",
-    // 寄存器前缀
+    // Register prefixes
     "\"ayy", "\"add", "\"ap", "\"aP", "\"+y", "\"+p", "\"0p", "\"-p",
     "\"_d", "\"2p", "\"Ay",
-    // 搜索与替换提示符
+    // Search and substitute prompts
     "/", "?", ":s/a/b/<CR>", ":s//x/<CR>", ":&<CR>", ":~<CR>",
-    // 插入会话
+    // Insert sessions
     "i", "a", "A", "I", "R", "<Esc>", "<BS>", "<Del>", "<Tab>", "<CR>",
     "<C-w>", "<C-u>", "<C-t>", "<C-d>", "<C-y>", "<C-e>", "<C-r>a",
     "<C-o>", "<C-v>x41",
-    // Ex：完整命令（生成器之外的高价值整句）
+    // Ex: full commands (high-value complete sentences beyond the generator)
     ":1,3d<CR>", ":3,1d<CR>", ":$-1,$m0<CR>", ":1t$<CR>", ":2,4y<CR>",
     ":g/\\v</d<CR>", ":v/./d<CR>", ":%s/a/b/g<CR>", ":1,2j 3<CR>",
     ":sort i<CR>", ":retab 2<CR>", ":ce 20<CR>", ":ri 4<CR>", ":le<CR>",
@@ -71,14 +74,14 @@ const KEYS: &[&str] = &[
     ":normal <CR>",
 ];
 
-/// Ex 行生成器的地址段。
+/// Address part of the Ex-line generator.
 const EX_HEADS: &[&str] = &[
     "", "%", ".", "$", "1", "2", "3", "0", "5", ".,+2", ".,-1", "1,3", "3,1",
     "'a,'b", "'<,'>", "/ab/", "?ab?", "/ab/,/cd/", "+1", "-1", "$-1", ".,$",
     ".,+99", "'{,'}",
 ];
 
-/// Ex 行生成器的命令段。
+/// Command part of the Ex-line generator.
 const EX_CMDS: &[&str] = &[
     "d", "d 2", "y", "y 3", "t.", "t$", "m$", "m0", "m.", "j", "j 2", "co 2",
     "s/a/b/", "s/a/b/g", "s//b/", "s/a/", "s/[0-9]/#/g", "ce", "ce 4", "ri",
@@ -183,7 +186,7 @@ fn fuzz_round35_ex_assembly_and_weird_buffers_hold_invariants() {
                 }
                 let roll = fuzz_xorshift(&mut rng) % 10;
                 if roll < 2 {
-                    // 随机组装一条 Ex 行：地址段 × 命令段
+                    // Randomly assemble one Ex line: address part × command part
                     let head = EX_HEADS[(fuzz_xorshift(&mut rng) as usize) % EX_HEADS.len()];
                     let cmd = EX_CMDS[(fuzz_xorshift(&mut rng) as usize) % EX_CMDS.len()];
                     let line = format!("{head}{cmd}");
@@ -198,7 +201,7 @@ fn fuzz_round35_ex_assembly_and_weird_buffers_hold_invariants() {
                     }));
                     report_panic(&guard, seed, round, &format!(":{line}"), &trace);
                 } else if roll == 2 {
-                    // IME 提交路径：插入会话中整段提交 CJK
+                    // IME commit path: commit a whole CJK run inside an insert session
                     let s = ["中", "中文x", "x漢字", "ｱｲｳ"][(fuzz_xorshift(&mut rng) % 4) as usize];
                     trace.push(format!("IME({s})"));
                     let guard = std::panic::AssertUnwindSafe(|| {
@@ -220,8 +223,8 @@ fn fuzz_round35_ex_assembly_and_weird_buffers_hold_invariants() {
                     trace.push(k.to_owned());
                     let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         f.feed([k]);
-                        // 采样动作（harness 切片）也必须在轨道内，否则
-                        // panic 时丢 trace
+                        // Sampling actions (harness slices) must also stay on-track,
+                        // otherwise the trace is lost when panicking
                         let _ = f.text();
                         let _ = f.cursor();
                         let _ = f.line();

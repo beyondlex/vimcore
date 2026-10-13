@@ -1,14 +1,16 @@
-//! 第九轮扩展 fuzz：覆盖本轮修复路径的多种子确定性轰炸。
+//! Round-9 extended fuzz: deterministic multi-seed bombardment covering the paths fixed this round.
 //!
-//! 相对 `fuzz_round8` 的增量：
-//! - 键表补齐本轮改动路径：insert `<C-w>`（行首并线/块会话封锁）、
-//!   `3D`/`3C`（行计数）、`r<CR>`（拆行落点）、`<Tab>`（显示列对齐）、
-//!   `:substitute/x/y/`（全拼 + 缺 replacement）、`:2j 3`（带计数 join）、
-//!   `:bfirst`/`:blast`；
-//! - 缓冲池补 CJK 与 4 行等长行（Tab 对齐、D/C 计数饱和的形状）。
+//! Delta relative to `fuzz_round8`:
+//! - key table completes this round's changed paths: insert `<C-w>` (line-head join /
+//!   block-session blocking), `3D`/`3C` (line counts), `r<CR>` (line-split landing),
+//!   `<Tab>` (display-column alignment), `:substitute/x/y/` (full spelling + missing
+//!   replacement), `:2j 3` (join with count), `:bfirst`/`:blast`;
+//! - buffer pool adds CJK and 4 equal-length lines (the shapes of Tab alignment and
+//!   D/C count saturation).
 //!
-//! 不变量沿用 round8：光标/全部 mark/`last_visual`/live 选区/`gv` 重建
-//! 选区的偏移全部可寻址（字符边界或缓冲尾）。
+//! Invariants carried over from round8: cursor/all marks/`last_visual`/live
+//! selection/`gv`-rebuilt-selection offsets all stay addressable (char boundary or
+//! buffer end).
 
 mod common;
 
@@ -24,7 +26,7 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
 }
 
 const KEYS: &[&str] = &[
-    // 本轮修复路径
+    // Paths fixed this round
     "<C-w>",
     "3D",
     "3C",
@@ -38,7 +40,7 @@ const KEYS: &[&str] = &[
     ":blast",
     "Vgq",
     "gqq",
-    // 既有覆盖（节选 round8 键表，保持回归压力）
+    // Existing coverage (round8 key-table excerpt, keeps regression pressure)
     "gq}",
     "v$gq",
     "<C-v>jU",
@@ -155,11 +157,11 @@ const KEYS: &[&str] = &[
     "\"_dd",
 ];
 
-/// 校验一个偏移在 `text` 上可寻址（字符边界或末尾）。
+/// Verify an offset is addressable in `text` (a char boundary or the end).
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} not addressable in {text:?}"
     );
 }
 
@@ -191,13 +193,13 @@ fn fuzz_round9_holds_invariants() {
                 for key in parse_key_sequence(k) {
                     f.feed_raw(key);
                 }
-                // IME 打字路径：insert/replace 模式下随机注入（含多行文本）
+                // IME typing path: randomly injected in insert/replace mode (incl. multiline text)
                 if matches!(f.vim.mode(), vimcore::Mode::Insert | vimcore::Mode::Replace)
                     && fuzz_xorshift(&mut state).is_multiple_of(4)
                 {
                     f.type_text("t中x");
                 }
-                // 宿主点击：随机落点（刻意含非字符边界——入口须 floor）
+                // Host click: random landing point (deliberately incl. non-char-boundaries — the entry must floor)
                 if fuzz_xorshift(&mut state).is_multiple_of(11) {
                     let raw = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 2);
                     f.vim.set_cursor_offset(&f.buf, raw);

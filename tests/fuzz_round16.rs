@@ -1,17 +1,19 @@
-//! 第十六轮 fuzz：覆盖本轮修复面的路径轰炸。
+//! Round-16 fuzz: key-stream barrage over the paths touched by this round's fixes.
 //!
-//! 相对 round15 的增量：
-//! - autoindent 空行生命周期（did_ai）：o/O 开行、`<CR>` 拆行、行首
-//!   `<BS>`、cc/S 恢复缩进、Esc 退出——剥离与计数复制的次序交互；
-//! - 空文本计数重复（`3o`/`2O`/`3i`/`3A`/`3R` + Esc）与导航弃权；
-//! - 失败删除族（x/X/D/J/gJ/s）的响铃路径（静默回归此处会先炸不变量
-//!   之外的行为，键表保证路径被踩到）；
-//! - **宿主事件注入**：随机 `set_visual_range` / `set_cursor_offset` /
-//!   `type_text` / `replace_range` 在任意模式（含 insert/cmdline）投递
-//!   ——旧实现里 insert/cmdline 期的拖选会把模式机撕裂（round16 #4）。
+//! Increments over round15:
+//! - the autoindent empty-line lifecycle (did_ai): opening a line with o/O, splitting a line
+//!   with `<CR>`, `<BS>` at the line start, cc/S restoring the indent, Esc exiting — the
+//!   interaction of stripping order and count repetition;
+//! - empty-text counted repeats (`3o`/`2O`/`3i`/`3A`/`3R` + Esc) and abstaining motions;
+//! - the bell path of the failed-delete family (x/X/D/J/gJ/s) (a silent regression here would
+//!   first break behavior outside the invariants, so the key table guarantees the path is hit);
+//! - **host event injection**: random `set_visual_range` / `set_cursor_offset` /
+//!   `type_text` / `replace_range` delivered in any mode (including insert/cmdline) —
+//!   in the old implementation a drag-select during insert/cmdline tore the mode machine apart
+//!   (round16 #4).
 //!
-//! 不变量沿用 round13-15：光标/mark/`last_visual`/live 选区全部可寻址、
-//! 行数 ≥ 1、模式与指示器一致。
+//! The invariants carry over from round13-15: cursor/mark/`last_visual`/live selection are all
+//! addressable, line count >= 1, and mode and indicator agree.
 
 mod common;
 
@@ -28,21 +30,22 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// 16 seeds × 60 rounds × 120 steps ≈ 11.5 万步（与 round13-15 同预算）
+// 16 seeds × 60 rounds × 120 steps ≈ 115k steps (same budget as round13-15)
 const SEEDS: u64 = 16;
 const ROUNDS: usize = 60;
 const STEPS: usize = 120;
 
 const KEYS: &[&str] = &[
-    // 本轮修复面：autoindent 空行生命周期
+    // This round's fix surface: the autoindent empty-line lifecycle
     "o", "O", "<CR>", "<BS>", "<Esc>", "cc", "S", "cc<Esc>", "o<CR>", "o<BS>",
-    // 本轮修复面：空文本计数重复 + 带文本计数重复
+    // This round's fix surface: empty-text counted repeats + counted repeats with text
     "3o", "2O", "5o", "3i", "3A", "3R", "2Rab", "3o<Esc>", "2O<Esc>",
-    // 本轮修复面：失败删除/接合族
+    // This round's fix surface: the failed delete/join family
     "x", "X", "D", "C", "s", "J", "2J", "3J", "gJ", "99J",
-    // 本轮修复面：:sort 装饰排序路径（语义面不变量由 parity 钉住）
+    // This round's fix surface: the :sort decorated-sort path (the semantic invariants are
+    // pinned by parity)
     ":sort u<CR>", ":%sort i<CR>", ":2,4sort! <CR>",
-    // round15 键表节选（保持既有压力面）
+    // Excerpt of the round15 key table (keeping the existing pressure surface)
     ":s/a/b\\/c/<CR>", "&", ":1+99999999999999999999d<CR>", "}", "{", "d}",
     "d{", "2}", "ci\"", "ca\"", "1%", "2%", "50%", "%", "d2%", "\"_yy",
     "\"\"p", "3Rab", "\"1P", ".", "2.", "dd", "dw", "<C-h>", "i<C-h>",
@@ -62,12 +65,12 @@ const KEYS: &[&str] = &[
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} is not addressable in {text:?}"
     );
 }
 
 fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
-    assert!(!text.is_empty() || f.buf.line_count() == 1, "{ctx}: 行数 >= 1");
+    assert!(!text.is_empty() || f.buf.line_count() == 1, "{ctx}: line count >= 1");
     assert_addressable("cursor", f.vim.cursor_offset(), text, ctx);
     for (name, off) in f.vim.marks.items() {
         assert_addressable(&format!("mark {name}"), off, text, ctx);
@@ -81,7 +84,7 @@ fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
         assert_addressable("visual.anchor", a, text, &ctx);
         assert_addressable("visual.cursor", c, text, &ctx);
     }
-    // 模式指示器自洽（宿主状态栏的可见面）
+    // The mode indicator is self-consistent (the visible surface of the host status bar)
     match f.vim.mode_indicator() {
         "" => assert!(
             !matches!(
@@ -91,20 +94,21 @@ fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
                     | vimcore::mode::Mode::Visual { .. }
                     | vimcore::mode::Mode::CommandLine { .. }
             ),
-            "{ctx}: normal 模式指示器必须为空"
+            "{ctx}: the normal-mode indicator must be empty"
         ),
         other => assert!(
             !other.is_empty(),
-            "{ctx}: 非 normal 模式必须有指示器 ({other})"
+            "{ctx}: a non-normal mode must have an indicator ({other})"
         ),
     }
-    // last_matches 不检查：harness 全程 set_hlsearch_live_update(false)
+    // last_matches is not checked: the harness calls set_hlsearch_live_update(false) throughout
 }
 
 #[test]
 fn fuzz_round16_holds_invariants() {
-    // 缓冲池围绕本轮修复面：缩进行（ai 剥离面）、空行（失败删除族）、
-    // 纯空白行、多字节、可扩展的多行缓冲
+    // The buffer pool revolves around this round's fix surface: indented lines (the ai
+    // stripping surface), empty lines (the failed-delete family), whitespace-only lines,
+    // multi-byte text, growable multi-line buffers
     let buffers = [
         "",
         "a",
@@ -129,7 +133,7 @@ fn fuzz_round16_holds_invariants() {
             let initial = buffers[round % buffers.len()];
             let mut f = common::Fixture::new(initial);
             f.vim.set_hlsearch_live_update(false);
-            // 一半种子带 `nnoremap j gj`（round14 先例）
+            // Half of the seeds carry `nnoremap j gj` (the round14 precedent)
             if seed % 2 == 0 {
                 f.vim.keymaps.map_str_noremap(
                     vimcore::keymap::ModeClass::Normal,
@@ -154,9 +158,10 @@ fn fuzz_round16_holds_invariants() {
                     }
                 }
                 let roll = fuzz_xorshift(&mut state);
-                // 宿主事件注入（~1/8 步）：拖选/点击在任意模式投递——
-                // 旧实现在 insert/cmdline 期会撕裂模式机；IME 文本与
-                // IME 替换路径任意时点投递
+                // Host event injection (~1/8 of the steps): drag-select/click delivered in any
+                // mode — the old implementation tore the mode machine apart when this happened
+                // during insert/cmdline; IME text and the IME replacement path are delivered at
+                // arbitrary points
                 match roll % 8 {
                     0 => {
                         let a = (fuzz_xorshift(&mut state) as usize) % (f.text().len() + 1);
@@ -194,8 +199,8 @@ fn fuzz_round16_holds_invariants() {
     }
 }
 
-/// 巨 count 空复制：`<巨值>o<Esc>` 的复制数必须被字节预算钳制并终止
-/// （fix round16-1 的 "\n".repeat 走 clamped_repeat_count）。
+/// Huge-count empty repeat: the repeat count of `<huge value>o<Esc>` must be clamped by the
+/// byte budget and terminate (fix round16-1: `"\n".repeat` goes through clamped_repeat_count).
 #[test]
 fn fuzz_round16_huge_empty_repeat_terminates() {
     let start = std::time::Instant::now();
@@ -205,7 +210,7 @@ fn fuzz_round16_huge_empty_repeat_terminates() {
             f.feed([c.to_string().as_str()]);
         }
         f.feed(["o", "<Esc>"]);
-        // 16MB 预算 → 最多 1600 万个换行，缓冲不会爆
+        // 16MB budget → at most 16 million newlines, the buffer cannot blow up
         assert!(f.buf.len() < 20 * 1024 * 1024);
     }
     assert!(start.elapsed().as_secs() < 30, "must terminate quickly");

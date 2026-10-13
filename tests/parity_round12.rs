@@ -1,8 +1,9 @@
-//! 第十二轮检视回归(vim 9.1 探针实证)。
+//! Round-12 review regression (vim 9.1 probe-verified).
 //!
-//! 覆盖:范围扫描多字节 panic、地址偏移链、`w`/`b` 空白行语义、`e` 末词尾、
-//! `d$`/`dg_` 空行、`aw` 空白对象、`d-`/`d+` 边缘、`2*`/`2gN`、`ci"` 引号外、
-//! Ex:`:s` 带范围重放、`:2,2j`、`:d _`、显式 count、`@/`、`:set ic` 刷新。
+//! Coverage: multibyte panic in range scanning, address offset chains, `w`/`b`
+//! whitespace-line semantics, `e` at the last word end, `d$`/`dg_` on empty lines, `aw`
+//! blank objects, `d-`/`d+` edges, `2*`/`2gN`, `ci"` outside quotes, Ex: `:s` replay
+//! with range, `:2,2j`, `:d _`, explicit counts, `@/`, `:set ic` refresh.
 
 mod common;
 
@@ -16,50 +17,52 @@ fn lines(f: &Fixture) -> Vec<String> {
         .collect()
 }
 
-// ---- 范围解析(cmdline)------------------------------------------------
+// ---- range parsing (cmdline) ------------------------------------------------
 
 #[test]
 fn ex_range_multibyte_mark_name_no_panic() {
-    // `:'中d` 曾把 中 切在字节中间,split_at panic(用户可触发)
+    // `:'中d` once cut 中 mid-byte and panicked in split_at (user-triggerable)
     let f = edit("中文\nabc\n", 0, 0, &[":", "'", "中", "d", "\r"]);
-    // vim 9.1: E78: Unknown mark(非 ASCII mark 名非法)
+    // vim 9.1: E78: Unknown mark (non-ASCII mark names are invalid)
     assert_eq!(f.host.statuses.last().map(String::as_str), Some("E78: Unknown mark"));
     assert_eq!(f.buf.line_count(), 2);
 }
 
 #[test]
 fn ex_range_multibyte_after_quote_in_list_no_panic() {
-    // `,` 之后的 '中 同款崩溃路径
+    // the same crash path for '中 after a `,`
     let f = edit("中文\nabc\ndef\n", 0, 0, &[":", ",", "'", "中", "d", "\r"]);
     assert_eq!(f.buf.line_count(), 3);
 }
 
 #[test]
 fn ex_range_offset_chain_accumulates() {
-    // :5+2+1d = 删第 8 行(vim 9.1);旧实现只解析第一段(+2)删第 5 行
+    // :5+2+1d deletes line 8 (vim 9.1); the old implementation parsed only the first
+    // segment (+2) and deleted line 5
     let f = edit("1\n2\n3\n4\n5\n6\n7\n8\n9\n", 0, 0, &[":", "5", "+", "2", "+", "1", "d", "\r"]);
     assert_eq!(lines(&f), vec!["1\n", "2\n", "3\n", "4\n", "5\n", "6\n", "7\n", "9\n"]);
 }
 
 #[test]
 fn ex_range_offset_mixed_signs() {
-    // :3-1d 删第 2 行(vim 探针)
+    // :3-1d deletes line 2 (vim probe)
     let f = edit("1\n2\n3\n4\n", 0, 0, &[":", "3", "-", "1", "d", "\r"]);
     assert_eq!(lines(&f), vec!["1\n", "3\n", "4\n"]);
 }
 
-// ---- w / b / e(word.rs)------------------------------------------------
+// ---- w / b / e (word.rs) ----------------------------------------------------
 
 #[test]
 fn w_skips_whitespace_only_line() {
-    // vim 只停真空行;纯空白行自由跳过(9.1: w 落 def 的 d)
+    // vim stops only on truly empty lines; whitespace-only lines are skipped freely
+    // (9.1: w lands on the d of def)
     let f = edit("abc\n   \ndef\n", 0, 0, &["w"]);
     assert_eq!(f.cursor(), 8);
 }
 
 #[test]
 fn w_still_stops_on_empty_line() {
-    // 真空行停驻不变(既有行为,vim 一致)
+    // stopping on truly empty lines is unchanged (existing behavior, agrees with vim)
     let f = edit("ab\n\ncd\n", 0, 0, &["w"]);
     assert_eq!(f.line(), 1);
 }
@@ -67,12 +70,12 @@ fn w_still_stops_on_empty_line() {
 #[test]
 fn b_skips_whitespace_only_line_upward() {
     let f = edit("abc\n   \ndef\n", 2, 0, &["b"]);
-    assert_eq!(f.cursor(), 0); // abc 的 a,不在空白行停
+    assert_eq!(f.cursor(), 0); // the a of abc, no stop on the whitespace line
 }
 
 #[test]
 fn ye_at_last_word_end_yanks_word_only() {
-    // 旧实现返回 buf.len(),ye 吞尾部换行得 "c\n"
+    // the old implementation returned buf.len(), so ye swallowed the trailing newline → "c\n"
     let mut f = edit("abc\n", 0, 2, &["y", "e"]);
     let unnamed = f.vim.registers.get('"').map(|r| r.text.clone());
     assert_eq!(unnamed.as_deref(), Some("c"));
@@ -86,11 +89,12 @@ fn de_at_last_word_end_keeps_newline() {
     assert_eq!(f.text(), "ab\n");
 }
 
-// ---- d$ / dg_(motions + ops)-------------------------------------------
+// ---- d$ / dg_ (motions + ops) -----------------------------------------------
 
 #[test]
 fn dollar_delete_on_empty_line_is_noop() {
-    // 旧实现 Inclusive 端点吞 \n,两行并一行(vim: no-op)
+    // the old implementation's Inclusive endpoint swallowed the \n, joining two lines
+    // into one (vim: no-op)
     let f = edit("\nabc\n", 0, 0, &["d", "$"]);
     assert_eq!(lines(&f), vec!["\n", "abc\n"]);
 }
@@ -107,11 +111,12 @@ fn dollar_delete_still_deletes_to_line_end() {
     assert_eq!(f.text(), "ab\n");
 }
 
-// ---- aw / iw(objects)---------------------------------------------------
+// ---- aw / iw (objects) ------------------------------------------------------
 
 #[test]
 fn daw_on_whitespace_takes_blank_run_plus_next_word() {
-    // vim: daw 于词间空白删 "   bar" 剩 "foo"(旧实现只删空白段)
+    // vim: daw on inter-word blank deletes "   bar", leaving "foo" (the old
+    // implementation deleted only the blank run)
     let f = edit("foo   bar\n", 0, 4, &["d", "a", "w"]);
     assert_eq!(lines(&f), vec!["foo\n"]);
 }
@@ -125,7 +130,8 @@ fn yaw_on_whitespace_yanks_blank_run_plus_next_word() {
 
 #[test]
 fn daw_on_whitespace_line_merges_next_line_away() {
-    // vim: 空白行上 daw 连下一行词与换行一并删除,3 行变 1 行
+    // vim: on a whitespace line daw deletes the next line's word together with the
+    // newline, turning 3 lines into 1
     let f = edit("foo\n   \nbar\n", 1, 0, &["d", "a", "w"]);
     assert_eq!(lines(&f), vec!["foo\n"]);
 }
@@ -138,12 +144,12 @@ fn daw_on_empty_line_merges_next_line_away() {
 
 #[test]
 fn daw_on_word_unchanged() {
-    // 词上的 aw 行为不受本批改动影响
+    // aw on a word is unaffected by this batch of changes
     let f = edit("foo bar\n", 0, 0, &["d", "a", "w"]);
     assert_eq!(f.text(), "bar\n");
 }
 
-// ---- d- / d+(motions)----------------------------------------------------
+// ---- d- / d+ (motions) ------------------------------------------------------
 
 #[test]
 fn d_minus_on_first_line_is_noop() {
@@ -163,30 +169,32 @@ fn d_minus_mid_still_deletes_two_lines() {
     assert_eq!(lines(&f), vec!["c\n"]);
 }
 
-// ---- 搜索跳转 ------------------------------------------------------------
+// ---- search jumps ------------------------------------------------------------
 
 #[test]
 fn star_count_jumps_count_matches() {
-    // 2* 落第二个下一匹配(旧实现硬编码 1)
+    // 2* lands on the second next match (the old implementation hardcoded 1)
     let f = edit("a b a b a b\n", 0, 0, &["2", "*"]);
     assert_eq!(f.cursor(), 8);
 }
 
 #[test]
 fn gn_count_backward_selects_distinct_matches() {
-    // 2gN 曾每步重选同一匹配(range.start 恒被自身包含)
+    // 2gN once re-selected the same match each step (range.start always contained itself)
     let f = edit("a b a b\n", 0, 7, &["/", "a", "\r", "2", "g", "N"]);
     let (a, b) = f.vim.marks.active_visual().expect("2gN selects a range");
-    // 从第一个匹配反向:第一步选当前 [0,1),第二步 wrap 到最后的 [4,5)
-    // (wrapscan;旧实现第二步会重选 [0,1) 自身)
+    // backwards from the first match: step one selects the current [0,1), step two wraps
+    // to the last [4,5) (wrapscan; the old implementation's step two would re-select
+    // [0,1) itself)
     assert_eq!((a, b), (4, 5));
 }
 
-// ---- ci"(objects)---------------------------------------------------------
+// ---- ci" (objects) ------------------------------------------------------------
 
 #[test]
 fn ciquote_between_strings_replaces_gap() {
-    // vim: 左引号作开引号,配下一个引号 → ' then ' 被替换
+    // vim: the left quote acts as the open quote, paired with the next quote → the gap
+    // ' then ' gets replaced
     let mut f = edit("say \"hi\" then \"bye\"\n", 0, 13, &["c", "i", "\""]);
     f.type_text("X");
     f.feed(["<Esc>"]);
@@ -209,11 +217,12 @@ fn ciquote_inside_string_unchanged() {
     assert_eq!(f.text(), "say \"X\" then \"bye\"\n");
 }
 
-// ---- Ex(:s 重放 / :j / :d 寄存器 / count)---------------------------------
+// ---- Ex (:s replay / :j / :d register / counts) -------------------------------
 
 #[test]
 fn substitute_replay_honors_explicit_range() {
-    // :3,4s 重放作用于 3-4(旧实现丢范围落光标行)
+    // replaying :3,4s acts on lines 3-4 (the old implementation dropped the range and
+    // fell to the cursor line)
     let mut f = edit("a\naxa\naxa\naxa\na\n", 0, 0, &[":", "2", ",", "4", "s", "/", "a", "/", "b", "/", "\r"]);
     f.feed(["g", "g"]);
     f.feed([":", "3", ",", "4", "s", "\r"]);
@@ -222,17 +231,17 @@ fn substitute_replay_honors_explicit_range() {
 
 #[test]
 fn substitute_updates_search_state() {
-    // :s 后 @/ 为替换模式,n 搜之(vim)
+    // after :s, @/ holds the substitute pattern and n searches with it (vim)
     let mut f = edit("axa\nbxb\n", 0, 0, &[":", "s", "/", "x", "/", "Y", "/", "\r"]);
     let slash = f.vim.registers.get('/').map(|r| r.text.clone());
     assert_eq!(slash.as_deref(), Some("x"));
     f.feed(["n"]);
-    assert_eq!(f.cursor(), 5); // 第二个 x
+    assert_eq!(f.cursor(), 5); // the second x
 }
 
 #[test]
 fn join_equal_two_address_range_is_noop() {
-    // :2,2j no-op(vim :h :j);单地址 :2j 与裸 :j 照常接
+    // :2,2j is a no-op (vim :h :j); a single address :2j and a bare :j still join
     let f = edit("a\nb\nc\n", 0, 0, &[":", "2", ",", "2", "j", "\r"]);
     assert_eq!(lines(&f), vec!["a\n", "b\n", "c\n"]);
 
@@ -245,7 +254,7 @@ fn join_equal_two_address_range_is_noop() {
 
 #[test]
 fn delete_blackhole_register_stays_empty() {
-    // :d _ 不进 "1(vim 黑洞)
+    // :d _ does not enter "1 (vim blackhole)
     let f = edit("a\nb\nc\n", 0, 0, &[":", "2", "d", " ", "_", "\r"]);
     assert_eq!(f.vim.registers.get('1'), None);
     assert_eq!(lines(&f), vec!["a\n", "c\n"]);
@@ -253,7 +262,8 @@ fn delete_blackhole_register_stays_empty() {
 
 #[test]
 fn delete_explicit_count_one_anchors_at_last_line() {
-    // :1,2d 1 删第 2 行(显式 count 哪怕 1 也重锚定;旧实现删 1-2)
+    // :1,2d 1 deletes line 2 (an explicit count re-anchors even when it is 1; the old
+    // implementation deleted 1-2)
     let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "d", " ", "1", "\r"]);
     assert_eq!(lines(&f), vec!["a\n", "c\n"]);
 }
@@ -265,54 +275,57 @@ fn yank_explicit_count_one_takes_last_line_only() {
     assert_eq!(zero.as_deref(), Some("b\n"));
 }
 
-// ---- :set ic 刷新高亮 ------------------------------------------------------
+// ---- :set ic highlight refresh --------------------------------------------------
 
 #[test]
 fn set_noic_refreshes_live_highlights() {
-    // :set noic 后既有高亮按新规则重发布(Foo 掉出)
+    // after :set noic the existing highlights are re-published under the new rule (Foo drops out)
     let mut f = edit("Foo\nfoo\n", 0, 0, &["/", "f", "o", "o", "\r"]);
     assert_eq!(f.host.highlights.len(), 2);
     f.feed([":", "s", "e", "t", " ", "n", "o", "i", "c", "\r"]);
     assert_eq!(f.host.highlights.len(), 1);
 }
 
-// ---- 体验闭环(零宽搜索 / :5> / visual 滚动 / :marks)------------------------
+// ---- UX loop (zero-width search / :5> / visual scrolling / :marks) ---------------
 
 #[test]
 fn empty_line_pattern_finds_empty_lines() {
-    // /^$ 找到空行(vim 9.1 ggn 实证);旧实现把零宽匹配全滤掉报 E486
+    // /^$ finds empty lines (vim 9.1 ggn evidence); the old implementation filtered out
+    // all zero-width matches and reported E486
     let f = edit("ab\n\ncd\n", 0, 0, &["/", "^", "$", "\r"]);
     assert_eq!(f.line(), 1);
-    assert_eq!(f.cursor(), 3); // 空行行首
+    assert_eq!(f.cursor(), 3); // start of the empty line
 }
 
 #[test]
 fn empty_line_pattern_no_phantom_match_after_trailing_newline() {
-    // 尾换行后的幻影位置不算匹配:n 在唯一空行上环绕停留
+    // the phantom position after the trailing newline does not count as a match: n stays
+    // wrapped on the single empty line
     let f = edit("ab\n\ncd\n", 0, 0, &["/", "^", "$", "\r", "n"]);
     assert_eq!(f.line(), 1);
 }
 
 #[test]
 fn shift_in_range_reports_e16_when_out_of_range() {
-    // 【第十五轮修正】`:>`/`:<` 已实现（此前 E492）。vim 9.1 探针：
-    // 2 行缓冲上 `:5>` 越界 → "E16: Invalid range"；`:2>` 正常右移
-    // （引擎默认 et → 4 空格缩进；vim 默认 noet → TAB）。
+    // [Round-15 correction] `:>`/`:<` are now implemented (previously E492). vim 9.1 probe:
+    // on a 2-line buffer `:5>` is out of range → "E16: Invalid range"; `:2>` shifts right
+    // normally (engine default et → 4-space indent; vim default noet → TAB).
     let f = edit("a\nb\n", 0, 0, &[":", "5", ">", "\r"]);
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert!(last.starts_with("E16"), "got {last:?}");
     let f = edit("a\nb\n", 0, 0, &[":", "2", ">", "\r"]);
-    assert_eq!(f.text(), "a\n    b\n", ":2> 应右移第 2 行（et → 4 空格）");
+    assert_eq!(f.text(), "a\n    b\n", ":2> should shift line 2 right (et → 4 spaces)");
     assert!(
         !f.host.statuses.iter().any(|s| s.starts_with("E492")),
-        ":2> 不是未知命令：{:?}",
+        ":2> is not an unknown command: {:?}",
         f.host.statuses
     );
 }
 
 #[test]
 fn visual_scroll_commands_keep_selection() {
-    // visual 模式 zz/zt/zb:滚动上报 + 保留选区(round11 悬置闭环,vim 行为)
+    // zz/zt/zb in visual mode: scroll report + selection preserved (round11's pending
+    // loop closed; vim behavior)
     let mut f = edit("one\ntwo\nthree\nfour\nfive\n", 0, 0, &["V", "j"]);
     f.feed(["z", "z"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }), "selection survives zz");
@@ -327,7 +340,8 @@ fn visual_scroll_commands_keep_selection() {
 
 #[test]
 fn marks_listing_dedupes_user_set_dot() {
-    // m. 设过 . mark 后,:marks 只列一行 .(旧实现 items + last_change 各一行)
+    // after m. sets the . mark, :marks lists the dot mark once only (the old
+    // implementation listed one row from items plus one from last_change)
     let mut f = edit("a\nb\n", 0, 0, &["m", "."]);
     f.feed([":", "m", "a", "r", "k", "s", "\r"]);
     let dot_rows = f

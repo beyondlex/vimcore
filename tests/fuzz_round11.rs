@@ -1,16 +1,17 @@
-//! 第十一轮扩展 fuzz：覆盖本轮修复的路径 + mark 算子面。
+//! Round-11 extended fuzz: covers the paths fixed this round + the mark-operator surface.
 //!
-//! 相对 round10 的增量键表：
-//! - mark 跳转作为算子目标（`d'a`/`d\`a`/`y'a`/`c'a`——本轮修复的整条
-//!   缺失路径，JumpMark 臂过去不消化算子）；
-//! - 新范围语义（`:2,5` 空命令、`:1,2,3d` 多地址、`:,3d`/`:2,d` 空地址、
-//!   `&` 旗标重放、`:s/x/y/g` + `&` 组合）；
-//! - 替换重放/查询（`:&`、`:s`、`gi`、`gv` 在 visual 变更后）；
-//! - Replace 模式 BS 恢复栈与 `R` 大会话。
+//! Key-table delta relative to round10:
+//! - mark jumps as operator targets (`d'a`/`d\`a`/`y'a`/`c'a` — the whole missing
+//!   path fixed this round; the JumpMark arm used not to consume operators);
+//! - new range semantics (`:2,5` empty command, `:1,2,3d` multi-address, `:,3d`/`:2,d`
+//!   empty addresses, `&` flag replay, `:s/x/y/g` + `&` combination);
+//! - substitute replay/query (`:&`, `:s`, `gi`, `gv` after visual changes);
+//! - Replace-mode BS restore stack and long `R` sessions.
 //!
-//! 不变量沿用 round10：光标/mark/`last_visual`/live 选区/`last_matches`
-//! 全部可寻址，外加轮末 `g;`/`<C-o>` 后光标仍可寻址（changelist/jumplist
-//! 的暴露面经 floor 守卫）。
+//! Invariants carried over from round10: cursor/mark/`last_visual`/live
+//! selection/`last_matches` must all stay addressable, plus the cursor remains
+//! addressable after end-of-round `g;`/`<C-o>` (the changelist/jumplist
+//! exposure surface guarded by floor clamping).
 
 mod common;
 
@@ -27,7 +28,7 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
 }
 
 const KEYS: &[&str] = &[
-    // 本轮新增：mark 算子面（修复路径）
+    // New this round: mark operator surface (fixed paths)
     "d'a",
     "d`a",
     "y'a",
@@ -40,7 +41,7 @@ const KEYS: &[&str] = &[
     "'a",
     "`a",
     "'b",
-    // 本轮新增：Ex 范围语义（修复路径）
+    // New this round: Ex range semantics (fixed paths)
     ":2,5",
     ":1,2,3d",
     ":,3d",
@@ -52,10 +53,10 @@ const KEYS: &[&str] = &[
     ":s",
     ":%s/x/y/",
     ":%j",
-    // 本轮新增：Replace 会话与恢复栈
+    // New this round: Replace sessions and restore stack
     "R",
     "<BS>",
-    // 既有覆盖（round10 键表节选，保持回归压力）
+    // Existing coverage (round10 key-table excerpt, keeps regression pressure)
     "<Up>",
     "<Down>",
     "/x<CR>",
@@ -247,11 +248,11 @@ const KEYS: &[&str] = &[
     "\"_dd",
 ];
 
-/// 校验一个偏移在 `text` 上可寻址（字符边界或末尾）。
+/// Verify an offset is addressable in `text` (a char boundary or the end).
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} not addressable in {text:?}"
     );
 }
 
@@ -321,8 +322,9 @@ fn fuzz_round11_holds_invariants() {
     }
 }
 
-/// changelist / jumplist 的暴露面：`g;`/`g,`/`<C-o>`/`<C-i>` 任意轰炸后
-/// 光标必须可寻址（两个列表的 floor 守卫常驻压力）。
+/// The changelist / jumplist exposure surface: after arbitrary bombardment of
+/// `g;`/`g,`/`<C-o>`/`<C-i>` the cursor must stay addressable (standing pressure
+/// on the floor guards of both lists).
 #[test]
 fn change_and_jump_list_walks_stay_addressable() {
     let buffers = [
@@ -348,7 +350,7 @@ fn change_and_jump_list_walks_stay_addressable() {
                     f.feed_raw(key);
                 }
                 if step.is_multiple_of(7) {
-                    // 每逢 7 步走一遍历史，逼出列表越界
+                    // Every 7th step walk the whole history to force list overruns
                     for _ in 0..5 {
                         f.feed_raw(vimcore::key::Key::parse("g;"));
                     }

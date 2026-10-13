@@ -1,22 +1,25 @@
-//! 第二十九轮探针（二）：块插入会话、边界缓冲、`~`/E18 反馈、宏追加。
+//! Round-29 probes (part two): block-insert sessions, boundary buffers, `~`/E18 feedback, macro
+//! append.
 
 mod common;
 
 use common::{edit, Fixture};
 use vimcore::key::Key;
 
-/// 探针 A：块可视 `c` 会话——打字、退格、Esc 后副本随 typing 行净变化收缩。
+/// Probe A: the block-visual `c` session — typing, backspace, and after Esc the replica shrinks
+/// by the net typing of the typed line.
 #[test]
 fn probe_block_change_backspace_shrinks_replica() {
     let mut f = Fixture::at("abcd\nefgh\n", 0, 1);
-    f.feed(["<C-v>", "j", "c"]); // 选中两行各 1 列（b/f），进入块插入
+    f.feed(["<C-v>", "j", "c"]); // select one column on each of the two lines (b/f), enter block insert
     f.type_text("XY");
-    f.feed_raw(Key::backspace()); // 撤掉 Y → 净输入 X
+    f.feed_raw(Key::backspace()); // remove Y → net input X
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "aXcd\neXgh\n", "副本应与 typing 行净输入一致");
+    assert_eq!(f.text(), "aXcd\neXgh\n", "the replica must match the net input of the typed line");
 }
 
-/// 探针 B：块可视 `c` 立即 Esc——选中列删除、行保留、无副本、无 panic。
+/// Probe B: block-visual `c` with an immediate Esc — the selected columns are deleted, the lines
+/// stay, no replica, no panic.
 #[test]
 fn probe_block_change_empty_escape() {
     let f = {
@@ -24,42 +27,45 @@ fn probe_block_change_empty_escape() {
         f.feed(["<C-v>", "j", "c", "<Esc>"]);
         f
     };
-    assert_eq!(f.text(), "acd\negh\n", "选中列（b/f）被删，无任何副本");
+    assert_eq!(f.text(), "acd\negh\n", "the selected columns (b/f) are deleted, no replica at all");
 }
 
-/// 探针 C：`$` 块删除把选中的行清空（vim：删 0..行内容尾，不删行本身）；
-/// `.` 重放在空行上安全（选区覆盖同两行，无内容可删，不 panic）。
+/// Probe C: `$` block delete empties the selected lines (vim: deletes 0..end of line content, not
+/// the line itself); the `.` redo on an empty line is safe (the selection covers the same two
+/// lines, there is nothing to delete, no panic).
 #[test]
 fn probe_dot_after_dollar_block_delete() {
     let mut f = Fixture::at("aaa bbb\nccc ddd\neee fff\n", 0, 0);
     f.feed(["<C-v>", "j", "$", "d"]);
     assert_eq!(f.text(), "\n\neee fff\n");
     f.feed(["."]);
-    assert_eq!(f.text(), "\n\neee fff\n", "`.` 重放到空行上是安全无操作");
+    assert_eq!(f.text(), "\n\neee fff\n", "replaying `.` onto an empty line is a safe no-op");
 }
 
-/// 探针 D：`~` 在空行上无操作、不 panic。
+/// Probe D: `~` on an empty line is a no-op and does not panic.
 #[test]
 fn probe_tilde_on_empty_line_noop() {
     let f = edit("\nfoo\n", 0, 0, &["~"]);
     assert_eq!(f.text(), "\nfoo\n");
 }
 
-/// 探针 E：insert 模式 `<C-r>` 粘贴 linewise 寄存器。
-/// 寄存器文本（"one\n"）落在行尾追加点：行成为 "twoone"，寄存器自带的
-/// 换行拆出新行，缓冲原有的行终止符再留一个空行——vim 同款。
+/// Probe E: `<C-r>` in insert mode pasting a linewise register.
+/// The register text ("one\n") lands at the line-end append point: the line becomes "twoone", the
+/// register's own newline starts a new line, and the buffer's original line terminator leaves one
+/// more empty line — same as vim.
 #[test]
 fn probe_insert_ctrl_r_linewise_register() {
     let mut f = Fixture::at("one\ntwo\n", 0, 0);
     f.feed(["y", "y"]); // "0 = "one\n"
     f.feed(["j", "$"]);
-    f.feed(["a"]); // 行尾追加
+    f.feed(["a"]); // append at the line end
     f.feed(["<C-r>", "0"]);
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "one\ntwoone\n\n");
 }
 
-/// 探针 F：`:0d` 删除第一行（vim 语义：地址 0 与第 1 行等价作用首行）。
+/// Probe F: `:0d` deletes the first line (vim semantics: address 0 acts on the first line,
+/// equivalent to line 1).
 #[test]
 fn probe_ex_zero_delete() {
     let f = {
@@ -70,14 +76,16 @@ fn probe_ex_zero_delete() {
     assert_eq!(f.text(), "b\nc\n");
 }
 
-/// 探针 G：`-0` 上 `<C-a>`：结果非负时去掉负号（vim 9.1 语义）。
+/// Probe G: `<C-a>` on `-0`: the minus sign is dropped when the result is non-negative (vim 9.1
+/// semantics).
 #[test]
 fn probe_increment_negative_zero_drops_sign() {
     let f = edit("-0\n", 0, 1, &["<C-a>"]);
     assert_eq!(f.text(), "1\n");
 }
 
-/// 探针 H：`qA` 追加录制后 `@@` 重放整个宏；内容含两次会话的步骤。
+/// Probe H: `qA` append-recording then `@@` replays the whole macro; the content holds the steps
+/// of two sessions.
 #[test]
 fn probe_qa_append_then_atat() {
     let mut f = Fixture::at("ab\ncd\n", 0, 0);
@@ -85,33 +93,33 @@ fn probe_qa_append_then_atat() {
     f.feed(["j"]);
     f.feed(["q", "A", "x", "q"]); // a = [x, x]
     assert_eq!(f.vim.macro_len('a'), 2);
-    f.feed(["@@", "@@"]); // 连放两次（每次 2 步）
-    assert_eq!(f.text(), "b\nd\n", "@@ 重放宏 a：两次 x");
+    f.feed(["@@", "@@"]); // replay twice in a row (2 steps each)
+    assert_eq!(f.text(), "b\nd\n", "@@ replays macro a: two x");
 }
 
-/// 探针 I：`g`/`gu` 后按 Esc——安静取消，不响铃。
+/// Probe I: Esc after `g`/`gu` — a quiet cancel, no bell.
 #[test]
 fn probe_pending_prefix_escape_is_quiet() {
     let mut f = Fixture::at("abc\n", 0, 0);
     f.feed(["g", "<Esc>"]);
     f.feed(["g", "u", "<Esc>"]);
     f.feed(["3", "<Esc>"]);
-    assert_eq!(f.host.bells, 0, "前缀取消应安静，got {} 次响铃", f.host.bells);
+    assert_eq!(f.host.bells, 0, "cancelling a prefix must be quiet, got {} bells", f.host.bells);
     assert_eq!(f.text(), "abc\n");
-    // 取消后计数不得残留到下一条命令。
+    // After a cancel the count must not leak into the next command.
     f.feed(["x"]);
-    assert_eq!(f.text(), "bc\n", "Esc 取消后 x 只删 1 个字符");
+    assert_eq!(f.text(), "bc\n", "after Esc cancels, x deletes only 1 char");
 }
 
-/// 探针 J：空行上 `v$` + `d`——空行的可视选区覆盖其换行符，d 删掉空行
-/// 本身（vim 的 `vd` 删空行语义），不 panic。
+/// Probe J: `v$` + `d` on an empty line — the visual selection of an empty line covers its newline,
+/// so d deletes the empty line itself (vim's `vd` empty-line delete semantics), no panic.
 #[test]
 fn probe_visual_dollar_on_empty_line() {
     let f = edit("a\n\nb\n", 1, 0, &["v", "$", "d"]);
-    assert_eq!(f.text(), "a\nb\n", "空行选区覆盖换行符，d 删除该空行");
+    assert_eq!(f.text(), "a\nb\n", "the empty line's selection covers the newline, d deletes that empty line");
 }
 
-/// 探针 K：空缓冲上 `:%s/./x/`——E486，不 panic。
+/// Probe K: `:%s/./x/` on an empty buffer — E486, no panic.
 #[test]
 fn probe_substitute_on_empty_buffer() {
     let mut f = Fixture::new("");
@@ -119,12 +127,12 @@ fn probe_substitute_on_empty_buffer() {
     assert_eq!(f.text(), "");
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E486")),
-        "无匹配应报 E486，got {:?}",
+        "no match must report E486, got {:?}",
         f.host.statuses
     );
 }
 
-/// 探针 L：`ciw` 于单字符缓冲。
+/// Probe L: `ciw` on a single-char buffer.
 #[test]
 fn probe_ciw_single_char_buffer() {
     let mut f = Fixture::at("x", 0, 0);
@@ -134,15 +142,15 @@ fn probe_ciw_single_char_buffer() {
     assert_eq!(f.text(), "y");
 }
 
-/// 探针 M：`.` 重放带显式寄存器前缀的删除（`"add` → `.` 仍进 "a）。
+/// Probe M: `.` replays a delete with an explicit register prefix (`"add` → `.` still goes into "a).
 #[test]
 fn probe_dot_replays_named_register_delete() {
     let mut f = Fixture::at("aa\nbb\ncc\n", 0, 0);
     f.feed(["\"", "a", "d", "d"]);
     f.feed(["."]);
-    assert_eq!(f.text(), "cc\n", "`.` 重复 \"ad 删除两行");
-    // 寄存器 a 装着第二次删除的内容。
+    assert_eq!(f.text(), "cc\n", "`.` repeats the \"ad delete of two lines");
+    // Register a holds the content of the second delete.
     f.feed(["G"]);
     f.feed(["\"", "a", "P"]);
-    assert_eq!(f.text(), "bb\ncc\n", "\"aP 粘贴 `.` 删掉的行");
+    assert_eq!(f.text(), "bb\ncc\n", "\"aP puts the lines deleted by `.`");
 }

@@ -1,21 +1,25 @@
-//! audit6_b：第五轮独立审计·智能体 B 域探针
-//! （块可视 C-v 与块编辑 / Normal motion / 文本对象 / 算子 / 可视 motion 形状）。
+//! audit6_b: agent-domain-B probes of the fifth independent audit round
+//! (blockwise visual C-v and block editing / Normal motions / text objects /
+//! operators / visual motion shapes).
 //!
-//! 每个 `#[test]` 对应一个 oracle（本机 /usr/bin/vim = 9.1 patches 1-1752）
-//! 证实的 bug，编号 E-B-n；断言写 oracle 期望值，修复前应当失败。
+//! Each `#[test]` corresponds to a bug confirmed by the oracle (local
+//! /usr/bin/vim = 9.1 patches 1-1752), numbered E-B-n; assertions carry the
+//! oracle-expected values and should fail before the fix.
 //!
-//! 批量对拍 runner（`batch_probe`，#[ignore]）：读 /tmp/oracle6/cases.tsv，
-//! 逐例跑引擎、把结果写 /tmp/oracle6/eng_out.tsv，供 python 侧与 vim
-//! typeahead/PTY 结果 diff。TSV 列：
-//!   name \t hex(buf) \t line \t col \t keys(空格分词,Key::parse 记号)
-//!   \t pre_ex(:开头 ex，先喂) \t set_vim(oracle 侧 :set 前提)
-//! 输出列：
+//! Batch differential runner (`batch_probe`, #[ignore]): reads
+//! /tmp/oracle6/cases.tsv, runs each case through the engine, writes results to
+//! /tmp/oracle6/eng_out.tsv for the python side to diff against vim
+//! typeahead/PTY results. TSV columns:
+//!   name \t hex(buf) \t line \t col \t keys(space-separated, Key::parse tokens)
+//!   \t pre_ex(ex starting with :, fed first) \t set_vim(:set premises on the oracle side)
+//! Output columns:
 //!   name \t line \t col \t hex(text) \t mode \t bells \t regpayload
-//! regpayload = hex(unnamed)+'/'+kind(v,V,\x16+width)；空寄存器 = '-'。
+//! regpayload = hex(unnamed)+'/'+kind(v,V,\x16+width); empty register = '-'.
 //!
-//! oracle 通道记录在各 bug 注释里：typeahead（python 写缓冲+按键 →
-//! vim -Nu NONE -N -i NONE -n -s keys buf）为主；方向键/响铃/块可视怪键
-//! 走 expect PTY（/tmp/oracle6/oracle.py 的 ptty()）。
+//! The oracle channel used is recorded in each bug's comment: typeahead (python
+//! writes the buffer + keystrokes → vim -Nu NONE -N -i NONE -n -s keys buf) is
+//! primary; arrow keys/bell/blockwise-visual odd keys go through expect PTY
+//! (ptty() in /tmp/oracle6/oracle.py).
 
 mod common;
 
@@ -47,8 +51,9 @@ fn reg_payload(f: &Fixture) -> String {
                 vimcore::registers::RegisterKind::Charwise => "v".to_owned(),
                 vimcore::registers::RegisterKind::Linewise => "V".to_owned(),
                 vimcore::registers::RegisterKind::Blockwise => {
-                    // vim getregtype 的 \x16 后随宽度；引擎寄存器不带宽度，
-                    // 用最宽行近似（比较时 python 侧同式计算）
+                    // vim getregtype appends the width after \x16; the engine's registers carry no
+                    // width, so approximate with the widest line (the python side computes the same
+                    // way when comparing)
                     let w = r.text.split('\n').map(|l| l.chars().count()).max().unwrap_or(0);
                     format!("\u{16}{w}")
                 }
@@ -82,7 +87,7 @@ fn run_case(pre_ex: &str, keys: &str, buf: &str, line: usize, col: usize) -> Fix
 }
 
 #[test]
-#[ignore = "批量对拍 runner：读 /tmp/oracle6/cases.tsv 写 eng_out.tsv"]
+#[ignore = "batch differential runner: reads /tmp/oracle6/cases.tsv, writes eng_out.tsv"]
 fn batch_probe() {
     let data = std::fs::read_to_string("/tmp/oracle6/cases.tsv").unwrap();
     let mut out = String::new();
@@ -113,7 +118,7 @@ fn batch_probe() {
 }
 
 #[test]
-#[ignore = "临时诊断：逐键模式轨迹"]
+#[ignore = "temporary diagnostic: per-key mode trace"]
 fn trace_block_x() {
     let mut f = Fixture::new("long line here\nabc\ndef\n");
     for k in ["<C-v>", "j", "l", "l", "X"] {

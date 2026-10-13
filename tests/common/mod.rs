@@ -90,8 +90,8 @@ impl VimBuffer for BufferView {
     fn offset_to_line(&self, offset: usize) -> usize {
         let text = self.0.borrow();
         let mut offset = offset.min(text.len());
-        // 宿主必须全函数：引擎侧个别渲染路径（如 :marks 的 `>` 行）在
-        // 防御取整前可能送来多字节内部的偏移
+        // The host must see whole functions: a few engine render paths (e.g. the `>` row of
+        // :marks) may deliver an offset inside a multibyte char before defensive flooring
         while offset > 0 && !text.is_char_boundary(offset) {
             offset -= 1;
         }
@@ -206,7 +206,7 @@ impl VimHost for HostView {
         if self.open_group != Some(id) {
             self.undo_stack.push((self.text.borrow().clone(), cursor));
             // a FRESH change after an undo kills the redo branch (vim's undo
-            // is a tree — audit5 C-15: `u` 后 `x` 再 `<C-r>` 只能响铃)
+            // is a tree — audit5 C-15: after `u`, `x` then `<C-r>` can only bell)
             self.redo_stack.clear();
             self.open_group = Some(id);
             self.group_count += 1;

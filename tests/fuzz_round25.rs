@@ -1,25 +1,29 @@
-//! 第二十五轮 fuzz：行边界 × 字素簇（GB4 硬边界语料）全按键轰炸。
+//! Round-25 fuzz: full key-stream barrage over the line-boundary x grapheme-cluster corpus
+//! (the GB4 hard-boundary corpus).
 //!
-//! 背景：round25 修复了三类「字素簇越过 `\n`」的路径——`w` 的空白跳过
-//! 不吸收延续字符、`prev/next_grapheme_offset` 把行首/行尾的独立 mark 与
-//! ZWJ 胶合进 `\n` 的簇、insert `<Del>` 只删基字符。这些修复共同声明了
-//! 两条此前未被同时检查的不变量：
+//! Background: round25 fixed three classes of paths where "a grapheme cluster crossed `\n`" —
+//! `w`'s whitespace skip not absorbing continuation chars, `prev/next_grapheme_offset` gluing
+//! a lone mark or ZWJ at the line start/end into the `\n`'s cluster, and insert `<Del>` deleting
+//! only the base char. Together these fixes assert two invariants that had never been checked
+//! simultaneously before:
 //!
-//!   1. **round24 不变量**：normal 光标不落在宽度 0 的字符上（行首独立
-//!      簇形态除外）；
-//!   2. **本轮新增**：normal 光标不落在 `\n` 上——除非该行是空行（空行
-//!      的「行首」就是 `\n` 的位置，无字符可停）。旧 GB4 bug 的表现正是
-//!      clamp_cursor 把光标钳到**上一行**的换行符位置，`x` 一按就并线。
+//!   1. **the round24 invariant**: a normal cursor does not land on a zero-width char (except
+//!      the line-start lone-cluster form);
+//!   2. **new this round**: a normal cursor does not land on `\n` — unless the line is empty
+//!      (for an empty line the "line start" IS the `\n` position, with no char to park on). The
+//!      old GB4 bug's symptom was exactly clamp_cursor parking the cursor on the **previous**
+//!      line's newline position, so pressing `x` once joined the lines.
 //!
-//! 语料覆盖 round24 没有的形态：独立 mark 独占行/行尾、ZWJ 在行尾与行首、
-//! 空格后跟 mark（`w` 的修复面）、`\n` 紧邻簇的各种排布。
+//! The corpus covers forms round24 lacked: a lone mark alone on a line / at line end, ZWJ at
+//! line end and line start, a space followed by a mark (`w`'s fixed surface), and the various
+//! arrangements of clusters adjacent to `\n`.
 
 mod common;
 
 use common::Fixture;
 use vimcore::buffer::VimBuffer;
 
-/// 简单 LCG：确定性随机（无外部依赖）。
+/// Simple LCG: deterministic randomness (no external dependencies).
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -31,33 +35,34 @@ impl Rng {
     }
 }
 
-/// 行边界 × 簇语料：独立延续字符紧贴 `\n` 的各种排布（GB4 修复面）。
+/// Line-boundary x cluster corpus: lone continuation chars adjacent to `\n` in various
+/// arrangements (the GB4 fix surface).
 const BOUNDARY_CORPUS: &[&str] = &[
-    // 行尾独立 mark（修复前 $/clamp 会越界到上一行）
+    // Lone mark at line end (before the fix, $/clamp crossed into the previous line)
     "ab\n\u{0301}",
     "ab\n\u{0301}\ncd\n",
-    // 行首独立 mark（^/w/与上一行的边界交互）
+    // Lone mark at line start (interaction of ^/w with the previous line's boundary)
     "\u{0301}abc\n",
     "ab\n\u{0301}cd",
-    // 行尾/行首 ZWJ（ZWJ 分支的 GB4 修复面）
+    // ZWJ at line end / line start (the GB4 fix surface of the ZWJ branch)
     "ab\u{200D}\ncd",
     "ab\n\u{200D}cd\n",
     "x\u{200D}\n",
-    // 空格后跟 mark（w 空白跳过修复面）
+    // Space followed by a mark (the fix surface of w's whitespace skip)
     "a \u{0301}bc",
     "  \u{0301}abc\nde\u{200D}\nfg\n",
-    // 空行紧邻簇
+    // Clusters adjacent to empty lines
     "\n\u{0301}\nabc\n",
     "one\n\n\u{0301}\n\nthree\n",
-    // 全角空白 + 独立 mark 混排
+    // Fullwidth space + lone mark mixed
     "a\u{3000}\u{0301}b\n\u{0301}\u{3000}c\n",
-    // 肤色修饰符在行尾
+    // Skin-tone modifier at line end
     "\u{1F44D}\u{1F3FB}\n\u{1F44D}\nx\n",
-    // VS16 行尾 + 下一行簇开头
+    // VS16 at line end + start of the next line's cluster
     "#\u{FE0F}\n\u{0301}xy\n",
 ];
 
-/// 按键池：移动/编辑/字符参数/可视/Ex 入口（沿 round24 的形态）。
+/// Key pool: motions/editing/count args/visual/Ex entry (following round24's shape).
 const KEY_POOL: &[&str] = &[
     "h", "l", "j", "k", "w", "b", "e", "0", "$", "^", "g", "_", "x", "X", "p", "P", "d", "d", "c",
     "c", "y", "y", "r", "x", "r", "<CR>", "~", "g", "u", "u", "g", "U", "U", "f", "x", "F", "x",
@@ -69,46 +74,48 @@ const KEY_POOL: &[&str] = &[
     "I", "R", "x", "<Del>", "g", "e", "g", "E", "W", "B", "E", "{", "}", "(", ")", "|",
 ];
 
-/// normal 光标必须落在「宽度 ≥ 1 的字符」上（簇起点），且是字符边界；
-/// 且永不落在 `\n` 上——空行的行首（= `\n` 位置）是唯一例外。
+/// A normal-mode cursor must land on a char of display width >= 1 (a cluster start) and on a
+/// char boundary; and it must never land on `\n` — the only exception is the line start of an
+/// empty line (= the `\n` position, with no char to park on).
 fn assert_cursor_on_visible_char(f: &Fixture, context: &str) {
     let text = f.text();
     let cur = f.vim.cursor.offset;
     assert!(
         cur <= text.len() && text.is_char_boundary(cur),
-        "{context}: cursor {cur} 不是字符边界 (len={}) in {text:?}",
+        "{context}: cursor {cur} is not a char boundary (len={}) in {text:?}",
         text.len()
     );
     if let Some(c) = text[cur..].chars().next() {
         let width = vimcore::buffer::char_display_width(c);
         if width == 0 {
-            // 唯一合法例外：独立 mark 自成簇且位于行首
+            // The only legal exception: a lone mark forming its own cluster at the line start
             let ls = f.buf.line_start(f.buf.offset_to_line(cur));
             assert!(
                 cur == ls,
-                "{context}: 光标落在宽度 0 的延续字符 U+{:04X} 上 (offset {cur}, 行起 {ls}) in {text:?}",
+                "{context}: cursor lands on a zero-width continuation char U+{:04X} (offset {cur}, line start {ls}) in {text:?}",
                 c as u32
             );
         }
         if c == '\n' {
-            // 本轮新增：光标不得停在 \n 上，除非是空行的行首（无字符可停）
+            // New this round: the cursor must not sit on \n unless it is the start of an empty
+            // line (no char to park on)
             let (ls, le) = {
                 let line = f.buf.offset_to_line(cur);
                 (f.buf.line_start(line), f.buf.line_end(line))
             };
             assert!(
                 cur == ls && ls == le,
-                "{context}: 光标落在 \\n 上 (offset {cur}, 行起 {ls}, 行尾 {le}) in {text:?} —— GB4 修复面回归"
+                "{context}: cursor lands on \\n (offset {cur}, line start {ls}, line end {le}) in {text:?} — GB4 fix-surface regression"
             );
         }
     }
-    // 行寻址契约顺带维持
+    // The line-addressing contract is maintained along the way
     let buf = &f.buf;
     for line in 0..buf.line_count() {
         let (s, e) = (buf.line_start(line), buf.line_end(line));
         assert!(
             s <= e && e <= text.len(),
-            "{context}: line {line} range {s}..{e} 越界 (len={})",
+            "{context}: line {line} range {s}..{e} out of bounds (len={})",
             text.len()
         );
     }
@@ -126,8 +133,9 @@ fn fuzz_boundary_corpus_never_parks_on_newline_or_mark() {
                 let key = KEY_POOL[rng.below(KEY_POOL.len())];
                 f.feed([key]);
                 log.push(key.to_owned());
-                // 提示符开着时跳过光标检查（cmdline 光标是宿主渲染的插入条，
-                // 语义不同）；insert 模式光标允许在行尾/簇后（打字中）
+                // Skip the cursor check while a prompt is open (the cmdline cursor is the
+                // host-rendered input bar, with different semantics); in insert mode the
+                // cursor may sit at a line end / after a cluster (while typing)
                 if matches!(f.vim.mode(), vimcore::mode::Mode::Normal) {
                     assert_cursor_on_visible_char(
                         &f,
@@ -135,7 +143,7 @@ fn fuzz_boundary_corpus_never_parks_on_newline_or_mark() {
                     );
                 }
             }
-            // 收尾：Esc 归位后不变量必须成立
+            // Wrap-up: after Esc returns to normal, the invariants must hold
             f.feed(["<Esc>", "<Esc>"]);
             if matches!(f.vim.mode(), vimcore::mode::Mode::Normal) {
                 assert_cursor_on_visible_char(&f, &format!("{context} final keys={log:?}"));
@@ -144,7 +152,8 @@ fn fuzz_boundary_corpus_never_parks_on_newline_or_mark() {
     }
 }
 
-/// 定向：GB4 修复面上的算子/对象/宏交错不 panic、缓冲保持可寻址。
+/// Targeted: operators/objects/macros interleaved on the GB4 fix surface must not panic and the
+/// buffer must stay addressable.
 #[test]
 fn fuzz_boundary_corpus_operators_and_macros() {
     let mut rng = Rng(0x25_B04D_C0DE);
@@ -173,14 +182,14 @@ fn fuzz_boundary_corpus_operators_and_macros() {
                         log.push("qaxq@a".to_owned());
                     }
                     10 => {
-                        // IME 风格文本落地（insert 模式内的簇文本）
+                        // IME-style text landing (cluster text inside insert mode)
                         if matches!(f.vim.mode(), vimcore::mode::Mode::Insert) {
                             f.type_text("\u{0301}");
                             log.push("type mark".to_owned());
                         }
                     }
                     _ => {
-                        f.feed(["g", "b", "d"]); // 无 gb 命令：哑铃路径
+                        f.feed(["g", "b", "d"]); // no gb command exists: the junk-key path
                         log.push("gbd".to_owned());
                     }
                 }

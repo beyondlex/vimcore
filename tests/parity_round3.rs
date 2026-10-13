@@ -88,8 +88,8 @@ fn changelist_positions_track_edits() {
     f.feed(["<Esc>", "g", "g", "O"]);
     f.type_text("new");
     f.feed(["<Esc>", "g", ";"]);
-    // audit E8（oracle 复验）：第一次 g; 落**最近**的变更 = O 打开的
-    // "new" 行（line 0），其位置随插入自行调整
+    // audit E8 (oracle re-verified): the first g; lands on the NEWEST change = the
+    // "new" line opened by O (line 0), whose position self-adjusts with the insertion
     assert_eq!(f.line(), 0, "first g; lands on the newest change");
     f.feed(["g", ";"]);
     assert_eq!(f.line(), 2, "next g; reaches the older cw change (shifted)");
@@ -380,10 +380,12 @@ fn count_repeat_insert() {
 }
 
 /// Sessions that navigated (cursor left the typed-text end) don't
-/// replicate. 【第十四轮修正】换行会话现在**会**复制：vim 9.1 探针 P24
-/// 实证 `3ifoo<CR>bar<Esc>`（autoindent 开）得三组 foo/bar——旧断言
-/// 「newline → 不复制」是当时的近似，第十四轮以展开文本为复制单元后
-/// 与 vim 对齐（round14 parity 有 autoindent 版本的完整探针断言）。
+/// replicate. [Round-14 correction] Newline sessions now **do** replicate:
+/// vim 9.1 probe P24 evidences that `3ifoo<CR>bar<Esc>` (autoindent on)
+/// yields three foo/bar groups — the old assertion "newline → no
+/// replication" was a contemporary approximation; after round 14 adopted
+/// the expanded text as the replication unit it aligns with vim (round14
+/// parity carries the full autoindent-version probe assertions).
 #[test]
 fn count_repeat_insert_skips_navigated_sessions() {
     // cursor moved off the typed-text end: no replication

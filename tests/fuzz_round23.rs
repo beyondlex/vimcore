@@ -1,15 +1,17 @@
-//! 第二十三轮 fuzz：Ex 命令/`:set`/`:sort` 的参数恶意面 + 宿主事件
-//! （IME 提交 / undo / 宏回放）与按键流的随机交错。
+//! Round-23 fuzz: hostile argument surfaces of Ex commands / `:set` / `:sort` + random
+//! interleaving of host events (IME commit / undo / macro replay) with the key stream.
 //!
-//! 背景：round23 修复了五处语义（replace_range 的会话 undo 组拆分、
-//! floor_to_char_boundary 的缓冲末尾边界、Enter char-arg 收敛、:set
-//! E521、:sort E475/数值排序）。修复触碰的是「宿主驱动编辑」与「Ex
-//! 参数解析」两条此前 fuzz 未覆盖的深水区：
-//!   1. `:set`/`:sort` 的参数字母表逐项 + 组合轰炸——E518/E521/E475/E488
-//!      的判定路径要保真且不得 panic；
-//!   2. IME 提交（replace_range）插在 insert 会话任意位置 + 随机 undo/
-//!      redo/宏回放——undo 组的边界必须保持可寻址、宿主快照语义完好；
-//!   3. 全程维持 round20 起的渲染契约（高亮可寻址）与行寻址契约。
+//! Background: round23 fixed five semantics (the session undo-group split in
+//! replace_range, the buffer-end boundary of floor_to_char_boundary, Enter char-arg
+//! convergence, :set E521, :sort E475/numeric sorting). The fixes touch two deep waters
+//! that fuzz had not covered before — "host-driven editing" and "Ex argument parsing":
+//!   1. item-by-item + combination barrage of the `:set`/`:sort` argument alphabets — the
+//!      decision paths of E518/E521/E475/E488 must stay faithful and never panic;
+//!   2. IME commits (replace_range) inserted at any point of an insert session + random
+//!      undo/redo/macro replay — undo-group boundaries must stay addressable and host
+//!      snapshot semantics intact;
+//!   3. throughout, uphold the render contract (highlights addressable) and the
+//!      line-addressing contract established since round20.
 
 mod common;
 
@@ -53,17 +55,18 @@ fn assert_addressable(f: &Fixture, context: &str) {
     }
 }
 
-// ---- 1. :set / :sort 参数恶意面 ----------------------------------------------
+// ---- 1. hostile argument surfaces of :set / :sort ----------------------------
 
-/// `:set` 的参数字母表：合法/非法数值、未知名、查询、复位、否定、注释。
+/// The `:set` argument alphabet: legal/illegal numeric values, unknown names,
+/// queries, resets, negations, comments.
 const SET_ALPHABET: &[&str] = &[
     "ts=4", "ts=", "ts=x", "ts=99999999999999999999999", "ts=-4", "sw=0", "tw=1000000",
     "so=1", "foo", "foo=1", "number", "nonumber", "nu!", "ic?", "ts ?", "ts&", "ts&vim",
     "?", "\"", "\" note", "ts=4 \" note", "scs", "noic",
 ];
 
-/// `:sort` 的旗标字母表：合法（!/i/u/n 与组合）+ vim 有效但引擎拒绝的
-/// （x/o/b/f/l）+ 彻底非法的 + 数字。
+/// The `:sort` flag alphabet: legal (`!`/`i`/`u`/`n` and combinations) + valid in
+/// vim but rejected by the engine (x/o/b/f/l) + outright illegal + numeric.
 const SORT_FLAGS: &[&str] = &[
     "", "!", "i", "u", "n", "iu", "in", "nu!", "!n", " z", "x", "o", "b", "f", "l", "z", "3",
     "2x", "i!", "un", "nz", "!!", "ii",
@@ -78,17 +81,18 @@ fn fuzz_set_surface() {
             let context = format!("target#{ti} set {arg:?} (s{si})");
             feed_ex(&mut f, &format!("set {arg}"));
             assert_addressable(&f, &context);
-            // 选项面轰炸后 n/搜索缓存不得失配 panic
+            // after the option-surface barrage, n/ search cache must not panic on mismatch
             f.feed(["*", "n", "N"]);
             assert_addressable(&f, &context);
         }
-        // 组合：一条 :set 里塞多项，中途失败必须截断（E518/E521 之后不执行）
+        // combination: stuff many items into one :set; a mid-way failure must truncate
+        // (nothing after E518/E521 executes)
         let mut f = Fixture::new(target);
         feed_ex(&mut f, "set ts=8 ts= sw=2 foo ts=16");
         assert_addressable(&f, "set combo");
         assert!(
             f.vim.options.tabstop == 4 || f.vim.options.tabstop == 8,
-            "tabstop 越过失败项继续生效: {}",
+            "tabstop kept taking effect past the failed item: {}",
             f.vim.options.tabstop
         );
     }
@@ -101,7 +105,7 @@ fn fuzz_sort_surface() {
             let context = format!("target#{ti} sort {flags:?} (f{fi})");
             feed_ex(&mut f, &format!("%sort{flags}"));
             assert_addressable(&f, &context);
-            // 排序改行序后 changelist/jumplist 仍可寻址
+            // after sorting reorders lines, changelist/jumplist must stay addressable
             f.feed(["g", ";", "g", ";"]);
             assert_addressable(&f, &context);
         }
@@ -114,9 +118,9 @@ fn fuzz_ex_set_and_sort_argument_surfaces_hold_invariants() {
     fuzz_sort_surface();
 }
 
-// ---- 2. 宿主事件（IME 提交/undo/宏）与按键流随机交错 --------------------------
+// ---- 2. random interleaving of host events (IME commit/undo/macro) with keys --
 
-/// 简单 LCG：确定性随机（无外部依赖）。
+/// Simple LCG: deterministic pseudo-random (no external dependency).
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -128,7 +132,7 @@ impl Rng {
     }
 }
 
-/// 按键池：覆盖编辑面、提示符面、字符参数命令。
+/// Key pool: covers the editing surface, the prompt surface, and char-arg commands.
 const KEY_POOL: &[&str] = &[
     "x", "d", "d", "y", "y", "p", "P", "i", "a", "A", "o", "<Esc>", "j", "k", "h", "l", "w", "b",
     "c", "c", "r", "x", "m", "a", "'", "a", "`", "a", "f", "x", ";", "u", "<C-r>", ".", "q", "a",
@@ -142,7 +146,8 @@ const EX_POOL: &[&str] = &[
 ];
 
 fn ime_commit(f: &mut Fixture) {
-    // 在光标行内取一个合法范围做提交替换（宿主 IME 的真实形态）
+    // pick a legal range within the cursor line for a commit replacement
+    // (the real shape of a host IME commit)
     let text = f.text();
     let len = text.len();
     if len == 0 {
@@ -155,7 +160,7 @@ fn ime_commit(f: &mut Fixture) {
     f.ime_replace(s..e, "中");
 }
 
-// 范围边界的 floor 用 std 的 str::floor_char_boundary（1.86 起稳定）。
+// The floor for range boundaries uses std's str::floor_char_boundary (stable since 1.86).
 
 #[test]
 fn fuzz_host_events_interleaved_with_keys_hold_invariants() {
@@ -181,22 +186,23 @@ fn fuzz_host_events_interleaved_with_keys_hold_invariants() {
                 }
                 9 => ime_commit(&mut f),
                 10 => {
-                    f.feed(["u"]); // undo 走 u 键（宿主回调由 execute_normal_cmd 触发）
+                    f.feed(["u"]); // undo via the u key (host callback fired by execute_normal_cmd)
                 }
                 _ => {
                     f.feed(["2", "@", "a"]);
                 }
             }
             assert_addressable(&f, &format!("{context} step#{step}"));
-            // is_idle 与模式的契约（round23 F）：开着的提示符绝不算 idle
+            // the is_idle-vs-mode contract (round23 F): an open prompt must never report idle
             if matches!(f.vim.mode(), vimcore::mode::Mode::CommandLine { .. }) {
                 assert!(
                     !f.vim.is_idle(),
-                    "{context} step#{step}: 提示符开着却报告 idle"
+                    "{context} step#{step}: reported idle while a prompt is open"
                 );
             }
         }
-        // 收尾 invariant：Esc 归位后引擎可寻址、可继续编辑
+        // closing invariant: after Esc returns to normal, the engine is addressable
+        // and can keep editing
         f.feed(["<Esc>", "<Esc>", "g", "g"]);
         assert_addressable(&f, &context);
         f.feed(["x"]);
@@ -204,7 +210,7 @@ fn fuzz_host_events_interleaved_with_keys_hold_invariants() {
     }
 }
 
-/// IME 提交于缓冲末尾：floor 边界修复（round23 E）的定向覆盖。
+/// IME commit at buffer end: targeted coverage of the floor boundary fix (round23 E).
 #[test]
 fn ime_commit_at_buffer_end_keeps_last_char() {
     for tail in ["ab", "中", "a中", "中a"] {
@@ -217,12 +223,12 @@ fn ime_commit_at_buffer_end_keeps_last_char() {
         assert_eq!(
             f.text(),
             "helloZ",
-            "提交范围抵达缓冲末尾时不得吞掉末字符（tail={tail:?}）"
+            "when the commit range reaches the buffer end it must not swallow the last char (tail={tail:?})"
         );
     }
 }
 
-/// 会话内多次提交一个 undo 组的定向覆盖（round23 A）。
+/// Targeted coverage of multiple commits in one session forming one undo group (round23 A).
 #[test]
 fn multi_commit_session_undoes_as_one() {
     let mut f = Fixture::new("base");
@@ -235,15 +241,15 @@ fn multi_commit_session_undoes_as_one() {
     f.feed(["<Esc>"]);
     let after_session = f.text();
     f.feed(["u"]);
-    assert_eq!(f.text(), "base", "整个会话（含全部提交）一次 u 还原");
+    assert_eq!(f.text(), "base", "the whole session (all commits included) undoes with one u");
     let _ = after_session;
-    // redo 走回会话终态
+    // redo walks back to the session's final state
     f.feed(["<C-r>"]);
     f.feed(["<C-r>"]);
     let _ = f.text();
 }
 
-// —— 编译期哨兵：KeyKind/Modifiers 的导入不得闲置（形态面回归） ——
+// —— compile-time sentinel: the KeyKind/Modifiers imports must not go unused (shape-surface regression) ——
 #[test]
 fn key_model_shapes_still_resolve() {
     assert_eq!(

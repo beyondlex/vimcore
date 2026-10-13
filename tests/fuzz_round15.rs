@@ -1,20 +1,21 @@
-//! 第十五轮 fuzz：覆盖本轮修复面的路径轰炸。
+//! Round-15 fuzz: key-stream barrage over the paths touched by this round's fixes.
 //!
-//! 相对 round14 的增量键表：
-//! - substitute replacement 转义（`\/`、`\\`、未知转义）+ `&`/裸 `:s`
-//!   重放共享 split_escaped 重建；
-//! - 越界 Ex 地址（巨值 + 偏移链 E1247、负偏移合法路径）；
-//! - `}`/`{`/`)`/`(` 段落/句子 motion 在空白行缓冲上的新边界；
-//! - 空行接缝的 `J`（免空格条件扩面）；
-//! - `ci"` 光标越末对引号的第一对回退；
-//! - `N%` ceil 公式 + `1%` 文件百分比改写（GoToFilePercent）；
-//! - `"_yy`（unnamed 不再被污染）、`""` 前缀；
-//! - `3R` count-repeat（退出覆盖路径）；
-//! - redo-register（`"1P` 后的 `.` 递增）；
-//! - `<C-h>` 规范 ctrl 形态（提示符/插入）与 visual `'a`/`` `a ``。
+//! Key-table increments over round14:
+//! - substitute replacement escapes (`\/`, `\\`, unknown escapes) + `&` / bare `:s` replay
+//!   sharing the split_escaped reconstruction;
+//! - out-of-range Ex addresses (huge values + offset chains E1247, legal negative offsets);
+//! - `}`/`{`/`)`/`(` paragraph/sentence motions on whitespace-only buffers: new boundaries;
+//! - `J` at empty-line seams (the widened no-space condition);
+//! - `ci"` falling back to the first quote pair when the cursor is past the last pair;
+//! - the `N%` ceil formula + `1%` file percentage rewrite (GoToFilePercent);
+//! - `"_yy` (unnamed no longer polluted), the `""` prefix;
+//! - `3R` count-repeat (the exit-overwrite path);
+//! - redo-register (the `.` increment after `"1P`);
+//! - the canonical `<C-h>` ctrl form (prompt/insert) and visual `'a`/`` `a ``.
 //!
-//! 不变量沿用 round13/14：光标/mark/`last_visual`/live 选区/`last_matches`
-//! 全部可寻址；巨 count 必须在有限时间内终止（预算即隐式断言）。
+//! The invariants carry over from round13/14: cursor/mark/`last_visual`/live selection/
+//! `last_matches` are all addressable; huge counts must terminate within a bounded time (the
+//! budget is the implicit assertion).
 
 mod common;
 
@@ -31,13 +32,13 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// 16 seeds × 60 rounds × 120 steps ≈ 11.5 万步（与 round13/14 同预算）
+// 16 seeds × 60 rounds × 120 steps ≈ 115k steps (same budget as round13/14)
 const SEEDS: u64 = 16;
 const ROUNDS: usize = 60;
 const STEPS: usize = 120;
 
 const KEYS: &[&str] = &[
-    // 本轮修复面：substitute 转义与重放
+    // This round's fix surface: substitute escapes and replay
     ":s/a/b\\/c/",
     ":s/a/b\\\\c/<CR>",
     ":s/x/q\\z/<CR>",
@@ -45,7 +46,7 @@ const KEYS: &[&str] = &[
     ":s<CR>",
     ":%s/o/0\\/1/<CR>",
     ":&<CR>",
-    // 本轮修复面：越界地址与偏移链
+    // This round's fix surface: out-of-range addresses and offset chains
     ":1+99999999999999999999d",
     ":5-99999999999999999999d<CR>",
     ":2+3-1d<CR>",
@@ -53,7 +54,7 @@ const KEYS: &[&str] = &[
     ":1000000d<CR>",
     ":0d<CR>",
     ":-1d<CR>",
-    // 本轮修复面：段落/句子边界 + 空行 J
+    // This round's fix surface: paragraph/sentence boundaries + J on empty lines
     "}",
     "{",
     "d}",
@@ -68,12 +69,12 @@ const KEYS: &[&str] = &[
     "2J",
     "3J",
     "gJ",
-    // 本轮修复面：quote 对象回退
+    // This round's fix surface: quote object fallback
     "ci\"",
     "ca\"",
     "di\"",
     "yi\"",
-    // 本轮修复面：N% / 1%
+    // This round's fix surface: N% / 1%
     "1%",
     "2%",
     "50%",
@@ -83,7 +84,7 @@ const KEYS: &[&str] = &[
     "%",
     "d2%",
     "y50%",
-    // 本轮修复面：黑洞 yank / Replace repeat / redo-register
+    // This round's fix surface: blackhole yank / Replace repeat / redo-register
     "\"_yy",
     "\"_yiw",
     "\"\"p",
@@ -97,7 +98,7 @@ const KEYS: &[&str] = &[
     "2.",
     "dd",
     "dw",
-    // 本轮修复面：C-h 形态 / visual 标记跳转
+    // This round's fix surface: the C-h form / visual mark jumps
     "<C-h>",
     "i<C-h>",
     "R<C-h>",
@@ -106,7 +107,7 @@ const KEYS: &[&str] = &[
     "'a",
     "`a",
     "mA",
-    // round14 键表节选（保持既有压力面）
+    // Excerpt of the round14 key table (keeping the existing pressure surface)
     "t2",
     "t2;",
     "2t3",
@@ -212,7 +213,7 @@ const KEYS: &[&str] = &[
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} is not addressable in {text:?}"
     );
 }
 
@@ -230,15 +231,16 @@ fn check_invariants(f: &Fixture, text: &str, ctx: &str) {
         assert_addressable("visual.anchor", a, text, &ctx);
         assert_addressable("visual.cursor", c, text, &ctx);
     }
-    // last_matches 不检查：harness 全程 set_hlsearch_live_update(false)，
-    // 匹配缓存允许在两次重扫之间过期（generation 机制保证 n/N 消费前
-    // 重扫——round13/14 同款约束）
+    // last_matches is not checked: the harness calls set_hlsearch_live_update(false) throughout,
+    // so the match cache may expire between two rescans (the generation mechanism guarantees a
+    // rescan before n/N consumes it — the same constraint as round13/14)
 }
 
 #[test]
 fn fuzz_round15_holds_invariants() {
-    // 缓冲池围绕本轮修复面设计：空白行段落边界、空行接缝、多行引号、
-    // 巨偏移地址可作用的行数、多字节
+    // The buffer pool is designed around this round's fix surface: paragraph boundaries of
+    // whitespace-only lines, empty-line seams, multi-line quotes, a line count the huge offset
+    // addresses can act on, multi-byte text
     let buffers = [
         "",
         "a",
@@ -262,8 +264,8 @@ fn fuzz_round15_holds_invariants() {
         for round in 0..ROUNDS {
             let initial = buffers[round % buffers.len()];
             let mut f = common::Fixture::new(initial);
-            // 一半种子带 `nnoremap j gj`（round14 先例）：续键守卫与映射
-            // 展开重放持续受轰
+            // Half of the seeds carry `nnoremap j gj` (the round14 precedent): the pending-key
+            // guard and the mapping-expansion replay stay under barrage
             if seed % 2 == 0 {
                 f.vim.keymaps.map_str_noremap(
                     vimcore::keymap::ModeClass::Normal,
@@ -303,8 +305,9 @@ fn fuzz_round15_holds_invariants() {
     }
 }
 
-/// 巨 count 随机轰炸：`e`/`}`/`)`/`b`/`%` 与随机 count 组合必须在
-/// 预算时间内终止（旧引擎 999999999e 单发即 10⁹ 次全词扫描）。
+/// Random barrage with huge counts: `e`/`}`/`)`/`b`/`%` combined with a random count must
+/// terminate within the time budget (the old engine needed 10^9 whole-word scans for a single
+/// 999999999e).
 #[test]
 fn fuzz_round15_huge_counts_terminate() {
     let buffers = ["foo\n", "foo   bar  baz\n   \n\nnext\n", "abc\ndef\n"];

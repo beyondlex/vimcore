@@ -1,27 +1,32 @@
-//! 第二十六号 fuzz（第二十七轮检视期内新增）：宿主历史的两条不变量。
+//! Fuzz round 26 (added during the round-27 review window): two invariants of the host history.
 //!
-//! 引擎把 undo/redo 委托给宿主（`begin_undo_group`/`undo`/`redo`），自身
-//! 只负责在每个编辑漏斗处宣布组。此前 25 个 fuzz 轮检查的都是「单步编辑
-//! 后的状态合法性」，从未检查过**历史轴本身**。本轮补上两条只有把随机
-//! 键序列一路 `u` 到底才能抓到的不变量：
+//! The engine delegates undo/redo to the host (`begin_undo_group`/`undo`/`redo`) and only
+//! announces groups itself at each editing funnel. The previous 25 fuzz rounds checked only "the
+//! legality of the state after a single edit step" and never the **history axis itself**. This
+//! round adds the two invariants that can only be caught by running a random key sequence all
+//! the way down with `u`:
 //!
-//!   1. **可逆性**：undo 到底再 redo 到底，文本必须逐字节回到 undo 前的
-//!      状态——抓「宿主 redo 栈与 undo 栈不对称」类缺陷；
-//!   2. **完备性**：undo 到底后文本必须等于**初始缓冲**——抓「某条编辑
-//!      路径忘了走 `edit_*` 漏斗、从未进任何 undo 组」类缺陷（漏开的
-//!      编辑不可撤销，两次 `u` 之间静默丢失）。
+//!   1. **Reversibility**: undoing to the bottom and then redoing to the top must return the
+//!      text byte-for-byte to the state before the undo — catches "the host redo stack is
+//!      asymmetric with the undo stack" class defects;
+//!   2. **Completeness**: after undoing to the bottom the text must equal the **initial
+//!      buffer** — catches "some editing path forgot to go through the `edit_*` funnel and never
+//!      entered any undo group" class defects (an edit whose group was never opened cannot be
+//!      undone and is silently lost between two `u` presses).
 //!
-//! 键表混入宿主事件（IME 组合替换、点击），这些路径同样宣布组，是
-//! 「组所有权」最容易出错的接缝（replace_range 的 owns_group 规则）。
-//! 语料含多字节文本；不加中途换缓冲——宿主换缓冲必然重置自己的历史栈，
-//! 那是宿主的一致性责任（round20 的 reset 语义），不属于本不变量。
+//! The key table mixes in host events (IME composition replacement, clicks); these paths
+//! announce groups too and are the seams where "group ownership" is most easily wrong (the
+//! owns_group rule of replace_range). The corpus contains multi-byte text; no mid-run buffer
+//! switch is added — swapping the host buffer necessarily resets the host's own history stack,
+//! which is the host's consistency responsibility (the reset semantics of round20) and not part
+//! of this invariant.
 
 mod common;
 
 use common::Fixture;
 use vimcore::mode::Mode;
 
-/// 简单 LCG：确定性随机（无外部依赖）。
+/// Simple LCG: deterministic randomness (no external dependencies).
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -35,8 +40,8 @@ impl Rng {
     }
 }
 
-/// 语料：ASCII / 多字节 / 空行 / 尾行无换行（历史不变量与内容无关，
-/// 语料只为让编辑路径多样化）。
+/// Corpus: ASCII / multi-byte / empty lines / last line without a newline (the history
+/// invariants are content-independent; the corpus only diversifies the editing paths).
 const BUFFERS: &[&str] = &[
     "hello world\nsecond line\nthird\n",
     "aaa bbb aaa\n\nccc\n",
@@ -46,8 +51,9 @@ const BUFFERS: &[&str] = &[
     "x y z\n1 2 3\nfoo bar\n",
 ];
 
-/// 单键池（feed 的粒度是一个 Key）：移动/编辑/字符参数/可视/Ex/宏/历史。
-/// `u`/`<C-r>` 也在池里——历史轴上的随机游走让 undo 栈深浅不一。
+/// Single-key pool (the granularity of feed is one Key): motions/editing/char args/visual/Ex/
+/// macros/history. `u`/`<C-r>` are in the pool too — the random walk along the history axis
+/// leaves the undo stack at varying depths.
 const KEY_POOL: &[&str] = &[
     "x", "d", "d", "y", "y", "p", "P", "i", "a", "o", "O", "<Esc>", "u", "<C-r>", "c", "w", "S",
     "J", "~", ">", ">", "<", "<", "D", "C", "s", "r", "x", "<C-a>", "<C-x>", "3", "x", "v", "d",
@@ -57,8 +63,9 @@ const KEY_POOL: &[&str] = &[
     "z", "<BS>", "<C-w>", "<Del>", "<C-o>", "x", "g", "u", "u", "g", "U", "U",
 ];
 
-/// 回到 normal 空闲态：Esc 收掉提示符/可视/insert 与挂起的 char-arg。
-/// `is_idle` 覆盖 count/寄存器/算子/char-arg/队列；模式归 normal 才算到位。
+/// Return to the normal idle state: Esc dismisses the prompt/visual/insert and a pending char
+/// arg. `is_idle` covers count/register/operator/char-arg/queue; the mode must also be back in
+/// normal to count as arrived.
 fn force_normal(f: &mut Fixture) {
     for _ in 0..6 {
         if f.vim.is_idle() && f.vim.mode() == Mode::Normal {
@@ -67,12 +74,13 @@ fn force_normal(f: &mut Fixture) {
         f.feed(["<Esc>"]);
     }
     panic!(
-        "force_normal: 无法回到 normal 空闲态 (mode={:?})",
+        "force_normal: cannot get back to the normal idle state (mode={:?})",
         f.vim.mode()
     );
 }
 
-/// undo 到底（以引擎的历史边缘响铃为停止信号），返回步数。
+/// Undo to the bottom (using the engine's history-edge bell as the stop signal), returning the
+/// number of steps.
 fn undo_to_bottom(f: &mut Fixture, cap: usize) -> usize {
     let mut depth = 0;
     loop {
@@ -82,12 +90,12 @@ fn undo_to_bottom(f: &mut Fixture, cap: usize) -> usize {
             return depth;
         }
         depth += 1;
-        assert!(depth <= cap, "u 循环 {cap} 步未到历史底 (mode={:?})", f.vim.mode());
+        assert!(depth <= cap, "the u loop did not reach the history bottom in {cap} steps (mode={:?})", f.vim.mode());
     }
 }
 
-/// 历史不变量主体：先随机游走，再 undo 到底断言初始文本，再 redo 到底
-/// 断言回到游走后的文本。
+/// Body of the history invariants: first take a random walk, then undo to the bottom and assert
+/// the initial text, then redo to the top and assert the text the walk ended with.
 fn sweep(f: &mut Fixture, initial: &str, context: &str) {
     force_normal(f);
     let text_now = f.text();
@@ -96,7 +104,7 @@ fn sweep(f: &mut Fixture, initial: &str, context: &str) {
     assert_eq!(
         f.text(),
         initial,
-        "{context}: undo 到底后文本 ≠ 初始缓冲——有编辑没进任何 undo 组 (depth={depth})"
+        "{context}: text after undo-to-bottom ≠ the initial buffer — some edit never entered any undo group (depth={depth})"
     );
 
     for _ in 0..depth {
@@ -106,15 +114,16 @@ fn sweep(f: &mut Fixture, initial: &str, context: &str) {
     assert_eq!(
         f.text(),
         text_now,
-        "{context}: undo-all/redo-all 未回到 undo 前的文本 (depth={depth})"
+        "{context}: undo-all/redo-all did not return to the text before the undo (depth={depth})"
     );
 }
 
-/// 键序列 + 宿主事件（IME 替换 / 点击）的随机游走。
+/// Random walk over key sequences + host events (IME replacement / clicks).
 fn random_walk(f: &mut Fixture, rng: &mut Rng, steps: usize) {
     for _ in 0..steps {
         match rng.below(12) {
-            // IME 组合替换：光标附近换一段文本（与按键流并行的编辑通道）
+            // IME composition replacement: swap a stretch of text near the cursor (an editing
+            // channel parallel to the key stream)
             0 => {
                 let len = f.text().len();
                 let a = rng.below(len + 1);
@@ -124,7 +133,7 @@ fn random_walk(f: &mut Fixture, rng: &mut Rng, steps: usize) {
                     f.ime_replace(a..b, "中文x");
                 }
             }
-            // 宿主点击（不改文本，只动光标）
+            // Host click (does not change the text, only moves the cursor)
             1 => {
                 let len = f.text().len();
                 f.vim.set_cursor_offset(&f.buf, rng.below(len + 1));
@@ -137,7 +146,7 @@ fn random_walk(f: &mut Fixture, rng: &mut Rng, steps: usize) {
     }
 }
 
-// 24 seeds × 40 rounds × (60..200 步) ≈ 13 万键（opt3 下秒级）
+// 24 seeds × 40 rounds × (60..200 steps) ≈ 130k keys (seconds under opt3)
 const SEEDS: usize = 24;
 const ROUNDS: usize = 40;
 
@@ -159,7 +168,8 @@ fn fuzz_history_undo_all_reaches_initial_and_redo_all_restores() {
     }
 }
 
-/// 定向语料版：多字节缓冲上的 IME 交错（floor/组所有权的接缝）。
+/// Directed-corpus variant: IME interleaving on a multi-byte buffer (the floor/group-ownership
+/// seams).
 #[test]
 fn fuzz_history_multibyte_with_ime_interleave() {
     for seed in 0..8 {

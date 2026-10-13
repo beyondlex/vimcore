@@ -1,15 +1,15 @@
-//! 第十二轮扩展 fuzz：覆盖本轮修复的路径。
+//! Round-12 extended fuzz: covers the paths fixed this round.
 //!
-//! 相对 round11 的增量键表：
-//! - Ex 范围新语义：偏移链（`:5+2+1d`）、多字节 mark 名（`:'中d`、
-//!   `:,'中d`）、等值两地址（`:2,2j`）、显式 count（`:1,2d 1`）、
-//!   特殊寄存器（`:d _`、`:d +`）、带范围替换重放（`:3,4s`）；
-//! - 搜索跳转 count（`2*`、`2#`、`3gN`、`d2gn`、`c2gN`）与空白对象
-//!   （`yaw`、`caw`、`d2aw`）；
-//! - 边缘 motion（`d-`、`d+`、`2-`、`3+`）与空行 `$`/`g_` 算子。
+//! Key-table delta relative to round11:
+//! - new Ex-range semantics: offset chains (`:5+2+1d`), multibyte mark names
+//!   (`:'中d`, `:,'中d`), equal-address ranges (`:2,2j`), explicit count
+//!   (`:1,2d 1`), special registers (`:d _`, `:d +`), ranged-substitute replay (`:3,4s`);
+//! - search-jump counts (`2*`, `2#`, `3gN`, `d2gn`, `c2gN`) and whitespace objects
+//!   (`yaw`, `caw`, `d2aw`);
+//! - edge motions (`d-`, `d+`, `2-`, `3+`) and empty-line `$`/`g_` operators.
 //!
-//! 不变量沿用 round11：光标/mark/`last_visual`/live 选区/`last_matches`
-//! 全部可寻址。
+//! Invariants carried over from round11: cursor/mark/`last_visual`/live
+//! selection/`last_matches` must all stay addressable.
 
 mod common;
 
@@ -27,7 +27,7 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
 }
 
 const KEYS: &[&str] = &[
-    // 本轮新增：Ex 范围偏移链与多字节 mark（修复路径）
+    // New this round: Ex-range offset chains and multibyte marks (fixed paths)
     ":5+2+1d",
     ":3-1d",
     ":2+1",
@@ -35,7 +35,7 @@ const KEYS: &[&str] = &[
     ":,'中d",
     ":2,'中y",
     ":'a,+2d",
-    // 本轮新增：等值范围 / 显式 count / 特殊寄存器（修复路径）
+    // New this round: equal ranges / explicit count / special registers (fixed paths)
     ":2,2j",
     ":3,3d",
     ":2,2y",
@@ -46,7 +46,7 @@ const KEYS: &[&str] = &[
     ":d +",
     ":y a 2",
     ":3,4s",
-    // 本轮新增：搜索 count 与空白对象（修复路径）
+    // New this round: search counts and whitespace objects (fixed paths)
     "2*",
     "2#",
     "3gN",
@@ -57,7 +57,7 @@ const KEYS: &[&str] = &[
     "caw",
     "d2aw",
     "y2aw",
-    // 本轮新增：边缘 motion 与空行算子（修复路径）
+    // New this round: edge motions and empty-line operators (fixed paths)
     "d-",
     "d+",
     "2-",
@@ -67,11 +67,11 @@ const KEYS: &[&str] = &[
     "d2$",
     "y$",
     "c$",
-    // 本轮新增：引号对象在字符串之间（修复路径）
+    // New this round: quote objects between strings (fixed paths)
     "ci\"",
     "ca\"",
     "di\"",
-    // round11 键表节选（保持回归压力）
+    // round11 key-table excerpt (keeps regression pressure)
     "d'a",
     "ma",
     "mb",
@@ -197,11 +197,11 @@ const KEYS: &[&str] = &[
     "\"_dd",
 ];
 
-/// 校验一个偏移在 `text` 上可寻址(字符边界或末尾)。
+/// Verify an offset is addressable in `text` (a char boundary or the end).
 fn assert_addressable(what: &str, off: usize, text: &str, ctx: &str) {
     assert!(
         off <= text.len() && (off == text.len() || text.is_char_boundary(off)),
-        "{ctx}: {what} 偏移 {off} 不可寻址 in {text:?}"
+        "{ctx}: {what} offset {off} not addressable in {text:?}"
     );
 }
 
@@ -212,9 +212,9 @@ fn fuzz_round12_holds_invariants() {
         "a",
         "中",
         "中文\nwide line\n",
-        // 多字符串行:引号对象在字符串之间的高压面
+        // Multi-string lines: the pressure surface of quote objects between strings
         "say \"hi\" then \"bye\" ok\nx = \"a\" + \"b\";\n",
-        // 词间空白 + 纯空白行 + 真空行:aw/w/d$ 的高压面
+        // Inter-word whitespace + whitespace-only lines + true empty lines: pressure surface for aw/w/d$
         "foo   bar  baz\n   \n\nnext word\n",
         "aaaa\nbbbb\ncccc\ndddd",
         "0x1f 077 0b101 -99\n42 0099",
@@ -273,8 +273,8 @@ fn fuzz_round12_holds_invariants() {
     }
 }
 
-/// Ex 范围参数的随机组合轰炸:地址/偏移/分隔符/寄存器/count 任意拼接,
-/// 命令只允许失败(E16/E20/E78/E486/bell),不允许 panic。
+/// Random-combination bombardment of Ex range arguments: addresses/offsets/separators/registers/
+/// counts spliced arbitrarily; commands may only fail (E16/E20/E78/E486/bell), never panic.
 #[test]
 fn ex_range_garbage_never_panics() {
     let addresses = [
