@@ -44,7 +44,7 @@ fn normalize_control_char(key: Key) -> Key {
 /// vim's Ex abbreviation rule: every unambiguous prefix of the full name is
 /// accepted. Hand-rolled static lists (greppable); `:s`/`substitute…` live in
 /// [`VimState::ex_substitute`], `:ju[mp]` is deliberately absent (a DIFFERENT
-/// vim command — NOTES 分歧 #26).
+/// vim command — NOTES divergence #26).
 const DELETE_SPELLINGS: &[&str] = &["d", "de", "del", "dele", "delet", "delete"];
 /// Nesting cap for `execute_ex` (vim's `do_cmdline` `call_depth >= 200`,
 /// `src/ex_docmd.c`): `:@a` over a register that holds another `:@a` would
@@ -86,7 +86,7 @@ const CENTER_SPELLINGS: &[&str] = &["center", "cent", "cen", "ce"];
 const RIGHT_SPELLINGS: &[&str] = &["right", "righ", "ri"];
 const LEFT_SPELLINGS: &[&str] = &["left", "lef", "le"];
 
-/// `:ce`/`:ri`/`:le` 的对齐方向（审计 E2-E4）。
+/// The alignment direction of `:ce`/`:ri`/`:le` (audit E2-E4).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Align {
     Center,
@@ -94,7 +94,7 @@ enum Align {
     Left,
 }
 
-/// `parse_range` 的返回体：范围（`None` = 未写范围前缀）+ 剥离范围后的命令。
+/// The return of `parse_range`: the range (`None` = no range prefix typed) + the command with the range stripped.
 /// A parsed `[range]`: the clamped `(first, last)` lines, how many addresses
 /// the user actually TYPED (a bare `:5j` is one address and joins with the
 /// next line; `:2,2j` typed two equal ones and is a no-op — vim), and the
@@ -111,8 +111,8 @@ pub struct Cmdline {
     /// key (audit E-A-11). Always floored onto a char boundary by the
     /// helpers below.
     pub cursor: usize,
-    /// cmdline `<C-k>` 二合字母等待状态（c_CTRL-K，audit E-A-12）：`Some('\0')`
-    /// = 等待第一个字符，`Some(c)` = 等待第二个字符，`None` = 未激活。
+    /// cmdline `<C-k>` digraph waiting state (c_CTRL-K, audit E-A-12): `Some('\0')`
+    /// = waiting for the first char, `Some(c)` = waiting for the second char, `None` = inactive.
     pub digraph_first: Option<char>,
     /// History per prompt: `/` and `?` SHARE the search history (vim), `:`
     /// has its own. Keys are canonicalized through [`history_key`].
@@ -127,18 +127,20 @@ pub struct Cmdline {
     /// replacement inserts it (`:h sub-replace-special`). Set together with
     /// [`Self::last_substitute`].
     pub last_replacement: Option<String>,
-    /// cmdline `<C-r>{reg}` 的等待状态（审计 K3）。
+    /// cmdline `<C-r>{reg}` waiting state (audit K3).
     pub register_paste_pending: bool,
-    /// cmdline `<C-r>=` 的表达式子提示符：开启后按键进 expr_buffer，`<CR>`
-    /// 求值并把结果贴回命令行（c_CTRL-R_=，audit5 A-16——旧实现把 `=` 当
-    /// 普通寄存器名，键序被吞或贴陈旧值）。求值失败报 E121/E15、命令行
-    /// 保持原样。
+    /// cmdline `<C-r>=` expression sub-prompt: once opened, keystrokes go into
+    /// expr_buffer, `<CR>` evaluates and pastes the result back onto the
+    /// command line (c_CTRL-R_=, audit5 A-16 — the old implementation treated
+    /// `=` as a plain register name, swallowing the key sequence or pasting a
+    /// stale value). Evaluation failure reports E121/E15 and leaves the
+    /// command line unchanged.
     pub expr_pending: bool,
     pub expr_buffer: String,
-    /// `=` 提示符最近一次求值的表达式行：空输入重用它（get_expr_register
-    /// 的记忆，audit5 C-18）。
+    /// The most recently evaluated expression line of the `=` prompt: an empty
+    /// input reuses it (get_expr_register's memory, audit5 C-18).
     pub last_expression: Option<String>,
-    /// cmdline `<C-v>` 的字面引用等待状态（audit G10）。
+    /// cmdline `<C-v>` literal-quote waiting state (audit G10).
     pub literal_pending: bool,
     /// The last substitute command line (`s/pat/rep/flags`), for `&` and the
     /// bare `:s` repeat. Stored when the command PARSES (even on E486 — vim
@@ -711,15 +713,17 @@ impl VimState {
         // out of scope, but the two delete chords every rc file trains into
         // muscle memory are not): C-w kills the last word, C-u clears.
         if key == Key::ctrl_char('w') {
-            // trim_end()（而非 trim_end_matches(' ')）：尾部任何空白都先归零
-            // 再做词回溯。提示符缓冲实际上只可能装进空格（Tab 键在
-            // cmdline_key 里被吞，Char('\t') 也会归一成 Named("tab")），但
-            // 历史回放/未来输入路径不再依赖这个前提。
+            // trim_end() (not trim_end_matches(' ')): any trailing whitespace is
+            // zeroed first, then the word backtrack runs. The prompt buffer can
+            // in practice only ever hold spaces (the Tab key is swallowed in
+            // cmdline_key, and Char('\t') is canonicalized to Named("tab")),
+            // but history replay / future input paths no longer rely on that.
             self.cmdline.clamp_cursor();
             let no_tail_ws = self.cmdline.buffer[..self.cmdline.cursor].trim_end();
-            // c_CTRL-W 只删一个【字母数字】词：`set ts=4<C-w>` 得 `set ts=`
-            // （'4' 删、'=' 留 → E521: Number required after =: ts=z，
-            // audit5 A-17；旧实现删整个非空白段，`=` 一起没）。
+            // c_CTRL-W deletes ONE [alphanumeric] word: `set ts=4<C-w>` yields
+            // `set ts=` ('4' deleted, '=' kept → E521: Number required after =:
+            // ts=z, audit5 A-17; the old implementation deleted the whole
+            // non-blank run, taking the `=` with it).
             let cut = no_tail_ws
                 .char_indices()
                 .rev()
@@ -735,7 +739,7 @@ impl VimState {
             return KeyResult::Consumed;
         }
         if key == Key::ctrl_char('u') {
-            // c_CTRL-U 清空【光标之前】的部分（vim 语义）
+            // c_CTRL-U clears the part BEFORE the cursor (vim semantics)
             self.cmdline.clamp_cursor();
             let tail = self.cmdline.buffer[self.cmdline.cursor..].to_owned();
             self.cmdline.buffer = tail;
@@ -822,9 +826,11 @@ impl VimState {
                 /*use_prefix=*/ false,
             );
         }
-        // <C-k> 二合字母（c_CTRL-K，audit E-A-12）：`<C-k>ss` 把 'ß' 插进
-        // 命令行。insert 模式侧已实现（audit H3），命令行侧是同族。再次按
-        // <C-k> 取消进行中的二合字母（oracle：`<C-k><C-k>ss` 得字面 "ss"）。
+        // <C-k> digraph (c_CTRL-K, audit E-A-12): `<C-k>ss` inserts 'ß' into
+        // the command line. The insert-mode side is already implemented
+        // (audit H3); the command line is the same family. Pressing <C-k>
+        // again cancels the in-progress digraph (oracle: `<C-k><C-k>ss` yields
+        // the literal "ss").
         if key == Key::ctrl_char('k') {
             self.cmdline.digraph_first = if self.cmdline.digraph_first.is_some() {
                 None
@@ -848,14 +854,15 @@ impl VimState {
                     ctx.host.changed();
                 }
             } else {
-                // 非可打印键取消二合字母（vim 的 <Esc> 规则）
+                // a non-printable key cancels the digraph (vim's <Esc> rule)
                 self.cmdline.digraph_first = None;
             }
             return KeyResult::Consumed;
         }
-        // 命令行光标移动（c_CTRL-B / c_CTRL-E / c_<Left> / c_<Right> /
-        // c_<Home> / c_<End>，audit E-A-11）：旧模型 append-only，这些键
-        // 被静默吞掉、新键一律接到行尾。
+        // Command-line cursor movement (c_CTRL-B / c_CTRL-E / c_<Left> /
+        // c_<Right> / c_<Home> / c_<End>, audit E-A-11): the old model was
+        // append-only — these keys were silently swallowed and new input
+        // always went to the end of the line.
         if key == Key::ctrl_char('b') {
             self.cmdline.cursor = 0;
             return KeyResult::Consumed;
@@ -987,7 +994,7 @@ impl VimState {
                         self.mode = Mode::Normal;
                         if !entry.is_empty() {
                             self.cmdline.last_command = Some(entry.clone());
-                            // `":` 寄存器同步落账（审计 D3）
+                            // sync the `": register too (audit D3)
                             self.registers.store_last_command(entry.clone());
                         }
                         let gen_before = self.edit_generation;
@@ -1028,7 +1035,7 @@ impl VimState {
                     }
                     KeyResult::Consumed
                 }
-                // 命令行光标移动（c_<Left>/c_<Right>/c_<Home>/c_<End>）
+                // Command-line cursor movement (c_<Left>/c_<Right>/c_<Home>/c_<End>)
                 "left" => {
                     self.cmdline.cursor_left();
                     KeyResult::Consumed
@@ -1231,8 +1238,8 @@ impl VimState {
         }
         // an UNTERMINATED search address (`:/pat`, `:?pat`) consumes the
         // WHOLE rest of the line as its pattern — vim's `:? ,3d` reports
-        // `E486: Pattern not found: ,3d` and runs nothing (第三十三轮审计
-        // 挂账 5; the old comma-split read the `?` as a broken address and
+        // `E486: Pattern not found: ,3d` and runs nothing (thirty-third-round
+        // audit backlog 5; the old comma-split read the `?` as a broken address and
         // E16'd). A hit parks on the match line's first non-blank, exactly
         // like the closed search address; the empty pattern reuses the last
         // search (oracle: `://` with no history = E35).
@@ -1305,9 +1312,10 @@ impl VimState {
             }
         };
         let line = line.trim();
-        // `::`（第二个冒号）和 `:5:`（地址 + 第二个冒号）：vim 把第二个 `:`
-        // 当空命令——静默无操作；带地址时按裸地址泊位（oracle odc/oac：
-        // `::` p=1、`:5:` p=5 1，均无 E492）。
+        // `::` (the second colon) and `:5:` (address + second colon): vim treats
+        // the second `:` as an empty command — silently a no-op; with an address
+        // it parks as a bare address (oracles odc/oac: `::` p=1, `:5:` p=5 1,
+        // neither raises E492).
         if line.is_empty() || line == ":" {
             // a range with no command moves the cursor to the range's LAST
             // address (`:5` = line 5, `:2,5` = line 5 — 9.1 probe: the old
@@ -1385,7 +1393,7 @@ impl VimState {
                         .take(120)
                         .collect();
                     let extra = if output.lines().count() > 1 {
-                        format!(" …(+{} 行)", output.lines().count() - 1)
+                        format!(" …(+{} lines)", output.lines().count() - 1)
                     } else {
                         String::new()
                     };
@@ -1857,7 +1865,7 @@ impl VimState {
         // range's LAST line (`:2j 3` joins lines 2-4, vim 9.1 probe — the
         // engine used to ignore it and join only two). `:ju` is NOT here:
         // vim's `:ju[mp]` is a different command (deliberately unsupported —
-        // NOTES 分歧 #26).
+        // NOTES divergence #26).
         if let Some(rest) = JOIN_SPELLINGS
             .iter()
             .find_map(|cmd| Self::boundary_cmd_count(line, cmd))
@@ -2196,12 +2204,12 @@ impl VimState {
     /// replacement `b/c`, not the mangled prefix `b\`. Only pattern and
     /// replacement survive; anything after the third field is dropped along
     /// with the flags.
-    /// state.rs 侧的 `g&` 需要的包装（审计 E10）。
+    /// The wrapper needed by `g&` on the state.rs side (audit E10).
     pub(crate) fn substitute_dropping_range_pub(cmd: &str) -> String {
         Self::substitute_dropping_range(cmd)
     }
 
-    /// 以显式范围重放一条 `s{sep}pat{sep}rep{sep}{flags}` 行（`g&` 用）。
+    /// Replay an `s{sep}pat{sep}rep{sep}{flags}` line with an explicit range (used by `g&`).
     pub(crate) fn execute_substitute_ranged(
         &mut self,
         ctx: &mut Ctx,
@@ -2479,10 +2487,11 @@ impl VimState {
                 for &d in &bytes[digits_start..j] {
                     v = v.saturating_mul(10).saturating_add((d - b'0') as i64);
                 }
-                // 第一键「有无数字」把无数字行整段排到数字行之前——
-                // vim 的 :sort n 不把无数字行当 0 混进数字段（test_sort
-                // "Non-numeric lines are ordered before numerical lines"，
-                // audit5 A-8：`abc/5/-3/7/x` → `abc x -3 5 7`）
+                // The first key "has digits or not" sorts all digitless lines
+                // ahead of the digit lines — vim's :sort n does not mix
+                // digitless lines in as 0 (test_sort "Non-numeric lines are
+                // ordered before numerical lines", audit5 A-8:
+                // `abc/5/-3/7/x` → `abc x -3 5 7`)
                 return (1, if neg { -v } else { v });
             }
             i += 1;
@@ -2493,7 +2502,7 @@ impl VimState {
     /// One `:registers` listing line: `"x  c|l|b  text` with embedded
     /// newlines shown as `^J` (vim's rendering) and the tail elided.
     fn register_line(name: char, reg: &crate::registers::Register) -> String {
-        // vim 9.1's `:reg` layout (9.1 oracle, 第三十三轮审计挂账 6):
+        // vim 9.1's `:reg` layout (9.1 oracle, thirty-third-round audit backlog 6):
         // `  l  ""   second line^J` — two spaces, the type char, two spaces,
         // quote+name, THREE spaces, content with the linewise tail shown as
         // ^J. The old layout put the name first.
@@ -2517,22 +2526,23 @@ impl VimState {
 
     /// One `:marks` listing line: `mark  line  col  text`.
     fn mark_line(buf: &dyn crate::buffer::VimBuffer, name: char, offset: usize) -> String {
-        // 防御性取整：上游有 `hi.saturating_sub(1)` 一类的裸字节减法，
-        // 能落进多字节字符内部（fuzz round35 实证 `vl<Esc>:marks` 于
-        // CJK 缓冲 panic）
+        // Defensive flooring: upstream has raw byte subtractions like
+        // `hi.saturating_sub(1)` that can land inside a multibyte character
+        // (fuzz round35 evidence: `vl<Esc>:marks` on a CJK buffer panicked)
         let offset = crate::buffer::floor_to_char_boundary(buf, offset);
         let line = buf.offset_to_line(offset);
-        // vim 的 col 列是 **0 基字节列**（9.1 oracle：`ab\tcd` 上 `fcmd`
-        // 的标记 d 打 col 3——显示列是 8；`vll<Esc>` 的 `>` 打 6），
-        // 不是显示列+1
+        // vim's col column is a **0-based BYTE column** (9.1 oracle: on
+        // `ab\tcd` the mark d of `fcmd` shows col 3 — display column 8;
+        // `vll<Esc>`'s `>` shows 6), not display column + 1
         let col = offset - buf.line_start(line);
         let text: String = buf
             .line_content(line)
             .chars()
             .take(40)
             .map(|c| match c {
-                // 行内容原样列出（旧实现 trim 掉了缩进），TAB/^M 转
-                // caret 记号（与 :reg 的 ^J 同族）
+                // line content listed verbatim (the old implementation trimmed
+                // the indent), TAB/^M converted to caret notation (same family
+                // as :reg's ^J)
                 '\t' => "^I".to_owned(),
                 '\r' => "^M".to_owned(),
                 c => c.to_string(),
@@ -2541,14 +2551,19 @@ impl VimState {
         format!(" {name} {:>6} {:>4} {text}", line + 1, col)
     }
 
-    /// Ex 整段行重写命令（`:retab`、`:ce`/`:ri`/`:le`）的光标追踪快照。
+    /// Cursor-tracking snapshot for whole-paragraph rewrite Ex commands
+    /// (`:retab`, `:ce`/`:ri`/`:le`).
     ///
-    /// vim 在这类命令后把光标留在**原字符**上（marks 同步调整语义）；
-    /// 引擎的 `edit_replace` 不动光标，重写前后字节布局一变，原始偏移
-    /// 就指到别的字符、甚至陷进多字节字符内部（fuzz round35：IME 写入
-    /// 中文后 `:retab` 光标落进「文」中间）。快照记「行号 + 相对行内
-    /// 内容起点（首非空白）的显示列」——retab 保持非空白字符的显示列
-    /// 不变、align 平移整段内容，两者都能用这个二元组精确还原。
+    /// vim leaves the cursor ON the ORIGINAL character after such commands
+    /// (the marks adjust-in-sync semantics); the engine's `edit_replace` does
+    /// not move the cursor, so once the byte layout changes across the rewrite
+    /// the original offset points at a different char — or even lands inside a
+    /// multibyte character (fuzz round35: after IME input of Chinese text,
+    /// `:retab` dropped the cursor into the middle of the `文` char). The snapshot
+    /// stores "line number + display column relative to the line's content
+    /// start (first non-blank)" — retab preserves non-blank chars' display
+    /// columns and align shifts the whole content run, so both can be
+    /// restored exactly from this pair.
     fn snap_cursor_for_range_rewrite(
         &self,
         ctx: &Ctx,
@@ -2567,9 +2582,10 @@ impl VimState {
         Some((line, col.saturating_sub(content_col)))
     }
 
-    /// 按快照还原光标；光标在范围外时按整块字节增量平移（范围后的
-    /// 内容整体挪了 delta 字节，裸偏移同样会指错字符）。末端 floor+
-    /// clamp 兜底可寻址不变量。
+    /// Restore the cursor from the snapshot; when the cursor is outside the
+    /// range, shift by the whole block's byte delta (content after the range
+    /// moved by delta bytes, and a raw offset would point at the wrong char
+    /// too). The tail floor+clamp backstops the addressability invariant.
     fn restore_cursor_after_range_rewrite(
         &mut self,
         ctx: &mut Ctx,
@@ -3366,8 +3382,9 @@ impl VimState {
         let new_text = lines.join("\n");
         self.edit_replace(ctx, start..end, &new_text);
         self.end_edit();
-        // 光标留在原字符上（`:h :retab` 的 marks 调整语义；fuzz round35
-        // 抓到裸偏移陷进 CJK 字符内部）
+        // Cursor stays on the original character (`:h :retab`'s marks-adjust
+        // semantics; fuzz round35 caught a raw offset landing inside a CJK
+        // character)
         self.restore_cursor_after_range_rewrite(ctx, first, snap, end - start, new_text.len());
         self.bump(ctx);
     }
@@ -3827,7 +3844,7 @@ impl VimState {
     fn report_trailing(&mut self, ctx: &mut Ctx, token: &str, _line: &str) {
         // vim 9.1 quotes ONLY the offending tail (audit A15 — the raw-line
         // suffix came from a misread round-14 oracle). An E488 during a
-        // replay is a HARD failure (挂账 4 — error aborts, beep continues).
+        // replay is a HARD failure (backlog 4 — error aborts, beep continues).
         let _ = _line;
         ctx.host
             .status_message(&format!("E488: Trailing characters: {token}"));

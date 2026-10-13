@@ -110,7 +110,7 @@ pub enum VisualCmd {
     /// `r{char}`: replace the whole selection with `char` (char-arg).
     ReplaceChar,
     /// zz / zt / zb inside visual mode: vim scrolls the view AND keeps the
-    /// selection (round11 悬置闭环). The engine only reports the anchor;
+    /// selection (round11 pending-item closed loop). The engine only reports the anchor;
     /// hosts own the viewport.
     Scroll(crate::host::ScrollAnchor),
     /// `Y`/`D`/`X`/`C`/`S`: vim's LINEWISE visual spellings (`:h v_Y` —
@@ -664,7 +664,7 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["z", "<CR>"], CmdKind::Normal(NormalCmd::ScrollTop));
     b.normal(&["z", "."], CmdKind::Normal(NormalCmd::ScrollCenter));
     b.normal(&["z", "-"], CmdKind::Normal(NormalCmd::ScrollBottom));
-    // visual 模式同款:滚动 + 保留选区(round11 悬置闭环,vim 行为)
+    // visual mode likewise: scroll + keep the selection (round11 pending-item closed loop, vim behaviour)
     b.visual(
         &["z", "z"],
         CmdKind::Visual(VisualCmd::Scroll(crate::host::ScrollAnchor::Center)),

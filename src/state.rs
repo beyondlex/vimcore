@@ -241,14 +241,14 @@ pub struct Cursor {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InsertSession;
 
-/// `i_CTRL-V` 字面输入的收位状态（审计 H1/H2）。
+/// The digit-collection state of `i_CTRL-V` literal input (audit H1/H2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum QuotePending {
-    /// 等待下一个键——控制键按字面插入
+    /// Waiting for the next key — control keys inserted literally
     Single,
-    /// 十进制（至多 3 位）/ 八进制（3 位）
+    /// Decimal (up to 3 digits) / octal (3 digits)
     Radix { base: u32, max_digits: usize, buffer: String },
-    /// 十六进制（2/4/8 位）
+    /// Hexadecimal (2/4/8 digits)
     Hex { max_digits: usize, buffer: String },
 }
 
@@ -421,8 +421,10 @@ pub struct VimState {
     /// ctrl key that armed the literal insert, remembered across the extra
     /// pending step. `None` = plain `i_CTRL-R {reg}`.
     pub(crate) insert_register_literal: Option<char>,
-    /// pending_visual_marks 入库时刻的编辑前光标（audit C12/C13——gv 的
-    /// 光标端取算子**进入时**的位置，编辑漏斗会把它随行调整到编辑后坐标）。
+    /// The pre-edit cursor at the moment pending_visual_marks was stored
+    /// (audit C12/C13 — gv's cursor end takes the operator's position at
+    /// ENTRY; the edit funnels adjust it along the lines to post-edit
+    /// coordinates).
     pub(crate) pending_visual_cursor: Option<usize>,
     /// Per-register sync marks for the macro=register unification (audit
     /// D4): a register write newer than the mark re-parses the macro from
@@ -442,24 +444,28 @@ pub struct VimState {
     /// A bell rang during the current replayed key (@/`.` count rounds):
     /// vim aborts the whole replay on the first error (`:h @`).
     pub(crate) replay_error: bool,
-    /// `!{motion}` 在提示符打开前的算子跨度（audit B3）：Enter 时以提示符
-    /// 里输入的 shell 命令过滤这些行。
+    /// The `!{motion}` operator span before the prompt opens (audit B3): on
+    /// Enter, filter these lines through the shell command typed in the prompt.
     pub(crate) filter_span: Option<ops::OpSpan>,
-    /// `=` 提示符的来源：true = 从插入模式 `<C-r>=` 打开（求值结果插回
-    /// 光标、取消时回到插入会话），false = Normal `"=` 前缀（结果存入
-    /// 表达式寄存器，audit C9）。
+    /// Origin of the `=` prompt: true = opened from insert mode `<C-r>=` (the
+    /// evaluated result is inserted back at the cursor; cancelling returns to
+    /// the insert session), false = the Normal `"=` prefix (the result goes
+    /// into the expression register, audit C9).
     pub(crate) expr_prompt_insert_origin: bool,
-    /// 当前算子跨度来自 TEXT OBJECT（`daw`/`dip`…）：对象跨度的行尾不参与
-    /// motion 跨度的「并线」规则（vim 9.1：`daw` 于 "a   \n\nb" 留下空行，
-    /// audit B2）。
+    /// The current operator span came from a TEXT OBJECT (`daw`/`dip`…): the
+    /// end of an object span does not take part in the motion span's "join
+    /// lines" rule (vim 9.1: `daw` on "a   \n\nb" leaves the empty line,
+    /// audit B2).
     pub(crate) op_from_object: bool,
-    /// `i_CTRL-V` 的字面输入状态机（审计 H1/H2）：Single=等待下一个键；
-    /// Decimal/Hex/Octal=按进制收位（vim: 0ddd 十进制、xHH 十六进制 2 位、
-    /// uHHHH 4 位、UHHHHHHHH 8 位、oOO 八进制 3 位）。
+    /// The literal-input state machine of `i_CTRL-V` (audit H1/H2): Single =
+    /// waiting for the next key; Decimal/Hex/Octal = collecting digits per
+    /// radix (vim: 0ddd decimal, xHH hex 2 digits, uHHHH 4 digits,
+    /// UHHHHHHHH 8 digits, oOO octal 3 digits).
     pub(crate) insert_quote: Option<QuotePending>,
-    /// 当前 insert 会话累计的插入文本——会话结束写入 `".` 寄存器（审计 D1）。
+    /// The inserted text accumulated by the current insert session — written
+    /// into the `".` register when the session ends (audit D1).
     pub(crate) insert_session_text: String,
-    /// `i_CTRL-K` 二合字母：等待两个字符（审计 H3）。
+    /// `i_CTRL-K` digraph: waiting for two characters (audit H3).
     pub(crate) insert_digraph_first: Option<char>,
     /// First buffer position typed into during the current insert session.
     /// Plain `i`-sessions run no command `bump`, so this is what puts them
@@ -2373,12 +2379,14 @@ impl VimState {
     // ---- insert sessions -------------------------------------------------------
 
     pub(crate) fn begin_insert(&mut self, kind: InsertKind) {
-        // `".` 的新会话从空文本累计（审计 D1）
+        // A new session for `".` accumulates from empty text (audit D1)
         self.insert_session_text.clear();
-        // `.` 不得重放 `gi` 的定位跳转（audit D10——vim 的点重放只重放插入
-        // 动作本身，插入落在**当前**光标）：把点录制尾巴上刚记下的 [g, i]
-        // 换成 [i]，重放即「在当前光标进插入」。宏捕获不动——宏里的 `gi`
-        // 是按键本身，`@` 重放时跳转要原样执行。
+        // `.` must not replay `gi`'s positioning jump (audit D10 — vim's dot
+        // replay replays only the insert ACTION itself, landing at the CURRENT
+        // cursor): swap the [g, i] just recorded on the dot-replay tail for
+        // [i], so the replay means "enter insert at the current cursor".
+        // Macro capture stays untouched — inside a macro `gi` is the keystroke
+        // itself, and `@` replay must run the jump as-is.
         if kind == InsertKind::LastInsertExit {
             let n = self.recording.len();
             let is_key = |s: Option<&RecordedStep>, c: char| {
@@ -2601,9 +2609,10 @@ impl VimState {
     }
 
     pub(crate) fn exit_insert(&mut self, ctx: &mut Ctx) {
-        // `".` = 最近一次插入的文本（审计 D1）。空会话（`i<Esc>`）同样落账：
-        // vim 9.1 在空会话后清空 `".`，`<C-a>`/`<C-r>.` 不再粘出更早会话的
-        // 陈旧文本（oracle：`ihi<Esc>i<Esc>` 后 `string(@.)` = ''——audit D7a）
+        // `".` = the text of the most recent insert (audit D1). Empty sessions
+        // (`i<Esc>`) are accounted for too: vim 9.1 clears `".` after an empty
+        // session, so `<C-a>`/`<C-r>.` no longer paste stale text from earlier
+        // sessions (oracle: after `ihi<Esc>i<Esc>`, `string(@.)` = '' — audit D7a)
         let text = std::mem::take(&mut self.insert_session_text);
         let typed_anything = !text.is_empty();
         self.registers.store_last_insert(text);
@@ -2810,7 +2819,7 @@ impl VimState {
         if !matches!(self.mode, Mode::Insert | Mode::Replace) || text.is_empty() {
             return;
         }
-        // `".` 累计：会话内实际插入的文本，exit_insert 落账（审计 D1）
+        // `".` accumulation: the text actually inserted in the session, settled by exit_insert (audit D1)
         self.insert_session_text.push_str(text);
         // a newline inside a block session splits the typing row the same way
         // a locked vertical move would (replica offsets assume one line per
@@ -3599,10 +3608,12 @@ impl VimState {
             park_on_edge: true,
         });
         self.begin_insert(InsertKind::Insert);
-        // visual-block I/A 的录制保留（audit D11）：vim 的 `.` 重放原键序
-        // [C-v…, I, 文本, Esc]，重放路径会重新走 begin_block_insert →
-        // exit_insert 的整条复制机制，行的粘贴随重放自然再生。（块 `c` 的
-        // 录制仍关——见上面那段。）
+        // Recording retention for visual-block I/A (audit D11): vim's `.`
+        // replays the original key sequence [C-v…, I, text, Esc], and the
+        // replay path re-runs the whole begin_block_insert → exit_insert
+        // replication machinery, so the row pasting regenerates naturally on
+        // replay. (Recording for block `c` is still off — see the paragraph
+        // above.)
     }
 
     /// The `(lo, hi, kind)` bounds of the live selection, lo/hi CLAMPED onto
@@ -6136,11 +6147,14 @@ impl VimState {
                         self.cursor.offset =
                             ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
                     } else {
-                        // 插入位取删除区的真实起点，不走 cursor.offset：
-                        // delete_span 经 clamp_cursor 停放光标，而 clamp 是
-                        // 「停放」语义（offset 落在行尾时回拉到末字符）——
-                        // span.start 恰在行尾时（选区贴行尾，如 v$）粘贴会
-                        // 插到行尾字符之前，行尾字符反落在粘贴文本之后
+                        // The insert position takes the delete region's true
+                        // start, not cursor.offset: delete_span parks the
+                        // cursor via clamp_cursor, and clamp has "parking"
+                        // semantics (an offset at the line end is pulled back
+                        // onto the last char) — when span.start sits exactly at
+                        // the line end (selection hugging EOL, e.g. v$) the
+                        // paste would land BEFORE the EOL char, leaving that
+                        // char after the pasted text instead
                         let at = span.start.min(ctx.buf.len());
                         self.edit_insert(ctx, at, &repeated);
                         // cursor on the last pasted GRAPHEME start — byte - 1

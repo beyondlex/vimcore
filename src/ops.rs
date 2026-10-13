@@ -1723,16 +1723,21 @@ pub fn replace_chars_from_neighbor(
     let src = crate::buffer::offset_for_display_column(ctx.buf, neighbor, col);
     let neighbor_end = ctx.buf.line_end(neighbor);
 
-    // 逐位配对：光标行的第 i 个字素取邻行同显示列起连续第 i 个字符。vim
-    // 逐位处理、某位在邻行取不到字符时**跳过**（ins_copychar 返回 NUL →
-    // 仅推进光标，normal.c nv_replace「will be decremented further
-    // down」）——短邻行不放弃整个命令。9.1 oracle：`abcdef` + `abX` 上
-    // `0ll2r<C-E>` → `abXdef`（'c'←'X'，'d' 跳过），光标落最后处理位
-    // 'd'。全部跳过 = 无操作（无编辑、无铃声、光标不动）。
+    // Per-position pairing: the i-th grapheme of the cursor line takes the
+    // i-th consecutive char from the neighbor line at the same display
+    // column. vim processes position by position and SKIPS a position whose
+    // neighbor line has no char (ins_copychar returns NUL → cursor advances
+    // only, normal.c nv_replace "will be decremented further down") — a
+    // short neighbor line does not abandon the whole command. 9.1 oracle: on
+    // `abcdef` + `abX`, `0ll2r<C-E>` → `abXdef` ('c'←'X', 'd' skipped), the
+    // cursor lands on the last processed position 'd'. All skipped = no-op
+    // (no edit, no bell, cursor unmoved).
     //
-    // 越列判定：`offset_for_display_column` 对越列查询钳回最后字素起点
-    // （那是 `j`/`|` 的运动落点语义），不能当「该列有字符」用——要用
-    // 覆盖判定（字符的显示列区间盖住目标列）。
+    // Past-the-column test: `offset_for_display_column` clamps an
+    // over-column query back to the last grapheme's start (that is the
+    // `j`/`|` motion landing semantics) — it cannot be used as "this column
+    // has a char"; use the coverage test instead (the char's display-column
+    // interval covers the target column).
     let mut replacements = String::new();
     let mut end = start;
     let mut last_pos_new_start = start;
@@ -1763,12 +1768,14 @@ pub fn replace_chars_from_neighbor(
                 None => false,
             };
         if !covered {
-            // 跳过位保留光标行原字符（拼进替换串 = 文本不变）
+            // a skipped position keeps the cursor line's original char (spliced into the replacement string = text unchanged)
             replacements.push_str(&ctx.buf.slice(end..next));
         }
         end = next;
-        // 下一位的邻行配对列 = 下一个光标字符自己的显示列（宽字符对齐
-        // 终端列；vim 的 ++col 是字节制 quirk，这里按显示列泛化）
+        // the neighbor-line pairing column of the next position = the next
+        // cursor char's own display column (wide chars align to terminal
+        // columns; vim's ++col is a byte-based quirk, generalized here by
+        // display column)
         col = crate::buffer::display_column(ctx.buf, end);
     }
     if !any_replaced {

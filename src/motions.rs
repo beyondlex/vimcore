@@ -79,7 +79,7 @@ pub enum Motion {
     /// `gd`/`gD`: jump to the (first whole-word match at/after the anchor
     /// of the) declaration — `gD` anchors line 1; `gd` runs the `[[`
     /// function-start search with blank-line backoff first (`:h gd`,
-    /// audit F1 + 2026-10-09 oracle 矩阵)
+    /// audit F1 + 2026-10-09 oracle matrix)
     SearchDeclaration {
         whole_file: bool,
     },
@@ -716,13 +716,18 @@ impl Motion {
                 if matches.is_empty() {
                     return MotionResult::stuck(here);
                 }
-                // `:h gd` 的锚定（2026-10-09 oracle 矩阵 T1-T5）：gD 锚在
-                // 行 1；gd 先向 [[ 找上一个第 1 列的 `{`——找不到就停在行 1
-                // 且**不**做空行回退，找到了才从 `{` 行向上越过非空行（空行
-                // 或行 1 截止）——然后从锚点行起向前搜全词匹配的第一个。
-                // 旧实现「光标前最近一次 / 光标后第一个」是另一套模型：
-                // 无函数结构的常见形状 vim 落行 1 的首个出现，旧实现落
-                // 光标前最近的一次。
+                // `:h gd` anchoring (2026-10-09 oracle matrix T1-T5): gD
+                // anchors at line 1; gd first runs [[ for the previous
+                // column-1 `{` — if not found it stays at line 1 and does
+                // NOT do the blank-line backoff; only when found does it
+                // climb from the `{` line over non-blank lines (stopping at
+                // a blank line or line 1) — then searches forward from the
+                // anchor line for the first whole-word match.
+                // The old "nearest before the cursor / first after the
+                // cursor" model was different: for the common shape without
+                // a function structure vim lands on the first occurrence on
+                // line 1, where the old implementation landed on the nearest
+                // one before the cursor.
                 let anchor = if whole_file {
                     0
                 } else {
@@ -794,7 +799,7 @@ impl Motion {
                 // SECTIONS: the next/previous COLUMN-1 brace (`:h ]]`),
                 // linewise-style line starts.
                 //
-                // METHODS (oracle matrix, 第三十三轮审计挂账 2 — vim 9.1
+                // METHODS (oracle matrix, thirty-third-round audit backlog 2 — vim 9.1
                 // probes): `]m`/`[m` land on the first brace (ANY kind, ANY
                 // column) after/before the cursor; `]M`/`[M` land on the
                 // first brace too, UNLESS it is an opener whose
