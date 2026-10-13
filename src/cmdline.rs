@@ -1231,7 +1231,7 @@ impl VimState {
         }
         // an UNTERMINATED search address (`:/pat`, `:?pat`) consumes the
         // WHOLE rest of the line as its pattern — vim's `:? ,3d` reports
-        // `E486: Pattern not found: ,3d` and runs nothing (BUG_AUDIT3
+        // `E486: Pattern not found: ,3d` and runs nothing (第三十三轮审计
         // 挂账 5; the old comma-split read the `?` as a broken address and
         // E16'd). A hit parks on the match line's first non-blank, exactly
         // like the closed search address; the empty pattern reuses the last
@@ -2493,7 +2493,7 @@ impl VimState {
     /// One `:registers` listing line: `"x  c|l|b  text` with embedded
     /// newlines shown as `^J` (vim's rendering) and the tail elided.
     fn register_line(name: char, reg: &crate::registers::Register) -> String {
-        // vim 9.1's `:reg` layout (9.1 oracle, BUG_AUDIT3 挂账 6):
+        // vim 9.1's `:reg` layout (9.1 oracle, 第三十三轮审计挂账 6):
         // `  l  ""   second line^J` — two spaces, the type char, two spaces,
         // quote+name, THREE spaces, content with the linewise tail shown as
         // ^J. The old layout put the name first.

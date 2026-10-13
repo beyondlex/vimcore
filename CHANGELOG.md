@@ -1,7 +1,7 @@
 # CHANGELOG
 
 本文件只记录**面向宿主的 API 变化**。各轮语义修复的逐项明细在
-`NOTES.md`（按轮次）与 `BUG_AUDIT*.md`（独立审计全量账），发布前以两者为准。
+`NOTES.md`（按轮次，含各轮独立审计摘要），发布前以其为准。
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号与 `Cargo.toml` 一致。
@@ -52,7 +52,7 @@ M1–M4。动机：diff / 日志 / 预览类纯查看宿主接不进来（`Ctx` 
 
 0.1.x（0.1.1 → 0.1.30）是与 vim 9.1 的逐轮语义对齐：三十余轮检视/独立审计，
 累计 300+ 项语义修复，全部经 `/usr/bin/vim`（9.1 patches 1-1752）实证。
-每轮的修复清单见 `NOTES.md` 对应轮次与 `BUG_AUDIT*.md`；测试按轮次落在
+每轮的修复清单见 `NOTES.md` 对应轮次；测试按轮次落在
 `tests/audit*`、`tests/parity_round*`、`tests/probe_round*`、`tests/fuzz_*`。
 
 0.1.x 内无面向宿主的破坏性变更（宿主侧 API 稳定至 0.1.30）。

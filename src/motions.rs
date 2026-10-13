@@ -794,7 +794,7 @@ impl Motion {
                 // SECTIONS: the next/previous COLUMN-1 brace (`:h ]]`),
                 // linewise-style line starts.
                 //
-                // METHODS (oracle matrix, BUG_AUDIT3 挂账 2 — vim 9.1
+                // METHODS (oracle matrix, 第三十三轮审计挂账 2 — vim 9.1
                 // probes): `]m`/`[m` land on the first brace (ANY kind, ANY
                 // column) after/before the cursor; `]M`/`[M` land on the
                 // first brace too, UNLESS it is an opener whose

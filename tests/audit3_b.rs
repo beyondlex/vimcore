@@ -11,7 +11,7 @@
 //!
 //! 范围：src/motions.rs + src/word.rs + src/objects.rs + src/ops.rs 的
 //! span_from_motion + src/tables.rs 命令表 + cmdline.rs 的 search motion。
-//! 已对照 NOTES.md 77 项已知分歧、BUG_AUDIT.md 50 项、BUG_AUDIT2.md
+//! 已对照 NOTES.md 77 项已知分歧、第三十一轮审计 50 项、第三十二轮审计
 //! 59 项去重（audit2 的 A 系列刚修了 TAB 虚列/节跳转，B 系列刚修了
 //! aw 空白矩阵/cw≡ce/对象 count 跨行——本轮找的是它们没覆盖的形状）。
 //!

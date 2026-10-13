@@ -14,9 +14,9 @@
 //!   test_textobjects.vim / test_join.vim / test_shift.vim /
 //!   test_charsearch*）+ 本机 typeahead/PTY 复核。
 //!
-//! 已对照去重：NOTES.md 已知分歧 #1-77+、BUG_AUDIT.md 50 项、
-//! BUG_AUDIT2.md 59 项（A 系 TAB 虚列、B 系 aw 空白矩阵/cw≡ce/对象
-//! count 跨行）、BUG_AUDIT3.md 55 项（B1-B14 刚修过本域）。
+//! 已对照去重：NOTES.md 已知分歧 #1-77+、第三十一轮审计 50 项、
+//! 第三十二轮审计 59 项（A 系 TAB 虚列、B 系 aw 空白矩阵/cw≡ce/对象
+//! count 跨行）、第三十三轮审计 55 项（B1-B14 刚修过本域）。
 //!
 //! ---------------------------------------------------------------
 //! 本轮已证伪（oracle 证引擎与 vim 9.1 一致，下轮免重查）：
@@ -342,7 +342,7 @@ fn b16_y3aw_beyond_last_word_must_bell() {
 //   连行 4 的 " " 一起没了；j0dat count=1 只删 a 标签，j0dit 保结构）——
 //   标签块闭标签之后的尾随换行/空行被并入删除域，与 exclusive 规则 (a)
 //   的何种交互尚未逆向（linewise 提升形状对不上，候选模型见
-//   BUG_AUDIT4.md 挂账）。需要 PTY 专项逐形状逆向后再实现。
+//   第三十四轮审计挂账）。需要 PTY 专项逐形状逆向后再实现。
 #[test]
 #[ignore = "B-17 挂账：at 外层的尾随空白/换行归域未逆向（oracle 数据在本注释）"]
 fn b17_d2at_testdir_sequence() {
