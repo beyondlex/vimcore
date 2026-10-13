@@ -1,7 +1,17 @@
 # 中文 → 英文 迁移计划
 
 覆盖 4 个仓库：`vimcore`（底座）、`alacer`、`gpui_vim`、`crossterm_vim`。
-本文档是执行手册，不是提案——所有命令已在 vimcore 的完整副本上演练验证过。
+执行手册，不是提案。
+
+**已演练验证**：§5.3 的 filter-branch 全流程（在 vimcore 完整副本上跑了 231
+个提交，60s，tree hash 逐一一致）；§4.0.1 归档；§8.2 已发布包统计。
+
+**未演练、首次执行时要小心**：
+- §5.2 的 `%B` 导出（演练时用的是 `%s`，后来发现会丢正文，见 §5.2 警示）
+- §5.5 第 6 步「正文没丢」验收（针对上面那个坑新加的）
+
+> 执行前先读 §6 风险表，尤其是**加粗的三条**：正文丢失、L4 数据误删、
+> 重复提交分叉。这三条都是「做了之后不可逆」或「静默损坏」。
 
 ---
 
@@ -58,12 +68,15 @@ vimcore 拆分：`src/` 276 · `tests/` 5,179 · 文档 2,341 · `Cargo.toml` 3
 
 ### 提交历史含中文
 
-| 仓库 | 提交总数 | 含中文 | 分支 | tag |
-|---|---|---|---|---|
-| vimcore | 231 | 217 | main | v0.2.0 |
-| gpui_vim | 84 | 33 | **2 个**（已清理） | 1 个 |
-| crossterm_vim | 39 | 8 | main | 0 |
-| alacer | 34 | **0**（已全英文） | main | 0 |
+| 仓库 | 提交总数 | 标题含中文 | **正文含中文** | 分支 | tag |
+|---|---|---|---|---|---|
+| vimcore | 236 | 217 | **143** | main | v0.2.0 |
+| gpui_vim | 84 | 33 | **25** | **2 个**（已清理） | 1 个 |
+| crossterm_vim | 39 | 8 | **9** | main | 0 |
+| alacer | 35 | 0 | **1**（刻意保留） | main | 0 |
+
+> ⚠️ **「正文含中文」这一列原先没统计。** Phase B 若只映射标题（`%s`），
+> 这 143+25+9 条正文会被 `--msg-filter` 整体删除。见 §5.2 与 §6。
 
 **关键前提**：三个下游仓库全部通过 crates.io 依赖 vimcore
 （`vimcore = "0.2"` / `"0.1"`），无 git 依赖、无 `path = "../vimcore"`。
@@ -73,15 +86,17 @@ vimcore 拆分：`src/` 276 · `tests/` 5,179 · 文档 2,341 · `Cargo.toml` 3
 
 ## 3. 前置检查（阻塞项，必须先清）
 
-| 仓库 | 状态 | 处理 |
-|---|---|---|
-| alacer | 7 个未推送提交 + 脏工作树 | **待处理**：先提交或 stash |
-| crossterm_vim | ✅ 已清理 | 修复已提交 `c51ccd4`（96 测试全绿） |
-| gpui_vim | ✅ 已清理 | 分支 5 → 2，见 §3.1 |
-| vimcore | 干净 | OK（`I18N_PLAN.md` 未跟踪，不影响） |
+全部清完（2026-10-14 复核）：
+
+| 仓库 | 工作树 | 分支 | 状态 |
+|---|---|---|---|
+| alacer | 干净 | `main` | ✅ 已同步 `origin/main` |
+| crossterm_vim | 干净 | `main`（+ 备份 ref） | ✅ 已同步，见 §8.5 ③ |
+| gpui_vim | 干净 | `main` `fork-gpui-pre` | ✅ 分支 5 → 2，见 §3.1 |
+| vimcore | 干净 | `main` | ✅ 5 个提交待推送（归档 + 发布准备） |
 
 > 历史重写**不会**自动处理未提交的工作树改动。带着脏工作树跑 filter-branch
-> 会让改动悬空。
+> 会让改动悬空——所以每批翻译**必须先提交**再进入 Phase B。
 
 ### 3.1 gpui_vim 分支清理结果（2026-10-14）
 
@@ -187,6 +202,105 @@ M1–M6 已完成，但设计决策是活的，**不能当过期计划删掉**�
 每批独立提交，message 用英文（`docs: translate ... comments to English`）。
 **Phase A 全程普通提交，随时可 `git revert`。**
 
+### 4.1.0 逐批文件清单（可直接照做）
+
+数字是各文件当前的含中文行数。**按此顺序推进即可，无需再自行扫描。**
+
+**A1 — `src/` 8 个文件 / 276 行**（生产代码，先跑通流程）
+
+```
+ 139  src/tck.rs
+  66  src/cmdline.rs
+  41  src/state.rs
+  16  src/ops.rs
+  10  src/motions.rs
+   2  src/tables.rs
+   1  src/insert_mode.rs
+   1  src/objects.rs
+```
+
+**A5 — `tests/` 74 个文件 / 5,179 行**，已按体量切成 5 组，每组约 1,000 行
+（一组一次提交，规模可控、可 revert）：
+
+<details>
+<summary>A5.1 — 4 文件 / 1,093 行</summary>
+
+```
+ 486  tests/review_regressions.rs
+ 213  tests/audit6_a.rs
+ 205  tests/audit5_c.rs
+ 189  tests/audit5_a.rs
+```
+</details>
+
+<details>
+<summary>A5.2 — 7 文件 / 1,092 行</summary>
+
+```
+ 180  tests/audit3_c.rs
+ 177  tests/audit6_c.rs
+ 169  tests/audit5_b.rs
+ 158  tests/audit3_b.rs
+ 141  tests/audit3_d.rs
+ 135  tests/audit3_a.rs
+ 132  tests/parity_round14.rs
+```
+</details>
+
+<details>
+<summary>A5.3 — 11 文件 / 1,060 行</summary>
+
+```
+ 125  tests/audit_probe.rs
+ 107  tests/parity_round9.rs
+ 105  tests/parity_round8.rs
+ 100  tests/audit2_e.rs
+  97  tests/audit2_c.rs
+  93  tests/parity_round13.rs
+  90  tests/audit2_d.rs
+  89  tests/readonly_pipeline.rs
+  86  tests/probe_round30.rs
+  85  tests/audit2_b.rs
+  83  tests/parity_round7.rs
+```
+</details>
+
+<details>
+<summary>A5.4 — 17 文件 / 1,043 行</summary>
+
+```
+  82  tests/audit2_a.rs        61  tests/engine.rs         48  tests/fuzz_round19.rs
+  82  tests/audit2_f.rs        61  tests/parity_round36.rs 47  tests/fuzz_round21.rs
+  75  tests/audit8_a.rs        60  tests/audit9_a.rs       47  tests/probe_round29.rs
+  73  tests/parity_round2.rs   59  tests/audit9_b.rs       54  tests/parity_round15.rs
+  70  tests/probe_round35.rs   59  tests/probe_round29c.rs 50  tests/fuzz_round10.rs
+  66  tests/parity_round17.rs  49  tests/fuzz_round13.rs
+```
+</details>
+
+<details>
+<summary>A5.5 — 35 文件 / 891 行（都是小文件，可一次做完）</summary>
+
+```
+  46  tests/parity_round12.rs   31  tests/fuzz_round36.rs    17  tests/fuzz_round8.rs
+  45  tests/fuzz_round14.rs     30  tests/ex_filter.rs       16  tests/parity_round3.rs
+  45  tests/fuzz_round24.rs     27  tests/fuzz_round11.rs    14  tests/fuzz_round33.rs
+  44  tests/probe_round30b.rs   27  tests/fuzz_round20.rs    10  tests/fuzz_round7.rs
+  40  tests/fuzz_round17.rs     25  tests/audit7_b.rs         9  tests/parity_round5.rs
+  40  tests/fuzz_round23.rs     25  tests/probe_round29d.rs   6  tests/rc_mapping.rs
+  38  tests/fuzz_round25.rs     18  tests/audit6_b.rs         4  tests/parity_round6.rs
+  37  tests/fuzz_round16.rs     18  tests/fuzz_round9.rs      3  tests/audit2_scratch.rs
+  37  tests/fuzz_round26.rs     35  tests/parity_round16.rs   3  tests/common/mod.rs
+  36  tests/fuzz_round15.rs     34  tests/probe_round29b.rs   2  tests/builtin_commands.rs
+  31  tests/audit6_main.rs      34  tests/probe_round34.rs    2  tests/scratch_b.rs
+  31  tests/fuzz_round12.rs     31  tests/fuzz_round35.rs
+```
+</details>
+
+> **A5 组内的 CJK 测试数据（L4）一个字都不能动**。`tests/` 里凡是
+> `buf("中文")`、`"中\n"`、`char_at`、`split_at_col` 这类字面量，只翻注释和
+> 断言消息，字面量保持原样。用 §1.1 的自查模式逐组核对。
+
 ### 4.1.1 其余三个仓库的范围（2026-10-14 核查）
 
 | 仓库 | 注释（可译） | CJK 数据（禁改） | 断言/错误消息 | 文档 | 提交历史 |
@@ -245,6 +359,45 @@ rg -c '[\x{4e00}-\x{9fff}]' --glob '!target' | wc -l
 > 注意：这 ~350 行是 L4 测试数据，最后仍应保留中文；**NOTES.md 的归档取回
 > 说明（6 行）也含中文，属预期残留**，验收时别误判为漏翻。
 
+### 4.5 每批的操作流程（照此循环）
+
+对批次里的每个文件：
+
+**1. 读全文**，不要只跳到含中文的行。注释常与代码交错（尤其是
+`src/*.rs` 里解释 vim 特例的块注释），断章取义会译错语义。
+
+**2. 只改中文部分**——注释、doc 注释、断言消息翻成英文；L4 字面量、
+代码标识符、vim 术语按 §4.3 保持原样。
+
+**3. 写回后立刻验证**：
+
+```bash
+cargo test                      # 必须全绿
+cargo clippy --all-targets      # 无新增警告
+```
+
+**4. 一个文件一次提交**（A5 的小组可以一组一次）：
+
+```bash
+git add <file>
+git commit -m "docs: translate <file> comments to English"
+```
+
+提交信息**用英文**——这些提交后面会被 Phase B 一起重写，但当下用英文
+能减少 Phase B 的待翻译量，也让 `git log` 现在就是干净的。
+
+**5. 自查 L4 没被动**（每批必做）：
+
+```bash
+git diff HEAD~1 | rg '^-.*[\x{4e00}-\x{9fff}]'
+```
+
+看被删掉的中文行——**若出现 `buf("中文")` / `"中\n"` / `char_at` /
+`split_at_col` / `ime.commit("你")` 这类行，说明误删了测试数据，立刻还原**。
+
+**循环顺序**：`A1 → A2 → A3 → A4 → A5.1 → A5.2 → A5.3 → A5.4 → A5.5`
+（文件清单见 §4.1.0）。每批之间跑一次全量 `cargo test`。
+
 ---
 
 ## 5. Phase B：提交历史重写
@@ -254,48 +407,97 @@ rg -c '[\x{4e00}-\x{9fff}]' --glob '!target' | wc -l
 **先 Phase A，后 Phase B。** 工作树翻译产生的英文提交会一并被这次重写覆盖，
 只需重写一次。反过来做要 force push 两次。
 
-### 5.1 备份
+### 5.1 备份 + 采集验证基线
 
 ```bash
 cd /Users/lex/code/github/vimcore
+
+# 1) bundle 备份（推送前的回滚点）
 git bundle create ~/vimcore-pre-i18n.bundle --all
+git bundle verify ~/vimcore-pre-i18n.bundle
+
+# 2) 采集验证基线 —— §5.5 的步骤 1 依赖它，漏了就没法验证内容零改动
+git log main --format='%T' | sort > /tmp/before_trees.txt
+git ls-tree -r HEAD --format='%(objectname) %(path)' | sort > /tmp/before_files.txt
+git rev-list --count main > /tmp/before_count.txt
+git log -5 --format='%an | %ad' --date=iso > /tmp/before_meta.txt
 ```
 
 仓库很小（`.git` 共 68M，vimcore 仅 17M），无空间压力。
-验证备份可用：`git bundle verify ~/vimcore-pre-i18n.bundle`
+
+> ⚠️ **第 2 步不能省。** §5.5 的「内容零改动」验证要拿 `/tmp/before_trees.txt`
+> 比对，没有基线就只能事后靠 bundle 反推，验证失去意义。
 
 ### 5.2 导出待翻译的提交消息
 
+> ⚠️ **必须导出完整 message（`%B`），不是标题（`%s`）。**
+> `--msg-filter` 替换的是**整个 commit message**。若只映射标题，
+> 143 条正文的中文会被整体删除——这不是「没翻译」，是**数据丢失**，
+> 且推送后不可逆。
+
+实测（2026-10-14）：vimcore 236 条提交中——
+
+| | 条数 |
+|---|---|
+| 标题含中文 | **217** |
+| **正文含中文** | **143** |
+| 含中文（标题或正文） | 约 250 |
+
 ```bash
-git log --all --reverse --format='%H%x09%s' > /tmp/vimcore-msgs.tsv
+# 导出：用 \x02 作记录分隔符（message 里可能有换行）
+git log --branches --tags --reverse --format='%H%x09%B%x02' > /tmp/vimcore-msgs.txt
 ```
 
-逐条翻译产出 `SHA → 英文 message` 映射，存为 `/tmp/msg_map.json`：
-`{"<40位SHA>": "英文标题", ...}`
+逐条翻译，产出 `/tmp/msg_map.json`：
 
-> 只翻译含中文的 218 条；其余原样返回。含 body 的提交另行处理。
+```json
+{
+  "<40位SHA>": "English subject\n\nEnglish body (if any)",
+  "...": "..."
+}
+```
+
+规则：
+
+- **值是完整的英文 message**（标题 + 空行 + 正文），不是只有标题；
+  无正文的就只写标题一行。
+- 只翻译含中文的条目；其余**不要**进映射表（未命中即原样输出）。
+- 正文里的 vim 命令序列、文件路径、代码标识符保持原样。
+- 分批翻译，别一次吞 250 条——每批翻完抽样核对 3–5 条再继续。
 
 ### 5.3 执行重写
 
-`msg_filter.py`（读 `$GIT_COMMIT` 查表，未命中原样输出）：
+`/tmp/msg_filter.py`（读 `$GIT_COMMIT` 查表；**未命中则原样输出整个 message**）：
 
 ```python
 import sys, os, json
+
 m = json.load(open('/tmp/msg_map.json'))
 sha = os.environ.get('GIT_COMMIT', '')
 orig = sys.stdin.buffer.read()
 new = m.get(sha)
-sys.stdout.buffer.write(new.encode('utf-8') + b'\n' if new is not None else orig)
+if new is not None:
+    sys.stdout.buffer.write(new.encode('utf-8') + b'\n')
+else:
+    sys.stdout.buffer.write(orig)   # 未命中：原样，连正文一起保留
 ```
 
+执行（**Python 用受管绝对路径**，别用裸 `python3`——系统版可能缺依赖或版本不符）：
+
 ```bash
+PY=/Users/lex/.workbuddy/binaries/python/versions/3.13.12/bin/python3
+
 FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f \
-  --msg-filter 'python3 /tmp/msg_filter.py' \
+  --msg-filter "$PY /tmp/msg_filter.py" \
   --tag-name-filter cat \
   -- --branches --tags
 ```
 
-231 个提交耗时约 **60 秒**。
+236 个提交耗时约 **60 秒**（演练实测 231 条约 60s）。
+
+> **执行前先小样本验证**：先只把 5 条放进 `msg_map.json` 跑一遍，确认
+> ① 这 5 条被翻译 ② 其余原样 ③ 正文没丢。全量再上。
+> 演练就是这么做的（5 条样本 → 全量 231 条）。
 
 ### 5.4 三个必对的参数（演练实证，错一个就出事）
 
@@ -307,25 +509,40 @@ FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f \
 
 ### 5.5 验证（逐条执行，全过才继续）
 
-```bash
-# 1. 内容零改动（决定性验证）
-git log main --format='%T' | sort > /tmp/after.txt
-# 与 §5.1 备份前采集的基线比对，必须逐一一致
+逐条跑，**全过才继续**。基线文件来自 §5.1 第 2 步：
 
-# 2. 文件级 blob 比对
-git ls-tree -r HEAD --format='%(objectname) %(path)' | sort
+```bash
+# 1. 内容零改动（决定性验证）——每个历史版本的 tree 逐一一致
+git log main --format='%T' | sort > /tmp/after_trees.txt
+diff /tmp/before_trees.txt /tmp/after_trees.txt && echo "✅ tree 全一致"
+
+# 2. 文件级 blob 比对 —— HEAD 树逐文件一致
+git ls-tree -r HEAD --format='%(objectname) %(path)' | sort > /tmp/after_files.txt
+diff /tmp/before_files.txt /tmp/after_files.txt && echo "✅ blob 全一致"
 
 # 3. 提交数 / 作者 / 时间戳不变
-git rev-list --count main
-git log -5 --format='%an | %ad' --date=iso
+git rev-list --count main > /tmp/after_count.txt
+diff /tmp/before_count.txt /tmp/after_count.txt && echo "✅ 提交数不变"
+git log -5 --format='%an | %ad' --date=iso > /tmp/after_meta.txt
+diff /tmp/before_meta.txt /tmp/after_meta.txt && echo "✅ 作者与时间戳不变"
 
-# 4. tag 已迁移
+# 4. tag 已迁移到新历史
 git log -1 --format='%h %s' v0.2.0
+
+# 5. 翻译生效：重写后不应再有中文 message
+git log main --format='%B' | rg -c '[\x{4e00}-\x{9fff}]'   # 应为 0
+
+# 6. 正文没丢（§5.2 那个坑的验收）
+git log main --format='%b' | rg -c '\S'   # 有正文的提交数，应与重写前相当
 ```
 
-**验证陷阱**：不要用 `git log --all --format='%T'` 做前后比对。
+**验证陷阱 1**：不要用 `git log --all --format='%T'` 做前后比对。
 重写后 `--all` 会同时遍历新旧两条历史，tree 数量翻倍，产生「内容被改动」的假警报。
 必须限定到具体分支（如 `main`）。
+
+**验证陷阱 2**：第 5 步若为 0 还要看第 6 步。只映射标题会让中文消失（第 5 步也
+是 0），但正文同时也被删了——**两个 0 可能一个是成功、一个是数据丢失**，
+必须用第 6 步区分。
 
 ### 5.6 推送
 
@@ -341,7 +558,27 @@ git push --force --tags
 
 ### 5.7 其余三个仓库
 
-同一流程。alacer 历史已全英文（0/32），**跳过 Phase B**，只做 Phase A 的 188 行。
+| 仓库 | 提交 | 标题含中文 | **正文含中文** | Phase B |
+|---|---|---|---|---|
+| `vimcore` | 236 | 217 | **143** | ✅ 全量重写 |
+| `gpui_vim` | 84 | 33 | **25** | ✅ 重写（`main` + `fork-gpui-pre` 两个分支） |
+| `crossterm_vim` | 39 | 8 | **9** | ✅ 重写 |
+| `alacer` | 35 | 0 | **1** | ⬇️ 见下，实际跳过 |
+
+**alacer 可以跳过 Phase B**，但理由要说准：它不是「零中文」，而是那 1 条
+（`c5ca0e4`）正文里的中文是**引用 panic 消息的字形**：
+
+```
+"start byte index 2 is not a char boundary; it is inside '在'"
+```
+
+翻译它反而破坏语义，与 §4.1.1 要点 4（alacer 断言消息保留原样）同理。
+**这 1 条刻意保留，其余 34 条本来就是英文。**
+
+> 各仓库执行时按 §5.1–5.6 同一流程走，改路径与分支即可。
+> gpui_vim 已清理到 **2 个分支**（`main`、`fork-gpui-pre`），`--branches`
+> 会覆盖两者；`fork-gpui-pre` 是 gpui-pre 产品线，**必须一起重写**，
+> 否则它保留旧历史形成分叉。
 
 ---
 
@@ -351,11 +588,13 @@ git push --force --tags
 |---|---|---|
 | L4 测试数据被误译 | 测试仍绿但覆盖率失效 | §1.1 自查模式 + §4.4 计数验收 |
 | crates.io 已发布版本改不了 | 实测 `vimcore-0.2.1.crate` 含 **8,658 行中文 / 93 文件**（含 4 个已归档的 BUG_AUDIT） | **历史重写不解决此项**。要覆盖只能发新版本，见 **§8** |
-| gpui_vim 多分支分叉 | 5 个分支，漏一个就保留旧历史 | §3 先确认范围，§5.3 用 `--branches` 全覆盖 |
+| gpui_vim 多分支分叉 | 已清理到 **2 个**（`main`、`fork-gpui-pre`）；后者是 gpui-pre 产品线，漏了就保留旧历史 | §5.3 用 `--branches` 全覆盖；§5.7 已列清单 |
 | force push 不可逆 | 推送后无本地回滚点 | §5.1 bundle 备份 + 推送前 `git log` 复核 |
 | 文档机翻失真 | `NOTES.md` 是 vim 语义审计笔记 | §4.3 强制逐篇精译 |
 | ~~归档删除破坏引用~~ | ~~`BUG_AUDIT*.md` 被 6 处引用~~ | ✅ **已处置**（§4.0.1）：27 处引用全部改写并验证，测试 1162 全绿；git 历史 + `.workbuddy/archive/` 双备份可回溯 |
 | 引用数估算失准 | 初估 6 处，实扫 27 处（差 4 倍） | **规矩：任何「改引用」类操作，先 `rg -c` 实扫出准确清单再动手** |
+| **Phase B 正文丢失** | `--msg-filter` 替换整个 message。只映射标题 = 删掉 143+25+9 条正文，**推送后不可逆** | §5.2 强制导出 `%B`（完整 message）；§5.5 第 6 步专门验收「正文没丢」 |
+| 重复提交造成分叉 | 本地脏工作树 ≠ 新工作，可能是已在别处提交过的同一改动 | **规矩：提交前先 `git fetch`，确认 origin 上没有同一改动的另一个提交**。见 §8.5 ③ 的实例 |
 
 ### 关于「外界还没使用」
 
@@ -415,7 +654,7 @@ curl -s https://crates.io/api/v1/crates/<crate> -H 'User-Agent: x' | jq '.crate.
 | crate | 本地版本 | crates.io 最新 | 状态 |
 |---|---|---|---|
 | `vimcore` | 0.2.1 | **0.2.1**（10-12） | 版本一致；包内含 884 行中文审计档案 |
-| `crossterm-vim` | **0.1.1** | **0.1.2**（10-09） | ⚠️ **本地落后已发布版本**，且 `c51ccd4` 修复未发布 |
+| `crossterm-vim` | **0.1.2** | **0.1.2**（10-09） | ✅ 已同步；修复**已随 0.1.2 发布**（见 §8.5 ③） |
 | `gpui-vim-pre` | 0.1.1 | 0.1.1 | 一致（tk 的 Bench 在消费） |
 | `gpui-vim-x` | — | 0.2.0 | 服务 pandagit；本次未核本地 |
 | `alacer` | 0.1.0 | **未发布**（0 版） | 无需发布 |
@@ -442,7 +681,7 @@ curl -s https://crates.io/api/v1/crates/<crate> -H 'User-Agent: x' | jq '.crate.
 | crate | 结论 | 理由 |
 |---|---|---|
 | **`vimcore`** | **建议发 0.2.2**，但**等 Phase A 之后** | 删文档不构成 semver 强制发布；但 0.2.1 包里带 884 行中文档案，只有新版能覆盖 |
-| **`crossterm-vim`** | **应该发** | `c51ccd4` 是真 bug（多字节字符边界落点），下游拿不到 |
+| **`crossterm-vim`** | **不需要发**（结论已更正） | 唯一的实质修复已随 **0.1.2（10-09）** 发布，本地已同步到 `cb86295` |
 | `alacer` | 不需要 | 从未发布 |
 | `gpui-vim-x` | 待核 | 需先确认 main 分支相对 0.2.0 有无新改动 |
 
@@ -475,10 +714,27 @@ Phase B 重写的是 message 不是 tree，不影响发布；但**新版本要�
 0.2.1 实际只发了一个东西：`VimState::refresh_highlights_ro`（`aff0f60`），
 已按 Added / Changed 两节补上，位置在 0.2.0 之上（新版在上）。
 
-⬜ **3. `crossterm-vim` 版本漂移**——本地 0.1.1 落后 crates.io 0.1.2。
-得先查清 0.1.2 是在哪个 worktree/分支发的（本地 `366bcab` 之后无 bump
-提交），再决定发 0.1.2（会冲突，crates.io 不允许重发）还是 **0.1.3**。
-`c51ccd4` 的 `prev_char_offset` 多字节边界修复目前仍未发布。
+✅ **3. `crossterm-vim` 版本漂移——查清了，是重复提交事故**（已处置）
+
+原判断「本地 0.1.1 落后已发布的 0.1.2，修复未发布」**是错的**。真相：
+
+| | `cb86295`（origin/main，10-09） | `c51ccd4`（本地，10-14，已回退） |
+|---|---|---|
+| 代码改动 | `starts[line] + col - c.len_utf8()` | **一字不差，完全相同** |
+| 测试 | 新增独立测试，全偏移扫描 + 钉住 11→8 | 已有测试里加 2 行断言（被前者覆盖） |
+| 版本 | 0.1.1 → **0.1.2** | 无 |
+| 提交信息 | 中文，写明「发 0.1.2 前的红测试根因」 | 英文（迁移后惯例） |
+
+**修复早在 10-09 就随 0.1.2 发布了。** 昨天看到 crossterm_vim 的「脏工作树」
+是 10-09 提交后**残留的同一份改动**（提交信息里提到的红测试根因），被误当成
+新发现提交了，造成 `ahead 1 / behind 1` 分叉。
+
+**处置**：`backup/dup-prev-char-offset-fix` 留 ref → `git reset --hard
+origin/main` → 分叉消除，版本回到 0.1.2，`cargo test` 97 全绿。
+
+> ⚠️ **教训（写进流程）**：提交前必须 `git fetch` 并确认 origin 上**没有
+> 同一改动的另一个提交**。本地脏工作树 ≠ 未提交的新工作——它可能是已经
+> 在别处提交并推送过的同一份改动。判断依据是 diff 内容，不是「工作树脏不脏」。
 
 ### 8.6 已发布 vs 本地构建（对照）
 
