@@ -214,7 +214,7 @@ fn dollar_lands_on_last_char_not_mid_char() {
     // `中文`: the cursor sat mid-char, the block cursor vanished, and `x`
     // deleted nothing (real vim: `$x` removes 文).
     let mut f = edit("中文", 0, 0, &["$"]);
-    assert_eq!(f.cursor(), 3, "光标落在末字符 文 的起点");
+    assert_eq!(f.cursor(), 3, "cursor lands at the start of the last char 文");
     f.feed(["x"]);
     assert_eq!(f.text(), "中");
 
@@ -240,10 +240,10 @@ fn g__skips_trailing_blanks_and_lands_on_char_start() {
     // g_ goes to the last NON-BLANK char; it also used to return `end - 1`,
     // i.e. the trailing blank itself (and mid-char after a wide char).
     let f = edit("abc  ", 0, 0, &["g", "_"]);
-    assert_eq!(f.cursor(), 2, "落在 c 上，跳过行尾空格");
+    assert_eq!(f.cursor(), 2, "lands on c, skipping the trailing blanks");
 
     let f = edit("中文  ", 0, 0, &["g", "_"]);
-    assert_eq!(f.cursor(), 3, "落在 文 的起点");
+    assert_eq!(f.cursor(), 3, "lands at the start of 文");
 
     let f = edit("中文", 0, 0, &["g", "_"]);
     assert_eq!(f.cursor(), 3);
@@ -260,7 +260,7 @@ fn bs_moves_left_in_normal_and_operator_pending() {
     // vim notation: <BS> == <C-h> == h outside insert/cmdline. The tries had
     // no binding at all — normal <BS> only rang the bell.
     let f = edit("abc", 0, 2, &["<BS>"]);
-    assert_eq!(f.cursor(), 1, "normal <BS> 左移一格");
+    assert_eq!(f.cursor(), 1, "normal <BS> moves left one column");
 
     // d<BS> == dh: delete the char to the left
     let f = edit("abc", 0, 2, &["d", "<BS>"]);
@@ -271,7 +271,7 @@ fn bs_moves_left_in_normal_and_operator_pending() {
 #[test]
 fn bs_in_visual_shrinks_selection() {
     let f = edit("abcdef", 0, 3, &["v", "<BS>"]);
-    assert_eq!(f.cursor(), 2, "选区活动端左移");
+    assert_eq!(f.cursor(), 2, "the active end of the selection moves left");
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
 }
 
@@ -434,9 +434,10 @@ fn substitute_cursor_survives_length_changing_earlier_lines() {
 fn gv_restores_forward_selection() {
     // exit_visual used to re-read the selection AFTER parking the cursor on
     // the selection start, collapsing forward selections to one char
-    // 9.1 oracle 复验（2026-10-08）：gv 把 CHARWISE 复选摆成**反向**选区
-    // ——光标落在起点（v3l<Esc>gv 与反向 vb<Esc>gv 都落 offset 0）、锚点
-    // 在终点；旧钉的 (0,3) 是当时引擎行为，非 vim。
+    // 9.1 oracle re-verified (2026-10-08): gv restores a CHARWISE selection as
+    // a **backward** span — the cursor lands at the start (both v3l<Esc>gv and
+    // the backward vb<Esc>gv land at offset 0) with the anchor at the end; the
+    // old pin (0,3) was the engine's behavior at the time, not vim.
     let f = edit(
         "abcdef\nghijkl\n",
         0,
@@ -483,10 +484,11 @@ fn angle_keys_accept_lowercase_modifier_prefixes() {
 #[test]
 fn star_without_word_bells_instead_of_reusing_stale_pattern() {
     // `/two` arms the pattern; `*` on a punctuation-only line must not
-    // re-search "two". 【第十四轮修正】vim 9.1 探针 Q1：光标在非词非空白
-    // 字符上时 `*` **搜该字符的字面**（`*` on '!' 的 pattern 是 `!`）——
-    // 现在引擎搜 `\.`（三个点全高亮、跳到下一个点），不再复用旧 pattern；
-    // 不变式「不复用陈旧 pattern」保持。
+    // re-search "two". [Round-14 correction] vim 9.1 probe Q1: with the cursor
+    // on a non-word non-blank char, `*` **searches that char literally** (the
+    // pattern of `*` on '!' is `!`) — the engine now searches `\.` (all three
+    // dots highlighted, jumping to the next one) instead of reusing the old
+    // pattern; the invariant "never reuse a stale pattern" holds.
     let mut f = Fixture::at("one two\n...\n", 0, 0);
     f.feed(["/", "t", "w", "o", "<Enter>"]); // on line 1's "two"
     f.feed(["j"]); // line 2: "..."
@@ -494,12 +496,12 @@ fn star_without_word_bells_instead_of_reusing_stale_pattern() {
     assert_eq!(
         f.vim.search.pattern.as_deref(),
         Some(r"\."),
-        "* 在 . 上搜字面点，而非复用 two"
+        "* on . searches the literal dot instead of reusing two"
     );
     assert_eq!(
         f.host.highlights.len(),
         3,
-        "高亮 = 三个点（字面 .），不是 /two 的一个匹配"
+        "highlights = the three dots (literal .), not one /two match"
     );
 }
 
@@ -718,11 +720,13 @@ fn fuzz_xorshift(state: &mut u64) -> u64 {
     x
 }
 
-// ---- unbounded-allocation guards (第十轮审查) ---------------------------------
+// ---- unbounded-allocation guards (round-10 review) ---------------------------
 
-/// count-repeat insert 的复制体积必须有字节上限：`99999999i` + 长文本 + <Esc>
-/// 走 `replicate_count_insert`，过去对 `text.repeat(copies)` 不设防，一个小会话
-/// 就能让宿主吃掉数 GB（寄存器粘贴路径早有 16MB 的 `clamped_repeat` 防线）。
+/// The replicated volume of count-repeat insert must be byte-capped:
+/// `99999999i` + long text + <Esc> goes through `replicate_count_insert`,
+/// which used to call `text.repeat(copies)` unguarded — one small session
+/// could make the host eat gigabytes (the register-paste path has long had
+/// the 16MB `clamped_repeat` guard).
 #[test]
 fn count_insert_repeat_volume_is_byte_capped() {
     let mut f = Fixture::new("x\n");
@@ -735,12 +739,13 @@ fn count_insert_repeat_volume_is_byte_capped() {
         len < 17 * 1024 * 1024,
         "count-insert replicated {len} bytes — no cap"
     );
-    // 复制本身仍然发生（cap 之内），不等于完全禁用
+    // replication itself still happens (within the cap); it is not fully disabled
     assert!(len > payload.len(), "replication should still happen");
 }
 
-/// `:set sw=` 巨值曾被原样接受，随后 `>>` 用 `" ".repeat(sw)` 生成缩进——
-/// 现在数值选项在 set_value 边界截到 1e6。
+/// A huge `:set sw=` value used to be accepted verbatim, then `>>` built the
+/// indent with `" ".repeat(sw)` — numeric options are now truncated at 1e6 on
+/// the set_value boundary.
 #[test]
 fn numeric_option_values_are_capped() {
     let mut f = Fixture::new("a\nb\n");
@@ -749,7 +754,8 @@ fn numeric_option_values_are_capped() {
         "9", "<CR>",
     ]);
     assert_eq!(f.vim.options_mut().shiftwidth, 1_000_000);
-    // 缩进本身可用：1e6 以内的值原样生效（>> 只缩进当前行，vim 同款）
+    // indentation itself stays usable: values up to 1e6 take effect as given
+    // (>> indents only the current line, same as vim)
     f.feed([
         ":", "s", "e", "t", " ", "s", "w", "=", "2", "<CR>", ">", ">",
     ]);
@@ -757,21 +763,22 @@ fn numeric_option_values_are_capped() {
     assert_eq!(f.text(), "  a\nb\n");
 }
 
-// ---- insert 模式编辑后的搜索缓存同步（fuzz round 10 抓到的陈旧缓存） ---------
+// ---- search-cache sync after insert-mode edits (stale cache caught by fuzz round 10) -----
 
-/// insert 模式的 <Del>/<BS>/<C-w>/<C-u> 过去不重跑 hlsearch 扫描：缓存的
-/// `last_matches` 留着编辑前的偏移，删除恰好让旧偏移落进多字节字符中间
-/// （"a中b" 删 'a' 后缓存的 1..4 指进 中 的字节内部）。`cancel_cmdline` 会把
-/// 这份缓存原样发布给宿主——宿主对高亮做 offset_to_line 即 panic。
+/// <Del>/<BS>/<C-w>/<C-u> in insert mode used to skip the hlsearch rescan: the
+/// cached `last_matches` kept pre-edit offsets, and a delete could leave an old
+/// offset inside a multibyte char (after deleting 'a' from "a中b", the cached
+/// 1..4 points into the bytes of 中). `cancel_cmdline` published that cache to
+/// the host as-is — the host panics when running offset_to_line on highlights.
 #[test]
 fn insert_mode_deletes_refresh_search_cache() {
-    // /中/ 命中 1..4；删掉 'a' 后新文本 "中b\n" 的命中是 0..3
+    // /中/ matches 1..4; after deleting 'a' the new text "中b\n" matches 0..3
     let mut f = Fixture::new("a中b\n");
     f.feed(["/", "中", "<CR>"]);
     assert_eq!(f.vim.cursor_offset(), 1);
     f.feed(["g", "g"]);
     f.feed(["i"]);
-    f.feed_raw(Key::named("delete")); // <Del> 删 'a'
+    f.feed_raw(Key::named("delete")); // <Del> deletes 'a'
     let text = f.text();
     assert_eq!(text, "中b\n");
     for m in &f.vim.search.last_matches {
@@ -781,17 +788,18 @@ fn insert_mode_deletes_refresh_search_cache() {
         );
     }
     assert_eq!(f.vim.search.last_matches, vec![0..3]);
-    // 宿主看到的高亮同样已刷新
+    // the highlights seen by the host are refreshed too
     assert_eq!(f.host.highlights, vec![0..3]);
 }
 
-/// 同类路径：行内 BS 也必须刷新缓存（修的是同一缺口，两条入口都钉住）。
+/// Same class of path: in-line BS must refresh the cache too (one gap fixed,
+/// both entries pinned).
 #[test]
 fn insert_mode_backspace_refreshes_search_cache() {
     let mut f = Fixture::new("a中b\n");
-    f.feed(["/", "中", "<CR>"]); // 光标停在 中 (offset 1)
+    f.feed(["/", "中", "<CR>"]); // cursor parks on 中 (offset 1)
     f.feed(["i"]);
-    f.feed_raw(Key::named("backspace")); // BS 删掉前面的 'a'
+    f.feed_raw(Key::named("backspace")); // BS deletes the preceding 'a'
     let text = f.text();
     assert_eq!(text, "中b\n");
     for m in &f.vim.search.last_matches {
@@ -803,10 +811,11 @@ fn insert_mode_backspace_refreshes_search_cache() {
     assert_eq!(f.vim.search.last_matches, vec![0..3]);
 }
 
-// ---- 零宽替换（:s/^/x/ 家族）------------------------------------------------
+// ---- zero-width replacements (the :s/^/x/ family) ----------------------------
 
-/// 零宽匹配过去被当作"无替换"跳过且不计入 hits：`` :s/^/>/ `` 静默不动还误报
-/// E486。vim 里这是行首/行尾插入的标准惯用法，必须照常替换。
+/// Zero-width matches used to be skipped as "no replacement" and not counted:
+/// `:s/^/>/` sat silently and even mis-reported E486. In vim this is the
+/// standard idiom for prepending/appending to a line; it must substitute.
 #[test]
 fn substitute_at_caret_prepends_to_the_line() {
     let mut f = Fixture::new("hello\nworld\n");
@@ -821,12 +830,12 @@ fn substitute_dollar_appends_across_range() {
     let mut f = Fixture::new("hello\nworld\n");
     f.feed([":", "%", "s", "/", "$", "/", "<", "/", "<CR>"]);
     assert_eq!(f.text(), "hello<\nworld<\n");
-    // vim: 2 个替换 ≤ 'report'（默认 2），静默（oracle osr2；旧断言误记 2 个
-    // 替换会报 "2 substitutions on 2 lines"）
+    // vim: 2 substitutions <= 'report' (default 2) stay silent (oracle osr2;
+    // the old assertion wrongly recorded a "2 substitutions on 2 lines" report)
     assert_eq!(f.host.statuses, Vec::<String>::new());
 }
 
-/// `a*` 在无 `a` 文本上每处都是零宽匹配：vim `:s/a*/-/` 得 "-bbb"。
+/// `a*` on text without `a` matches zero-width everywhere: vim `:s/a*/-/` yields "-bbb".
 #[test]
 fn substitute_star_pattern_replaces_empty_match() {
     let mut f = Fixture::new("bbb\n");
@@ -835,19 +844,20 @@ fn substitute_star_pattern_replaces_empty_match() {
     assert_eq!(f.host.statuses, Vec::<String>::new());
 }
 
-// ---- 未设置 mark 的范围报错（vim 实证 E20）-----------------------------------
+// ---- ranges with unset marks report E20 (vim-verified) -----------------------
 
-/// `:'<,'>d` 在从未进过 visual 的缓冲上：vim 报 `E20: Mark '< not set`，
-/// 引擎过去一律 E16（把"mark 未设置"和"范围语法错误"混为一谈）。
+/// `:'<,'>d` on a buffer that never entered visual: vim reports
+/// `E20: Mark '< not set`; the engine used to report E16 for everything
+/// (conflating "mark not set" with "bad range syntax").
 #[test]
 fn range_with_unset_visual_marks_reports_e20() {
     let mut f = Fixture::new("abc\n");
     f.feed([":", "'", "<", ",", "'", ">", "d", "<CR>"]);
     assert_eq!(f.host.statuses, ["E20: Mark '< not set"]);
-    assert_eq!(f.text(), "abc\n"); // 缓冲不动
+    assert_eq!(f.text(), "abc\n"); // buffer untouched
 }
 
-/// 普通命名 mark 同理（vim: E20: Mark 'a not set）。
+/// Same for plain named marks (vim: E20: Mark 'a not set).
 #[test]
 fn range_with_unset_named_mark_reports_e20() {
     let mut f = Fixture::new("abc\ndef\n");
@@ -856,24 +866,26 @@ fn range_with_unset_named_mark_reports_e20() {
     assert_eq!(f.text(), "abc\ndef\n");
 }
 
-// ---- Ex 范围语义三连（vim 9.1 探针实证，第十一轮）---------------------------
+// ---- Ex range semantics, three-in-a-row (vim 9.1 probe-verified, round 11) ---
 
-/// 空命令带范围：vim 光标落范围的**最后一个地址**（`:2,5<CR>` 落第 5 行）。
-/// 引擎过去跳到 `first`，`:2,5` 落第 1 行。
+/// An empty command with a range parks the cursor on the range's **last
+/// address** (`:2,5<CR>` lands on line 5). The engine used to jump to `first`,
+/// so `:2,5` landed on line 1.
 #[test]
 fn bare_range_command_moves_to_last_address() {
     let mut f = Fixture::new("l1\nl2\nl3\nl4\nl5\n");
     f.feed([":", "2", ",", "5", "<CR>"]);
-    assert_eq!(f.line(), 4, ":2,5<CR> 光标落第 5 行（末地址）");
+    assert_eq!(f.line(), 4, ":2,5<CR> cursor lands on line 5 (last address)");
 
-    // 单地址 `:5` 行为不变
+    // the single-address `:5` behavior is unchanged
     let mut f = Fixture::new("l1\nl2\nl3\n");
     f.feed([":", "2", "<CR>"]);
     assert_eq!(f.line(), 1);
 }
 
-/// 多地址范围：vim 只保留**最后两个**地址（`:1,2,3d` 于 ['a','b','c','d']
-/// 删第 2-3 行，探针实证）。引擎过去保留首尾，删 1-3 行。
+/// Multi-address ranges: vim keeps only the **last two** addresses (`:1,2,3d`
+/// on ['a','b','c','d'] deletes lines 2-3, probe-verified). The engine used to
+/// keep first+last and deleted lines 1-3.
 #[test]
 fn multi_address_range_keeps_last_two() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
@@ -881,8 +893,9 @@ fn multi_address_range_keeps_last_two() {
     assert_eq!(f.text(), "a\nd\n");
 }
 
-/// 空地址默认当前行（两侧皆然）：`:,3d` 于第 2 行删 2-3、`:2,d` 于第 3 行
-/// 删 2-3（vim 探针）。跳过空段让两条命令都只删了单行。
+/// An empty address defaults to the cursor line (on both sides): `:,3d` from
+/// line 2 deletes 2-3, `:2,d` from line 3 deletes 2-3 (vim probes). Skipping
+/// the empty segment made both commands delete a single line.
 #[test]
 fn empty_range_address_defaults_to_cursor_line() {
     let mut f = Fixture::at("a\nb\nc\nd\ne\n", 1, 0);
@@ -894,20 +907,21 @@ fn empty_range_address_defaults_to_cursor_line() {
     assert_eq!(f.text(), "a\nd\ne\n");
 }
 
-// ---- `&` / 裸 `:s` 重放丢弃上一条的旗标（vim 探针）--------------------------
+// ---- `&` / bare `:s` replays drop the previous command's flags (vim probe) ---
 
-/// vim 9.1：`s/a/B/g` 之后 `&` 于 "xaxax" 只替换首个匹配——`g` **不**随
-/// `&` 重放（`:h :&`）。引擎过去原样重放整条命令行，`g` 被保留。
+/// vim 9.1: after `s/a/B/g`, `&` on "xaxax" replaces only the first match —
+/// `g` is **not** replayed by `&` (`:h :&`). The engine used to replay the
+/// whole command line verbatim, keeping `g`.
 #[test]
 fn ampersand_repeat_drops_substitute_flags() {
     let mut f = Fixture::new("xaxax\nxaxax\n");
     f.feed([":", "s", "/", "a", "/", "B", "/", "g", "<CR>"]);
     assert_eq!(f.text(), "xBxBx\nxaxax\n");
     f.feed(["j", "&"]);
-    assert_eq!(f.text(), "xBxBx\nxBxax\n", "& 重放不带 g 旗标");
+    assert_eq!(f.text(), "xBxBx\nxBxax\n", "& replays without the g flag");
 }
 
-/// 裸 `:s` 与 `&` 同款：不带上一条的旗标。
+/// Bare `:s` behaves like `&`: no flags from the previous command.
 #[test]
 fn bare_colon_s_repeat_drops_substitute_flags() {
     let mut f = Fixture::new("xaxax\nxaxax\n");
@@ -917,25 +931,27 @@ fn bare_colon_s_repeat_drops_substitute_flags() {
     assert_eq!(f.text(), "xBxBx\nxBxax\n");
 }
 
-// ---- mark 跳转作为算子目标（d'a / d`a / y'a / c'a，vim 探针实证）-------------
+// ---- mark jumps as operator targets (d'a / d`a / y'a / c'a, vim-probe-verified) --
 
-/// `d'a` 行级删除「当前行..mark 行」，与方向无关（vim 9.1：光标第 2 行、
-/// mark 第 3 行时删 2-3 行）。旧实现在 complete_char_arg 里只挪光标，
-/// 算子悬空——`d'a` 静默不动，下一个键还会被悬空的 d 污染。
+/// `d'a` deletes linewise from the current line through the mark's line,
+/// direction-agnostic (vim 9.1: cursor on line 2, mark on line 3 deletes
+/// 2-3). The old implementation only moved the cursor in complete_char_arg and
+/// left the operator dangling — `d'a` did nothing silently, and the next key
+/// was polluted by the hanging d.
 #[test]
 fn operator_with_mark_jump_deletes_through_mark_line() {
-    // 光标第 1 行、mark 第 2 行：删 1-2 行
+    // cursor on line 1, mark on line 2: delete lines 1-2
     let mut f = Fixture::new("aaa\nbbb\nccc\n");
     f.feed(["j", "m", "a", "k", "d", "'", "a"]);
     assert_eq!(f.text(), "ccc\n");
 
-    // 反方向：光标第 2 行、mark 第 1 行，删的也是两行
+    // the other direction: cursor on line 2, mark on line 1, still deletes two lines
     let mut f = Fixture::new("aaa\nbbb\nccc\n");
     f.feed(["m", "a", "j", "d", "'", "a"]);
     assert_eq!(f.text(), "ccc\n");
 }
 
-/// `y'a` 行级 yank 到 mark 行；`p` 把两行贴回去。
+/// `y'a` yanks linewise through the mark's line; `p` puts the two lines back.
 #[test]
 fn yank_with_mark_jump_is_linewise() {
     let mut f = Fixture::new("aaa\nbbb\nccc\n");
@@ -943,8 +959,8 @@ fn yank_with_mark_jump_is_linewise() {
     assert_eq!(f.text(), "aaa\nbbb\naaa\nccc\n");
 }
 
-/// ``d`a`` 字级删「光标..mark」排他区间（vim 探针：'one two' 的 two 的 t
-/// 上设 mark，下一行行首 ``d`a`` → 'one three four'）。
+/// ``d`a`` deletes the charwise exclusive span cursor..mark (vim probe: mark on
+/// the t of 'two' in 'one two', then ``d`a`` at the next line's start gives 'one three four').
 #[test]
 fn operator_with_backtick_mark_is_charwise_exclusive() {
     let mut f = Fixture::new("one two\nthree four\n");
@@ -952,7 +968,7 @@ fn operator_with_backtick_mark_is_charwise_exclusive() {
     assert_eq!(f.text(), "one three four\n");
 }
 
-/// mark 未设置时 `d'a` 响铃且缓冲不动（plain `'x` 同款反馈）。
+/// With the mark unset, `d'a` bells and leaves the buffer alone (same feedback as plain `'x`).
 #[test]
 fn operator_with_unset_mark_bells_without_editing() {
     let mut f = Fixture::new("aaa\nbbb\n");
@@ -961,12 +977,13 @@ fn operator_with_unset_mark_bells_without_editing() {
     assert!(f.host.bells > 0);
 }
 
-// ---- <C-a> 光标落在进制前缀字母上（vim 9.1 探针实证）-------------------------
+// ---- <C-a> on radix-prefix letters (vim 9.1 probe-verified) ------------------
 
-/// vim 把 `0x1f` 的前缀字母 `x` 也视为「数字在光标处」：C-a 增的是整个
-/// 字面量（0x1f → 0x20）。旧实现把 `x` 当普通文本，向前抓到裸数字 `1`，
-/// 拼出 `00x2f` 这样的垃圾。`0XAB`/`0b101` 同理；前缀后无合法数位时
-/// （`0backup` 的 `b`）不算数字（vim 不动）。
+/// vim treats the prefix letter `x` of `0x1f` as "number at the cursor": C-a
+/// increments the whole literal (0x1f -> 0x20). The old implementation treated
+/// `x` as plain text and grabbed the bare digit `1` ahead of it, producing
+/// junk like `00x2f`. Same for `0XAB`/`0b101`; with no valid digits after the
+/// prefix (the `b` of `0backup`) it is not a number (vim leaves it alone).
 #[test]
 fn c_a_on_radix_prefix_letter_increments_whole_literal() {
     let mut f = Fixture::new("v 0x1f\n");
@@ -982,8 +999,8 @@ fn c_a_on_radix_prefix_letter_increments_whole_literal() {
     assert_eq!(f.text(), "v 0b111\n");
 }
 
-/// 前缀字母的假阳性守卫：`0b` 后面不是 0/1 时不构成数字（vim: 缓冲不动，
-/// E18 报告）。
+/// False-positive guard on prefix letters: `0b` not followed by 0/1 is not a
+/// number (vim: buffer unchanged, E18 reported).
 #[test]
 fn c_a_on_bogus_binary_prefix_finds_no_number() {
     let mut f = Fixture::new("0backup\n");
@@ -992,7 +1009,7 @@ fn c_a_on_bogus_binary_prefix_finds_no_number() {
     assert!(f.host.statuses.iter().any(|s| s.contains("E18")));
 }
 
-/// 光标在 `077` 的前导 `0` 上：八进制 +1 = `0100`（宽度自然生长）。
+/// Cursor on the leading `0` of `077`: octal +1 = `0100` (width grows naturally).
 #[test]
 fn c_a_on_octal_leading_zero_grows_width() {
     let mut f = Fixture::new("x077\n");
@@ -1002,10 +1019,11 @@ fn c_a_on_octal_leading_zero_grows_width() {
 
 // ---- navigation keys (arrows / Del) vs the `.` record and operators ----------
 
-/// 方向键不属于「修改」，vim 的 redo 缓冲永远不含纯 motion：`<Down>` 后 `x`
-/// 再 `.`，只重放 `x`（在当前光标删一个字符），不下移。旧实现把
-/// `<Down>` 留在未提交的 recording 里，被下一条修改命令一并烤进
-/// `last_change`，`.` 变成「下移+删字符」。
+/// Arrow keys are not a "change": vim's redo buffer never contains a plain
+/// motion. `<Down>` then `x` then `.` replays only `x` (deleting one char at
+/// the current cursor), no downward move. The old implementation left `<Down>`
+/// in the uncommitted recording, so the next change command baked it into
+/// `last_change` and `.` became "move down + delete".
 #[test]
 fn arrow_key_never_leaks_into_dot_replay() {
     let mut f = Fixture::at("abc\ndef\nghi\n", 0, 0);
@@ -1013,9 +1031,10 @@ fn arrow_key_never_leaks_into_dot_replay() {
     assert_eq!(f.text(), "abc\nf\nghi\n");
 }
 
-/// 同一污染窗口的镜像：修改提交后按方向键、再按一个纯 motion，
-/// 未提交的方向键不会活到下一条命令（此前依赖「后续 motion 的提交顺带
-/// 清掉」，方向键自身提交后该窗口彻底关闭）。
+/// Mirror of the same contamination window: an arrow key after a committed
+/// change, then a plain motion — the uncommitted arrow key must not survive to
+/// the next command (previously this relied on the following motion's commit
+/// clearing it; once the arrow key itself commits, the window closes fully).
 #[test]
 fn arrow_key_after_commit_does_not_replay() {
     let mut f = Fixture::at("abc\ndef\nghi\n", 0, 1);
@@ -1024,8 +1043,9 @@ fn arrow_key_after_commit_does_not_replay() {
     assert_eq!(f.text(), "ac\ndef\ngi\n");
 }
 
-/// `<Del>` 是完整的删除命令：自身可被 `.` 重复（旧实现从不提交
-/// change record，`.` 重放的还是上上条命令或什么都没有）。
+/// `<Del>` is a complete delete command: repeatable by `.` itself (the old
+/// implementation never committed a change record, so `.` replayed the command
+/// before last or nothing at all).
 #[test]
 fn delete_key_is_repeatable_by_dot() {
     let mut f = Fixture::at("abc\n", 0, 0);
@@ -1034,7 +1054,7 @@ fn delete_key_is_repeatable_by_dot() {
     assert_eq!(f.text(), "c\n");
 }
 
-/// Del 删除后紧跟的下一命令的 `.` 记录不被 Del 污染。
+/// The `.` record of the command right after a Del is not polluted by the Del.
 #[test]
 fn delete_key_pollutes_no_later_record() {
     let mut f = Fixture::at("abc\ndef\n", 0, 0);
@@ -1045,8 +1065,9 @@ fn delete_key_pollutes_no_later_record() {
     assert_eq!(f.text(), "");
 }
 
-/// 操作符可以吃方向键作为 motion：`d<Down>` = `dj`（vim 同款）。旧实现里
-/// 方向键绕过 operator 管线直接移动光标，操作符悬空、下一个键响铃取消。
+/// Operators can take arrow keys as motions: `d<Down>` = `dj` (same as vim).
+/// In the old implementation the arrow key bypassed the operator pipeline and
+/// moved the cursor directly: the operator hung and the next key bailed with a bell.
 #[test]
 fn operator_completes_with_arrow_motion() {
     let mut f = Fixture::at("abc\ndef\nghi\n", 0, 0);
@@ -1055,8 +1076,9 @@ fn operator_completes_with_arrow_motion() {
     assert_eq!(f.text(), "ghi\n");
 }
 
-/// 前缀计数并入 motion 计数走完整管线：`2d<Down>` = `d2<Down>`，从第 3 行
-/// 下移 2 行 → linewise 删 l3..l5 共 3 行（vim 计数规则：2d3w = 6w）。
+/// A prefix count merging into the motion count runs the full pipeline:
+/// `2d<Down>` = `d2<Down>`; from line 3, moving down 2 lines deletes l3..l5
+/// linewise, 3 lines in all (vim's count rule: 2d3w = 6w).
 #[test]
 fn operator_arrow_count_merges() {
     let mut f = Fixture::at("l1\nl2\nl3\nl4\nl5\nl6\nl7\n", 2, 0);
@@ -1066,26 +1088,28 @@ fn operator_arrow_count_merges() {
     assert_eq!(f.text(), "l1\nl2\nl6\nl7\n");
 }
 
-// ---- 第十九轮：D/C 行模型（vim 9.1 字节级探针）/ r<CR> 计数 / r<C-E>/r<C-Y> ----
+// ---- round 19: D/C line model (vim 9.1 byte-level probes) / r<CR> counts / r<C-E>/r<C-Y> --
 
-/// `D` 在末行（截断存活）保留文件的结尾换行——引擎的尾 `\n` 就是宿主的
-/// 文件 eol，vim 9.1 字节探针：`abc\ndef\n` 末行 `D` → 文件 `abc\nde\n`。
-/// 旧实现吞掉换行，宿主保存后文件丢 eol。
+/// `D` on the last line (truncation survives) keeps the file's trailing
+/// newline — the engine's final `\n` is the host's file eol. vim 9.1 byte
+/// probe: `D` on the last line of `abc\ndef\n` writes `abc\nde\n`. The old
+/// implementation swallowed the newline, so the host-saved file lost its eol.
 #[test]
 fn d_on_last_line_keeps_file_eol() {
     let f = edit("abc\ndef\n", 1, 2, &["D"]);
     assert_eq!(f.text(), "abc\nde\n");
 }
 
-/// `99D` 从行中触达缓冲末：截断的首行 + eol 一起存活（vim 探针 → "a\n"）。
+/// `99D` reaching EOF from mid-line: the truncated first line + eol both survive (vim probe -> "a\n").
 #[test]
 fn count_d_to_eof_keeps_eol() {
     let f = edit("aaaa\nbbbb\n", 0, 1, &["9", "9", "D"]);
     assert_eq!(f.text(), "a\n");
 }
 
-/// `D` 于行首（下方有存活行）= 整行删除，不留幻影空行（vim 探针：
-/// ['a','b','c'] 行首 `2D` → ['c']）。旧实现留下一个空首行。
+/// `D` at a line start (with surviving lines below) = whole-line deletion, no
+/// phantom empty line (vim probe: `2D` at the start of ['a','b','c'] ->
+/// ['c']). The old implementation left an empty first line.
 #[test]
 fn d_at_line_start_deletes_covered_lines_whole() {
     let f = edit("a\nb\nc\n", 0, 0, &["2", "D"]);
@@ -1096,24 +1120,26 @@ fn d_at_line_start_deletes_covered_lines_whole() {
     assert_eq!(f.text(), "");
 }
 
-/// `D` count=1 于行首 = d$ 语义：行被清空但保留（vim PTY 探针
-/// ['a','b','c'] 行首 `D` → "\nb\nc\n"，光标行不消失）。
+/// `D` count=1 at a line start = d$ semantics: the line is emptied but kept
+/// (vim PTY probe: `D` at the start of ['a','b','c'] -> "\nb\nc\n", the cursor
+/// line does not vanish).
 #[test]
 fn d_count_one_at_line_start_empties_the_line() {
     let f = edit("a\nb\nc\n", 0, 0, &["D"]);
     assert_eq!(f.text(), "\nb\nc\n");
 }
 
-/// 唯一行缓冲的行首 `D`：行清空但保留（vim 保持 ≥1 行，探针 → "\n"）。
+/// `D` at the line start of a sole-line buffer: emptied but kept (vim keeps >=1 line, probe -> "\n").
 #[test]
 fn d_at_sole_line_start_keeps_empty_line() {
     let f = edit("abc\n", 0, 0, &["D"]);
     assert_eq!(f.text(), "\n");
 }
 
-/// `C` 与 `D` 在行首分化：C 清空行进入插入（vim 探针 `C` 行首 + z →
-/// "z\nb\nc\n"），行永不消失；中间覆盖行仍然整行消失（round-9 既有 2C
-/// 探针 + round19 `2Cnew` 行首探针 → ['new','cccc','dddd']）。
+/// `C` and `D` diverge at a line start: C empties the line and enters insert
+/// (vim probe: `C` at the line start + z -> "z\nb\nc\n"), the line never
+/// disappears; covered middle lines still vanish whole (existing round-9 2C
+/// probe + round19 `2Cnew` at the line start -> ['new','cccc','dddd']).
 #[test]
 fn c_at_line_start_types_on_the_emptied_line() {
     let mut f = Fixture::at("a\nb\nc\n", 0, 0);
@@ -1128,44 +1154,48 @@ fn c_at_line_start_types_on_the_emptied_line() {
     assert_eq!(f.text(), "new\ncccc\ndddd\n");
 }
 
-/// `N r <CR>` 塌缩为单个换行——`:h r` 明文 "5r<CR> replaces five
-/// characters with a single line break"（vim 字节探针：`3r<CR>` 于
-/// "abcdef" → 一个空行 + "def"）。旧实现产出 N 个换行。
+/// `N r <CR>` collapses to a single line break — `:h r` spells it out: "5r<CR>
+/// replaces five characters with a single line break" (vim byte probe:
+/// `3r<CR>` on "abcdef" -> one empty line + "def"). The old implementation produced N newlines.
 #[test]
 fn count_r_cr_is_one_break() {
     let f = edit("abcdef\n", 0, 0, &["3", "r", "<CR>"]);
     assert_eq!(f.text(), "\ndef\n");
-    // 单个 r<CR> 光标落新行首（既有语义，顺带钉住塌缩后的落点）
+    // a single r<CR> parks the cursor at the new line's start (existing
+    // semantics, pinning the landing spot after the collapse)
     let f = edit("abc\n", 0, 1, &["r", "<CR>"]);
     assert_eq!(f.text(), "a\nc\n");
     assert_eq!(f.cursor(), 2); // first char of the new next line
 }
 
-/// `r<C-E>` / `r<C-Y>`：替换字符取自下/上行同显示列（`:h r`；
-/// `10r<C-E>` 复制下方 10 个字符）。任一侧不够则整条取消（同
-/// `3rx` 只剩两字符的取消语义）。
+/// `r<C-E>` / `r<C-Y>`: the replacement chars come from the same display
+/// column of the line below/above (`:h r`; `10r<C-E>` copies 10 chars from
+/// below). If either side runs short the whole command is cancelled (same
+/// cancel semantics as `3rx` with only two chars left).
 #[test]
 fn r_ctrl_e_y_copies_from_neighbor_line() {
-    // 下方：'a' ← 'X'
+    // below: 'a' <- 'X'
     let f = edit("abc\nXYZ\n", 0, 0, &["r", "<C-e>"]);
     assert_eq!(f.text(), "Xbc\nXYZ\n");
-    // 上方：'Y' ← 'b'
+    // above: 'Y' <- 'b'
     let f = edit("abc\nXYZ\n", 1, 1, &["r", "<C-y>"]);
     assert_eq!(f.text(), "abc\nXbZ\n");
-    // 计数：3r<C-E> 复制 3 个字符
+    // count: 3r<C-E> copies 3 chars
     let f = edit("abc\nXYZW\n", 0, 0, &["3", "r", "<C-e>"]);
     assert_eq!(f.text(), "XYZ\nXYZW\n");
-    // 邻行取不到字符的位是【跳过】不是整条取消（2026-10-09 oracle 复验
-    // 翻转旧钉：`abc`+`XY` 上 3r<C-E> → `XYc`，keys 通道 writefile 实
-    // 证；normal.c nv_replace 的 NUL 臂只 ++col，无 E 报文。旧断言
-    // 「整条取消 + 响铃」为当初采样误读）。同族：`abcdef`+`abX` 上
-    // `0ll2r<C-E>` → `abXdef`，光标落最后处理位。
+    // positions the neighbor line cannot supply are SKIPPED, not a
+    // whole-command cancel (2026-10-09 oracle re-verification flipped the old
+    // pin: 3r<C-E> on `abc`+`XY` -> `XYc`, writefile evidence via the keys
+    // channel; the NUL arm of nv_replace in normal.c only does ++col, no E
+    // message. The old "cancel the whole command + bell" assertion was a
+    // sampling misread). Same family: `abcdef`+`abX` with `0ll2r<C-E>` ->
+    // `abXdef`, cursor on the last processed position.
     let mut f = Fixture::at("abc\nXY\n", 0, 0);
     f.feed(["3", "r", "<C-e>"]);
     assert_eq!(f.text(), "XYc\nXY\n");
 }
 
-/// 未设 mark 的 `'z` / `` `z `` 走 vim 的消息通道（E20），不再只有哑铃。
+/// `'z` / `` `z `` with an unset mark goes through vim's message channel (E20), not just a mute bell.
 #[test]
 fn unset_mark_jump_reports_e20() {
     let mut f = Fixture::at("abc\n", 0, 0);
@@ -1175,8 +1205,9 @@ fn unset_mark_jump_reports_e20() {
     assert!(f.host.statuses.iter().any(|s| s.contains('z')));
 }
 
-/// `:j` 于末行（无接缝可接）是纯 no-op：不进 changelist、不推 `.` mark。
-/// 旧实现照常 bump，changelist 被无操作污染。
+/// `:j` on the last line (no seam to join) is a pure no-op: no changelist
+/// entry, no `.` mark push. The old implementation bumped anyway, polluting
+/// the changelist with a no-op.
 #[test]
 fn ex_join_at_eof_is_a_clean_noop() {
     let mut f = Fixture::at("a\nb\nc\n", 0, 0);
@@ -1190,10 +1221,12 @@ fn ex_join_at_eof_is_a_clean_noop() {
     assert_eq!(f.text(), "\n\nc\n");
 }
 
-/// `:s` 尾随 count 的 EOF 截断：新范围从原 range 末行起、向下方延伸
-/// count-1 行，越界只截尾部（vim 9.1 探针：10 行缓冲 `:5s/a/X/20` →
-/// 5..10 行；`:1,3s/a/X/2` → 3..4 行）。旧实现把窗口起点按截断后的
-/// 末行反推（`last - (n-1)`），`:5s/a/X/20` 变成全文件替换。
+/// EOF clamping of a trailing `:s` count: the effective range starts at the
+/// original range's last line and extends count-1 lines downward, cutting only
+/// the tail past EOF (vim 9.1 probes: `:5s/a/X/20` on a 10-line buffer ->
+/// lines 5..10; `:1,3s/a/X/2` -> lines 3..4). The old implementation
+/// back-computed the window start from the clamped last line (`last - (n-1)`),
+/// turning `:5s/a/X/20` into a whole-file substitution.
 #[test]
 fn ex_substitute_trailing_count_clamps_at_eof_without_sliding() {
     fn ex(f: &mut Fixture, line: &str) {
@@ -1212,15 +1245,17 @@ fn ex_substitute_trailing_count_clamps_at_eof_without_sliding() {
     ex(&mut f, "1,3s/a/X/2");
     assert_eq!(f.text(), "l1a\nl2a\nl3X\nl4X\nl5a\nl6a\nl7a\nl8a\nl9a\nl10a\n");
 
-    // 末行 + count：无下方空间 → 只动末行（探针 `:3s/a/X/2` 于 3 行）
+    // last line + count: no room below -> only the last line changes
+    // (probe `:3s/a/X/2` on 3 lines)
     let mut f = Fixture::at("l1a\nl2a\nl3a\n", 0, 0);
     ex(&mut f, "3s/a/X/2");
     assert_eq!(f.text(), "l1a\nl2a\nl3X\n");
 }
 
-/// E35（`/ab<C-u><CR>`：空 pattern + 无旧 pattern）必须终结 incsearch
-/// 预览——round20 fuzz 抓到 Enter 早退路径不清预览，宿主滞留最后一次
-/// 逐字符发布的匹配集（空 pattern 预览含行尾零宽匹配时越出缓冲范围）。
+/// E35 (`/ab<C-u><CR>`: empty pattern + no previous pattern) must end the
+/// incsearch preview — round20 fuzz caught the Enter early-exit path leaving
+/// the preview set, stranding the host on the last per-char match set (an
+/// empty-pattern preview includes end-of-line zero-width matches beyond the buffer range).
 #[test]
 fn e35_disarms_incsearch_preview() {
     let mut f = Fixture::new("abc\ndefg");
@@ -1232,17 +1267,19 @@ fn e35_disarms_incsearch_preview() {
         .statuses
         .iter()
         .any(|s| s.contains("E35")));
-    // 有旧 pattern 时同款路径走 set_pattern 重发布，不留预览
+    // with a previous pattern the same path goes through set_pattern and
+    // republishes, leaving no preview
     let mut f = Fixture::new("abc abc\n");
     f.feed(["/", "a", "b", "c", "<CR>", "<BS>", "<BS>", "<BS>", "<C-u>", "<CR>"]);
     assert_eq!(f.host.highlights, vec![0..3, 4..7]);
 }
 
-// ---- 第二十轮检视增补（2026-10-04）------------------------------------------
+// ---- round-20 review additions (2026-10-04) ----------------------------------
 
-/// `:marks` 不再重复列出 `^`：exit_insert 同时写 offsets 表的 `set('^')` 与
-/// 引擎跟踪的 `last_insert_exit`，而列表追加分支只对 `.` 去重、对 `^` 无条件
-/// 追加——同一名义 mark 出现两行。
+/// `:marks` no longer lists `^` twice: exit_insert writes both the offsets
+/// table's `set('^')` and the engine-tracked `last_insert_exit`, while the
+/// listing branch deduped only `.` and appended `^` unconditionally — the same
+/// nominal mark appeared on two rows.
 #[test]
 fn marks_listing_does_not_duplicate_caret() {
     let mut f = Fixture::new("hello world\n");
@@ -1258,16 +1295,17 @@ fn marks_listing_does_not_duplicate_caret() {
     assert_eq!(caret_rows, 1, "statuses: {:?}", f.host.statuses);
 }
 
-/// 文本对象探针 floor 到字符边界：offset == line_end（insert 模式光标的
-/// 合法位置）+ CJK 行尾时，旧的 `line_end - 1` 裸字节探针落在多字节字符
-/// 中间 → class_at 读 None → 空行分支误触发，`iw` 静默选中整行。
+/// Text-object probes floor to char boundaries: with offset == line_end (a
+/// legal insert-mode cursor position) plus a CJK line end, the old raw-byte
+/// `line_end - 1` probe landed inside a multibyte char -> class_at read None
+/// -> the empty-line branch fired wrongly and `iw` silently selected the whole line.
 #[test]
 fn word_object_probe_floors_to_char_boundary_at_line_end() {
     use vimcore::buffer::VimBuffer;
     use vimcore::objects::{range, TextObject};
     let f = Fixture::new("中文 bar");
     let buf = &f.buf;
-    // 中(0..3) 文(3..6) 空格(6) bar(7..10)：iw 在 line_end 应选中 "bar"
+    // 中(0..3) 文(3..6) space(6) bar(7..10): iw at line_end should select "bar"
     let r = range(
         buf,
         buf.line_end(0),
@@ -1280,23 +1318,25 @@ fn word_object_probe_floors_to_char_boundary_at_line_end() {
     assert_eq!(r.map(|x| (x.start, x.end)), Some((7, 10)));
 }
 
-/// `:1j` 于末行（无接缝 no-op）的光标落点 = 范围地址行的首非空白，与
-/// `:1` 空命令同款（vim 9.1 PTY 探针：`:1j` 于 "    abc" 后 `x` 删 'a'）。
-/// 旧实现落裸行首（col 0），与 `:1` 的落点自相矛盾。
+/// `:1j` on the last line (no-seam no-op) parks the cursor at the range
+/// address line's first non-blank, same as the empty `:1` command (vim 9.1 PTY
+/// probe: after `:1j` on "    abc", `x` deletes 'a'). The old implementation
+/// landed at the bare line start (col 0), contradicting the `:1` landing spot.
 #[test]
 fn ex_join_noop_parks_on_first_non_blank() {
     let mut f = Fixture::new("    abc\n");
     f.feed(["G", ":", "1", "j", "<CR>"]);
     assert_eq!(f.text(), "    abc\n");
     assert_eq!(f.cursor(), 4, "first non-blank of the indented line");
-    // 修改过的路径落点不变
+    // the already-modified path's landing spot is unchanged
     let f = edit("a\nb\nc\n", 0, 0, &[":", "2", "j", "\r"]);
     assert_eq!(f.text(), "a\nb c\n");
 }
 
-/// `<S-a>` 型映射规范化为可交付形态：handle_key 对纯字符键丢弃 shift，
-/// 旧 parse 保留 shift+小写字母的映射永不触发（按下 shift+a 交付的是 'A'）。
-/// vim 9.1 同款规范化（`:nmap <S-x> ihello` 列表显示 `n  X  ihello`）。
+/// `<S-a>`-style mappings normalize to a deliverable form: handle_key drops
+/// shift on plain char keys, so mappings stored by the old parse with
+/// shift+lowercase could never fire (shift+a delivers 'A'). vim 9.1
+/// normalizes the same way (`:nmap <S-x> ihello` lists as `n  X  ihello`).
 #[test]
 fn shift_letter_mapping_fires() {
     let mut f = Fixture::new("abc\n");
@@ -1305,7 +1345,7 @@ fn shift_letter_mapping_fires() {
         .map_str_noremap(vimcore::keymap::ModeClass::Normal, "<S-a>", "x", true);
     f.feed(["A"]);
     assert_eq!(f.text(), "bc\n", "mapped <S-a> fires on the delivered 'A'");
-    // 普通小写 a 不误触发（append 进 insert，打字落在 'a' 之后）
+    // plain lowercase a must not misfire (append into insert, typing lands after 'a')
     let mut f = Fixture::new("abc\n");
     f.vim
         .keymaps_mut()
@@ -1315,15 +1355,18 @@ fn shift_letter_mapping_fires() {
     assert_eq!(f.text(), "aZbc\n");
 }
 
-// ---- search-as-motion（d/pat・c?pat・v/pat）---------------------------------
+// ---- search-as-motion (d/pat, c?pat, v/pat) ----------------------------------
 //
-// vim 9.1 PTY 探针（round 21）：
-//   * `gg0d/bar\r` 于 "foo bar\nbaz\n" → "bar\nbaz\n"（exclusive 到匹配起点）
-//   * 光标落在匹配上时 wrap（"search hit BOTTOM"），删 wrap 落点之前的部分
-//   * `gg0v/bar\r` → 光标跳到匹配起点、选区扩展、模式保持 VISUAL
-//   * miss → E486，操作符不悬挂
-// 修复前引擎的形状是纯 bug：`d` + `/` 打开提示符但操作符悬空，搜索后下一
-// 个 motion 键误触 `d<motion>`（探针：`j` → dj 删掉整个缓冲）。
+// vim 9.1 PTY probes (round 21):
+//   * `gg0d/bar\r` on "foo bar\nbaz\n" -> "bar\nbaz\n" (exclusive to the match start)
+//   * when the cursor sits on the match it wraps ("search hit BOTTOM") and
+//     deletes up to the wrap landing
+//   * `gg0v/bar\r` -> cursor jumps to the match start, the selection extends,
+//     the mode stays VISUAL
+//   * miss -> E486, the operator does not hang
+// Before the fix the engine's shape was a pure bug: `d` + `/` opened the
+// prompt but left the operator dangling, so the next motion key after the
+// search accidentally fired `d<motion>` (probe: `j` -> dj deleted the whole buffer).
 
 fn feed_prompt(f: &mut Fixture, pattern: &str) {
     for c in pattern.chars() {
@@ -1338,7 +1381,7 @@ fn d_slash_pattern_deletes_through_match_start() {
     f.feed(["d", "/"]);
     feed_prompt(&mut f, "bar");
     assert_eq!(f.text(), "bar\nbaz\n");
-    // 操作符不再悬挂：管线空闲，后续 j 只是移动
+    // the operator no longer dangles: the pipeline is idle, the later j only moves
     assert!(f.vim.is_idle());
     f.feed(["j"]);
     assert_eq!(f.text(), "bar\nbaz\n");
@@ -1366,7 +1409,7 @@ fn d_slash_miss_reports_e486_and_aborts_operator() {
 
 #[test]
 fn d_slash_count_targets_nth_match() {
-    // 2d/foo ≡ d2/foo：第二处匹配
+    // 2d/foo == d2/foo: the second match
     let mut f = Fixture::new("foo foo tail\n");
     f.feed(["d", "/"]);
     feed_prompt(&mut f, "foo");
@@ -1378,8 +1421,9 @@ fn d_question_pattern_deletes_backward_to_match_start() {
     let mut f = Fixture::new("abc def ghi\n");
     f.feed(["$", "d", "?"]);
     feed_prompt(&mut f, "def");
-    // 反向 exclusive span = [match_start, cursor)，光标字符保留——vim 9.1
-    // 探针 `$d?def\r` 于 "abc def ghi" → "abc i\n"（删 "def gh"，'i' 留下）
+    // the backward exclusive span = [match_start, cursor), the cursor char is
+    // kept — vim 9.1 probe `$d?def\r` on "abc def ghi" -> "abc i\n" (deletes
+    // "def gh", 'i' stays)
     assert_eq!(f.text(), "abc i\n");
 }
 
@@ -1403,8 +1447,8 @@ fn v_slash_pattern_extends_selection_and_keeps_visual() {
     feed_prompt(&mut f, "bar");
     assert_eq!(f.vim.mode(), vimcore::mode::Mode::Visual { kind: vimcore::mode::VisualKind::Char });
     assert_eq!(f.cursor(), 4, "cursor at the match start");
-    // 选区含光标字符（visual 语义）：anchor 0..光标 4+1 = "foo b" → d 删之
-    // （vim 9.1 探针 `v/bar\rx` → "ar\nbaz\n"）
+    // the selection includes the cursor char (visual semantics): anchor 0..cursor 4+1 = "foo b" -> d deletes it
+    // (vim 9.1 probe `v/bar\rx` -> "ar\nbaz\n")
     f.feed(["d"]);
     assert_eq!(f.text(), "ar\n");
 }
@@ -1419,7 +1463,7 @@ fn v_slash_cancel_keeps_selection_untouched() {
         f.vim.mode(),
         vimcore::mode::Mode::Visual { kind: vimcore::mode::VisualKind::Char }
     );
-    // 选区仍是 vll 的 [0, 3)
+    // the selection is still vll's [0, 3)
     f.feed(["d"]);
     assert_eq!(f.text(), " bar\n");
 }
@@ -1430,24 +1474,24 @@ fn d_slash_dot_replay_repeats_the_search_motion() {
     f.feed(["d", "/"]);
     feed_prompt(&mut f, "aa");
     assert_eq!(f.text(), "aa mid aa tail\n");
-    // `.` 重放整条 d/pat：光标起再删到下一处 aa
+    // `.` replays the whole d/pat: from the cursor, delete to the next aa
     f.feed(["."]);
     assert_eq!(f.text(), "aa tail\n");
 }
 
 #[test]
 fn plain_slash_after_operatorless_prompt_still_jumps() {
-    // 无操作符时 / 照旧纯跳转（count 语义不变）
+    // without an operator, / still just jumps (count semantics unchanged)
     let mut f = Fixture::new("aa bb aa\n");
     f.feed(["/", "a", "a", "<CR>"]);
-    // 光标自身的匹配被跳过：下一处 aa 在 6
+    // the cursor's own match is skipped: the next aa is at 6
     assert_eq!(f.cursor(), 6);
     f.feed(["2", "/", "b", "<CR>"]);
-    // "b" 匹配 3、4 两处；从 6 起 wrap 到 3，count 2 → 4
+    // "b" matches at 3 and 4; from 6 it wraps to 3, count 2 -> 4
     assert_eq!(f.cursor(), 4);
 }
 
-/// search-motion 的 vim 一致性形态（round 21 探针补充）：
+/// The vim-consistent shape of search-motions (round 21 probe addendum):
 #[test]
 fn d_slash_crosses_newline_to_match() {
     let mut f = Fixture::new("one two\nthree four\n");
@@ -1458,7 +1502,7 @@ fn d_slash_crosses_newline_to_match() {
 
 #[test]
 fn y_slash_pattern_keeps_cursor_planted() {
-    // vim 9.1：y/pat 后光标停在原地（yank 不动光标），x 删的还是原字符
+    // vim 9.1: after y/pat the cursor stays put (yank does not move it), x still deletes the original char
     let mut f = Fixture::new("foo bar\n");
     f.feed(["y", "/"]);
     feed_prompt(&mut f, "bar");
@@ -1477,8 +1521,9 @@ fn gu_slash_pattern_lowercases_through_match() {
 
 #[test]
 fn d_slash_wrap_to_cursor_match_bells_and_aborts() {
-    // 匹配仅在光标处（wrap 回自身）：motion 未动 → 响铃 + 放弃操作符
-    // （vim 9.1 PTY 探针：d/foo 于 "foo" → wrap 消息 + \x07，文本不变）
+    // the match is only at the cursor (wraps back to itself): the motion did
+    // not move -> bell + drop the operator (vim 9.1 PTY probe: d/foo on "foo"
+    // -> wrap message + \x07, text unchanged)
     let mut f = Fixture::new("foo\n");
     f.feed(["d", "/"]);
     feed_prompt(&mut f, "foo");
@@ -1489,33 +1534,34 @@ fn d_slash_wrap_to_cursor_match_bells_and_aborts() {
 
 #[test]
 fn macro_records_and_replays_search_motion() {
-    // q{reg} 内的 d/pat 完整录制（d / p a t CR 六步），@b 回放同形
+    // d/pat inside q{reg} is recorded in full (six keys: d / p a t CR), @b replays the same shape
     let mut f = Fixture::new("foo bar baz\n");
     f.feed(["q", "b", "d", "/"]);
     feed_prompt(&mut f, "bar");
     f.feed(["q"]);
     assert_eq!(f.vim.macro_len('b'), 6);
-    // 宿主契约内换文本（引擎 idle 且 Normal），@b 应删到 bar 起点
+    // swap the text via the host contract (engine idle and Normal); @b should delete to the bar start
     *f.buf.0.borrow_mut() = "xx bar yy\n".to_owned();
     f.vim.cursor.offset = 0;
     f.feed(["@", "b"]);
     assert_eq!(f.text(), "bar yy\n");
 }
 
-// ---- round 22（2026-10-04）：映射键形、提示符 count 溢出、:s 替换转义、:sort E488 ----
+// ---- round 22 (2026-10-04): mapping key spellings, prompt-count overflow, :s replacement escapes, :sort E488 --
 
 #[test]
 fn c_space_mapping_keeps_its_modifier() {
-    // parse_angle 的 "space" 分支曾无条件返回 Key::char(' ')：`<C-Space>`
-    // 的映射被存成普通空格——按空格就会触发它（vim 9.1 :nmap 列表里
-    // <C-Space> 与 <Space> 是两个键）。修饰键必须随形。
+    // parse_angle's "space" branch used to return Key::char(' ')
+    // unconditionally: a `<C-Space>` mapping was stored as a plain space —
+    // pressing space fired it (in vim 9.1's :nmap listing <C-Space> and
+    // <Space> are two keys). The modifiers must come along.
     assert_ne!(
         Key::parse("<C-Space>"),
         Key::parse("<Space>"),
         "<C-Space> must not alias plain Space"
     );
     assert!(Key::parse("<C-Space>").modifiers.control);
-    // 行为面：映射 <C-Space> → ix，普通空格走 l motion
+    // behavior: map <C-Space> -> ix, plain space acts as the l motion
     let mut f = Fixture::new("foo bar");
     f.vim
         .keymaps_mut()
@@ -1523,7 +1569,7 @@ fn c_space_mapping_keeps_its_modifier() {
     f.feed([" "]);
     assert_eq!(f.vim.mode(), vimcore::mode::Mode::Normal);
     assert_eq!(f.cursor(), 1);
-    // 修饰形态本身仍然触发映射
+    // the modified form itself still fires the mapping
     f.feed_raw(Key {
         modifiers: vimcore::key::Modifiers::ctrl(),
         kind: vimcore::key::KeyKind::Char(' '),
@@ -1533,26 +1579,27 @@ fn c_space_mapping_keeps_its_modifier() {
 
 #[test]
 fn lt_and_bar_spellings_keep_modifiers_too() {
-    // 同一丢修饰键家族：<lt>/<bar> 分支
+    // same family of dropped modifiers: the <lt>/<bar> branches
     assert_ne!(Key::parse("<C-lt>"), Key::parse("<"));
     assert_ne!(Key::parse("<M-bar>"), Key::parse("|"));
 }
 
 #[test]
 fn named_ctrl_chord_equals_char_ctrl_chord() {
-    // Key::ctrl("w") 与 Key::ctrl_char('w') 是同一次击键的两种宿主拼法，
-    // 但 insert 模式只认 Char 形——Named 形静默 Unknown（键被吞、什么都不删）。
-    // handle_key 现在把单字符 Named 键折叠为 Char。
+    // Key::ctrl("w") and Key::ctrl_char('w') are two host spellings of the
+    // same keystroke, but insert mode only recognized the Char form — the
+    // Named form silently returned Unknown (key swallowed, nothing deleted).
+    // handle_key now folds single-char Named keys into Char.
     let mut named = Fixture::at("aaaa\nbbbb", 1, 4);
     named.feed_raw(Key::named("x").clone()); // noop warmup, keep harness shape
     let mut f = Fixture::at("aaaa\nbbbb", 1, 4);
     f.feed_raw(Key::ctrl("i")); // Named + ctrl
     f.feed(["e", "s", "c"]);
     let mut g = Fixture::at("aaaa\nbbbb", 1, 4);
-    g.feed_raw(Key::ctrl_char('i')); // Char + ctrl（parse 所产形态）
+    g.feed_raw(Key::ctrl_char('i')); // Char + ctrl (the form parse produces)
     g.feed(["e", "s", "c"]);
-    assert_eq!(f.text(), g.text(), "两种 ctrl 拼法必须等价");
-    // 正向验证：<C-w> 在 insert 模式删掉前一个词
+    assert_eq!(f.text(), g.text(), "both ctrl spellings must be equivalent");
+    // positive check: <C-w> in insert mode deletes the previous word
     let mut h = Fixture::at("aaaa\nbbbb", 1, 4);
     h.feed(["i"]);
     h.feed_raw(Key::ctrl("w"));
@@ -1561,29 +1608,32 @@ fn named_ctrl_chord_equals_char_ctrl_chord() {
 
 #[test]
 fn huge_prompt_count_does_not_overflow_search_jump() {
-    // 提示符前的 count（`3/foo`）走 search_count，绕过了 take_total_count
-    // 的十亿封顶；20 个 9 后 /pat<CR> 曾在 jump_to_match 的 u64 加法上
-    // 溢出——debug 构建直接 panic（release 静默错跳）。步数先按匹配数
-    // 取模，和式永不离开 u64。
+    // the count before the prompt (`3/foo`) goes through search_count,
+    // bypassing take_total_count's one-billion cap; 20 nines then /pat<CR>
+    // used to overflow the u64 addition in jump_to_match — debug builds
+    // panicked outright (release jumped wrongly in silence). The step count is
+    // now taken modulo the match count, so the sum never leaves u64.
     let mut f = Fixture::new("aa\naa\naa\naa");
     f.feed(["/", "a"]);
-    f.feed_raw(Key::enter()); // 光标落 match#1（start_index=1）
-                              // count 在 / 之前键入（9×25 → saturate 到 usize::MAX）
+    f.feed_raw(Key::enter()); // cursor lands on match #1 (start_index=1)
+                              // the count is typed before / (9x25 -> saturates to usize::MAX)
     let mut keys: Vec<&str> = std::iter::repeat_n("9", 25).collect::<Vec<_>>();
     keys.push("/");
     keys.push("a");
     f.feed(keys);
     f.feed_raw(Key::enter());
-    // usize::MAX 步按匹配数取模：8 个匹配，u64::MAX-1 ≡ 6 (mod 8)，从
-    // start_index=2 再走 6 步 → (2+6)%8 = 0 → 第 1 个匹配。关键契约是
-    // 「不溢出 + 有界落点」（旧代码此路径 debug panic / release 错跳）。
+    // usize::MAX steps modulo the match count: 8 matches, u64::MAX-1 ≡ 6 (mod 8),
+    // 6 more steps from start_index=2 -> (2+6)%8 = 0 -> the first match. The key
+    // contract is "no overflow + bounded landing" (the old code debug-panicked on
+    // this path / release jumped wrongly).
     assert_eq!(f.cursor(), 0);
 }
 
 #[test]
 fn substitute_replacement_r_and_n_follow_vim_escapes() {
-    // vim 9.1 字节级探针：替换串 \r 是换行（fX<LF>Yo bar），\n 是 NUL
-    // （fX<NUL>Yo bar）。旧引擎把两者当字面量写进缓冲。
+    // vim 9.1 byte-level probe: in the replacement, \r is a newline
+    // (fX<LF>Yo bar) and \n is NUL (fX<NUL>Yo bar). The old engine wrote both
+    // as literals into the buffer.
     let mut f = Fixture::new("foo bar");
     f.feed([":"]);
     for c in "s/o/X\\rY/".chars() {
@@ -1600,7 +1650,7 @@ fn substitute_replacement_r_and_n_follow_vim_escapes() {
     g.feed_raw(Key::enter());
     assert_eq!(g.text(), "fX\u{0}Yo bar");
 
-    // \\r（转义反斜杠 + r）保持字面，与 vim 一致
+    // \\r (escaped backslash + r) stays literal, same as vim
     let mut h = Fixture::new("foo bar");
     h.feed([":"]);
     for c in "s/o/X\\\\rY/".chars() {
@@ -1612,8 +1662,8 @@ fn substitute_replacement_r_and_n_follow_vim_escapes() {
 
 #[test]
 fn sort_rejects_trailing_count_like_vim() {
-    // :sort 不接受 count——vim 9.1 探针 `:1,3sort 3` 报 E488 且缓冲不动；
-    // 旧引擎静默排序。
+    // :sort takes no count — vim 9.1 probe: `:1,3sort 3` reports E488 and the
+    // buffer stays put; the old engine sorted in silence.
     let mut f = Fixture::new("b\na\nc");
     f.feed([":"]);
     for c in "1,3sort 3".chars() {
@@ -1626,7 +1676,7 @@ fn sort_rejects_trailing_count_like_vim() {
         "statuses = {:?}",
         f.host.statuses
     );
-    // 无数字参数的排序不受影响
+    // sorting without the numeric argument is unaffected
     let mut g = Fixture::new("b\na\nc");
     g.feed([":"]);
     for c in "1,3sort".chars() {
@@ -1638,7 +1688,7 @@ fn sort_rejects_trailing_count_like_vim() {
 
 #[test]
 fn unknown_set_option_reports_e518() {
-    // vim 9.1: `:set foo` → "E518: Unknown option: foo"，其后项不再执行
+    // vim 9.1: `:set foo` → "E518: Unknown option: foo", later items no longer execute
     let mut f = Fixture::new("a\n");
     f.feed([":"]);
     for c in "set foo ts=8".chars() {
@@ -1653,13 +1703,14 @@ fn unknown_set_option_reports_e518() {
         "statuses = {:?}",
         f.host.statuses
     );
-    assert_eq!(f.vim.options.tabstop, 4, "E518 之后的项不再执行");
+    assert_eq!(f.vim.options.tabstop, 4, "items after E518 no longer execute");
 }
 
 #[test]
 fn invalid_substitute_pattern_reports_compile_error() {
-    // RE2 方言拒绝的 pattern 不再哑铃——发布编译错误文本（vim 的传统
-    // 引擎宽容 `[` 不闭合并报 E486，属文档化方言分歧）
+    // patterns the RE2 dialect rejects no longer bell silently — the compile
+    // error text is published (vim's traditional engine tolerates an unclosed
+    // `[` and reports E486; that is a documented dialect divergence)
     let mut f = Fixture::new("a\n");
     f.feed([":"]);
     for c in "s/[/x/".chars() {
@@ -1668,60 +1719,64 @@ fn invalid_substitute_pattern_reports_compile_error() {
     f.feed_raw(Key::enter());
     assert!(f.host.statuses.iter().any(|s| s.contains("Invalid pattern")),
         "statuses = {:?}", f.host.statuses);
-    // 未编译成功不得写入 last_substitute（& 不得重放坏命令）
+    // a pattern that failed to compile must not enter last_substitute (& must not replay a broken command)
     f.feed(["&"]);
     assert_eq!(f.text(), "a\n");
 }
 
-// ---- 第二十三轮检视（2026-10-04） ---------------------------------------------
+// ---- round-23 review (2026-10-04) --------------------------------------------
 
 #[test]
 fn ime_commit_mid_session_is_one_undo_group() {
-    // insert 会话中的 IME 提交走 replace_range：旧实现无条件 end_edit()，
-    // 每次提交拆出一个独立 undo 组，`i<Esc>u` 只撤销最后一次提交。vim 的
-    // 整个 insert 会话（IME 提交含在内）是一个 undo 块。会话外的独立
-    // replace_range（REPL 式替换）仍须关闭自己打开的组（不得悬挂）。
+    // IME commits inside an insert session go through replace_range: the old
+    // implementation called end_edit() unconditionally, so every commit split
+    // out its own undo group and `i<Esc>u` undid only the last commit. vim
+    // treats the whole insert session (IME commits included) as one undo
+    // block. A standalone replace_range outside a session (REPL-style
+    // replacement) must still close the group it opened (no dangling).
     let mut f = Fixture::new("hello");
-    f.feed(["A"]); // 行尾 append，光标 (0,5)
+    f.feed(["A"]); // append at line end, cursor (0,5)
     f.type_text("ab"); // "helloab"
-    f.ime_replace(5..7, "阿"); // 第一次提交 → "hello阿"
+    f.ime_replace(5..7, "阿"); // first commit -> "hello阿"
     f.type_text("cd"); // "hello阿cd"
-    f.ime_replace(8..10, "波"); // 第二次提交 → "hello阿波"
+    f.ime_replace(8..10, "波"); // second commit -> "hello阿波"
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "hello阿波");
     f.feed(["u"]);
-    assert_eq!(f.text(), "hello", "一次 u 应还原整个会话");
-    // 会话外的独立替换：组自开自关，不悬挂到下一个编辑
+    assert_eq!(f.text(), "hello", "one u should restore the whole session");
+    // standalone replacement outside a session: the group opens and closes by
+    // itself, never dangling into the next edit
     let mut g = Fixture::new("hello world");
     g.ime_replace(0..5, "hi");
     g.feed(["u"]);
     assert_eq!(g.text(), "hello world");
-    g.feed(["x"]); // 独立编辑开新组
+    g.feed(["x"]); // an independent edit starts a new group
     g.feed(["u"]);
-    assert_eq!(g.text(), "hello world", "悬挂组不得吞并后续编辑");
+    assert_eq!(g.text(), "hello world", "a dangling group must not swallow later edits");
 }
 
 #[test]
 fn enter_as_char_arg_only_serves_replace() {
-    // vim PTY 探针：f<CR>/t<CR>/m<CR>/'<CR> 都不动作。旧引擎把 Enter 无条件
-    // 映射成 '\n'：f<CR> 失败却覆写 last_find（下一个 ; 变成找换行）、
-    // '<CR> 产出带换行的 E20 消息。r<CR>/visual r<CR> 仍消费 Enter。
+    // vim PTY probe: f<CR>/t<CR>/m<CR>/'<CR> all do nothing. The old engine
+    // mapped Enter to '\n' unconditionally: f<CR> failed yet overwrote
+    // last_find (the next ; searched for a newline), and '<CR> produced an E20
+    // message containing a newline. r<CR>/visual r<CR> still consume Enter.
     let mut f = Fixture::new("a b a c a");
-    f.feed(["f", "a"]); // 光标落第 2 个 a（offset 4）
+    f.feed(["f", "a"]); // cursor lands on the 2nd a (offset 4)
     assert_eq!(f.cursor(), 4);
     let bells_before = f.host.bells;
-    f.feed(["f", "<CR>"]); // 失败：响铃，不动光标
+    f.feed(["f", "<CR>"]); // fails: bell, cursor unmoved
     assert!(f.host.bells > bells_before);
     assert_eq!(f.cursor(), 4);
-    f.feed([";"]); // last_find 仍是 'a' → 落第 3 个 a（offset 8）
-    assert_eq!(f.cursor(), 8, "; 应重复上一次成功的 f，而不是找换行");
-    // m<CR>：非法 mark 名 → 响铃，无消息
+    f.feed([";"]); // last_find is still 'a' -> lands on the 3rd a (offset 8)
+    assert_eq!(f.cursor(), 8, "; repeats the last successful f, not a newline search");
+    // m<CR>: illegal mark name -> bell, no message
     let mut g = Fixture::new("abc");
     let b0 = g.host.bells;
     g.feed(["m", "<CR>"]);
     assert!(g.host.bells > b0);
     assert!(g.host.statuses.is_empty(), "statuses = {:?}", g.host.statuses);
-    // '<CR>：无 mark → 响铃；消息不得含裸换行（旧 E20 文本会跨行）
+    // '<CR>: no mark -> bell; the message must not contain a bare newline (the old E20 text spanned lines)
     let mut h = Fixture::new("abc");
     h.feed(["'", "<CR>"]);
     assert!(
@@ -1729,12 +1784,12 @@ fn enter_as_char_arg_only_serves_replace() {
         "statuses = {:?}",
         h.host.statuses
     );
-    // visual r<CR>：每个选中字符换成一个换行（vim PTY 探针：vllr<CR> 于
-    // "abcdef" → 三空行 + "def"）
+    // visual r<CR>: every selected char becomes one line break (vim PTY
+    // probe: vllr<CR> on "abcdef" -> three empty lines + "def")
     let mut v = Fixture::new("abcdef");
     v.feed(["v", "l", "l", "r", "<CR>"]);
     assert_eq!(v.text(), "\n\n\ndef");
-    // r<CR>：拆行语义不受影响
+    // r<CR>: the line-splitting semantics are unaffected
     let mut r = Fixture::new("abc");
     r.feed(["r", "<CR>"]);
     assert_eq!(r.text(), "\nbc");
@@ -1742,8 +1797,9 @@ fn enter_as_char_arg_only_serves_replace() {
 
 #[test]
 fn set_bad_numeric_value_reports_e521() {
-    // vim 9.1 -es 实证：`:set ts=` → "E521: Number required after =: ts="。
-    // 旧实现落进 E518（Unknown option），把「值非法」误报成「选项不存在」。
+    // vim 9.1 -es evidence: `:set ts=` → "E521: Number required after =: ts=".
+    // The old implementation fell into E518 (Unknown option), reporting an
+    // illegal VALUE as a nonexistent OPTION.
     for bad in ["ts=", "ts=x"] {
         let mut f = Fixture::new("a\n");
         f.feed([":"]);
@@ -1759,9 +1815,9 @@ fn set_bad_numeric_value_reports_e521() {
             "set {bad}: statuses = {:?}",
             f.host.statuses
         );
-        assert_eq!(f.vim.options.tabstop, 4, "set {bad}: 值不得被改写");
+        assert_eq!(f.vim.options.tabstop, 4, "set {bad}: the value must not be rewritten");
     }
-    // 未知选项名仍是 E518（两个错误类别不串）
+    // an unknown option name is still E518 (the two error classes do not cross)
     let mut f = Fixture::new("a\n");
     f.feed([":"]);
     for c in "set foo=1".chars() {
@@ -1780,15 +1836,16 @@ fn set_bad_numeric_value_reports_e521() {
 
 #[test]
 fn sort_unknown_flag_reports_e475_and_skips() {
-    // vim 9.1 PTY 探针：`:sort z` → "E475: Invalid argument: z" 且缓冲不动；
-    // 旧引擎静默排序（未知旗标被当不存在）。
+    // vim 9.1 PTY probe: `:sort z` → "E475: Invalid argument: z" with the
+    // buffer untouched; the old engine sorted in silence (unknown flags were
+    // treated as absent).
     let mut f = Fixture::new("b\na");
     f.feed([":"]);
     for c in "sort z".chars() {
         f.feed_raw(vimcore::key::Key::char(c));
     }
     f.feed_raw(Key::enter());
-    assert_eq!(f.text(), "b\na", "E475 后不得执行排序");
+    assert_eq!(f.text(), "b\na", "no sort may run after E475");
     assert!(
         f.host
             .statuses
@@ -1801,12 +1858,14 @@ fn sort_unknown_flag_reports_e475_and_skips() {
 
 #[test]
 fn sort_numeric_flag_orders_by_first_number() {
-    // `n` 旗标：按行内第一个十进制数排序；【无数值的行整段排在数字行
-    // 之前】（2026-10-09 oracle 复验翻转旧钉：`abc/5/-3/7/x` 上 :sort n
-    // → `abc x -3 5 7`，非数字段前置；test_sort.vim Test_sort_large_num
-    // 同文 "Non-numeric lines are ordered before numerical lines"。旧断
-    // 言「无数字行视为 0 混进数字段」为当初误读）。等值行保持原序
-    // （stable），`u` 按 sort 键去重。
+    // the `n` flag: sort by the first decimal number in the line; lines
+    // WITHOUT a number form their own segment BEFORE all numeric lines
+    // (2026-10-09 oracle re-verification flipped the old pin: `:sort n` on
+    // `abc/5/-3/7/x` → `abc x -3 5 7`, non-numeric segment first;
+    // test_sort.vim Test_sort_large_num says the same: "Non-numeric lines are
+    // ordered before numerical lines". The old assertion "numberless lines
+    // count as 0 inside the numeric segment" was a misread at the time).
+    // Equal-key lines keep their order (stable); `u` dedups by sort key.
     let mut f = Fixture::new("10 apples\n2 bananas\nno number\n-3 x");
     f.feed([":"]);
     for c in "%sort n".chars() {
@@ -1814,7 +1873,7 @@ fn sort_numeric_flag_orders_by_first_number() {
     }
     f.feed_raw(Key::enter());
     assert_eq!(f.text(), "no number\n-3 x\n2 bananas\n10 apples");
-    // nu：数值去重
+    // nu: dedup by numeric value
     let mut g = Fixture::new("2 a\n10 b\n2 c\nzzz");
     g.feed([":"]);
     for c in "%sort nu".chars() {
@@ -1826,17 +1885,18 @@ fn sort_numeric_flag_orders_by_first_number() {
 
 #[test]
 fn is_idle_is_false_while_a_prompt_is_open() {
-    // `:`/`/` 提示符期间 is_idle 必须为 false：宿主以它为按键拦截闸门，
-    // 提示符里的字面文本（如 `:ru` 的 u）被劫持会吃字。
+    // is_idle must be false while a `:`/`/` prompt is open: the host uses it
+    // as the key-interception gate, and hijacking the prompt's literal text
+    // (the u in `:ru`, e.g.) would eat characters.
     let mut f = Fixture::new("abc");
     assert!(f.vim.is_idle());
     f.feed([":"]);
-    assert!(!f.vim.is_idle(), "开着的提示符是未完成的输入");
+    assert!(!f.vim.is_idle(), "an open prompt is unfinished input");
     f.feed(["r"]);
     assert!(!f.vim.is_idle());
     f.feed(["<Esc>"]);
     assert!(f.vim.is_idle());
-    // insert 模式仍算 idle（文本输入是宿主的职责）
+    // insert mode still counts as idle (text input is the host's job)
     let mut g = Fixture::new("abc");
     g.feed(["i"]);
     assert!(g.vim.is_idle());
@@ -1844,9 +1904,9 @@ fn is_idle_is_false_while_a_prompt_is_open() {
 
 #[test]
 fn double_prefill_range_takes_last_two_addresses() {
-    // 视觉 `:` 预填 `'<,'>` 后又手打一遍（宏/重放事故形态）：
-    // 无视觉选区时首个 `'<` 报干净的 E20（mark 名，不带 token 垃圾尾巴），
-    // 缓冲不动、不 panic
+    // visual `:` prefills `'<,'>` and the same is then typed by hand (the
+    // macro/replay accident shape): with no visual selection the first `'<`
+    // reports a clean E20 (mark name, no token-junk tail), buffer untouched, no panic
     let mut g = Fixture::new("a\nb\nc");
     g.feed([":"]);
     for c in "'<,'>'<,'>d".chars() {
@@ -1863,36 +1923,38 @@ fn double_prefill_range_takes_last_two_addresses() {
     assert_eq!(quoted, "E20: Mark '< not set", "{quoted}");
 }
 
-// ---- 第二十四轮:行尾字素簇的光标落点 ------------------------------------------
+// ---- round 24: cursor landing on trailing grapheme clusters -------------------
 //
-// 行尾是字素簇(decomposed 组合字符、VS16、ZWJ 家族)时,行尾回退必须落在
-// 簇起点而不是最后一个"字符"上——组合字符宽度为 0,光标停在那里的话 `x`
-// 会把簇拆开(只删 mark,留下裸基字符)。
+// When the line ends with a grapheme cluster (decomposed combining chars,
+// VS16, ZWJ families), the line-end rollback must land on the CLUSTER START,
+// not on the last "char" — a combining char has width 0, and parking the
+// cursor there lets `x` split the cluster (deleting only the mark, leaving a
+// bare base char).
 
 #[test]
 fn esc_after_trailing_cluster_lands_on_cluster_start() {
-    // insert "á"(a + U+0301)后 Esc:光标必须落在 'a'(0),不是 mark(1)
+    // after inserting "á" (a + U+0301) and Esc: the cursor must land on 'a' (0), not the mark (1)
     let mut f = Fixture::new("\n");
     f.feed(["i"]);
     f.type_text("a\u{0301}");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "a\u{0301}\n");
-    assert_eq!(f.cursor(), 0, "Esc 后光标应落在字素簇起点");
-    // 随后的 x 删除整个簇
+    assert_eq!(f.cursor(), 0, "after Esc the cursor should sit at the grapheme-cluster start");
+    // the following x deletes the whole cluster
     f.feed(["x"]);
-    assert_eq!(f.text(), "\n", "x 必须删除整个字素簇");
+    assert_eq!(f.text(), "\n", "x must delete the whole grapheme cluster");
 }
 
 #[test]
 fn esc_after_variation_selector_lands_on_base() {
-    // "#"+U+FE0F(emoji 呈现选择符)
+    // "#"+U+FE0F (emoji presentation selector)
     let mut f = Fixture::new("\n");
     f.feed(["i"]);
     f.type_text("#\u{FE0F}");
     f.feed(["<Esc>"]);
-    assert_eq!(f.cursor(), 0, "VS16 簇:光标应落在 '#'");
+    assert_eq!(f.cursor(), 0, "VS16 cluster: the cursor should land on '#'");
     f.feed(["x"]);
-    assert_eq!(f.text(), "\n", "x 必须删除 # 与 VS16");
+    assert_eq!(f.text(), "\n", "x must delete both # and VS16");
 }
 
 #[test]
@@ -1902,158 +1964,169 @@ fn esc_after_zwj_family_lands_on_first_member() {
     f.feed(["i"]);
     f.type_text(fam);
     f.feed(["<Esc>"]);
-    assert_eq!(f.cursor(), 0, "emoji 家族:光标应落在首个成员");
+    assert_eq!(f.cursor(), 0, "emoji family: the cursor should land on the first member");
     f.feed(["x"]);
-    assert_eq!(f.text(), "\n", "x 必须删除整个家族");
+    assert_eq!(f.text(), "\n", "x must delete the whole family");
 }
 
 #[test]
 fn dollar_parks_on_trailing_cluster_start() {
-    // `$` 的行尾落点同样是簇起点(旧实现落在 mark 上)。
-    // 行 "ab\u{0301}":a@0, b@1, mark@2..4;mark 的簇起点是 b(1)
+    // the `$` line-end landing is also the cluster start (the old implementation landed on the mark).
+    // line "ab\u{0301}": a@0, b@1, mark@2..4; the mark's cluster starts at b (1)
     let f = edit("ab\u{0301}\n", 0, 0, &["$"]);
-    assert_eq!(f.cursor(), 1, "$ 应落在 b(mark 所属簇的起点)");
+    assert_eq!(f.cursor(), 1, "$ should land on b (the start of the cluster owning the mark)");
 }
 
 #[test]
 fn j_onto_trailing_cluster_lands_on_cluster_start() {
-    // j 到行尾簇行:display-column 钳制也必须落簇起点
+    // j onto a line ending in a cluster: the display-column clamp must also land on the cluster start
     let f = edit("hello\nab\u{0301}\n", 0, 0, &["j"]);
     assert_eq!(f.line(), 1);
-    assert_eq!(f.cursor(), 6, "j 后应落在 'a'(第二行起点)");
-    // 从列 1 j 下去 → 落在 b(簇起点)
+    assert_eq!(f.cursor(), 6, "after j the cursor should land on 'a' (start of line 2)");
+    // j down from column 1 -> lands on b (cluster start)
     let f = edit("hello\nab\u{0301}\n", 0, 1, &["j"]);
-    assert_eq!(f.cursor(), 7, "j 应落在 b(簇起点),不是 mark");
+    assert_eq!(f.cursor(), 7, "j should land on b (cluster start), not the mark");
 }
 
 #[test]
 fn g_skips_trailing_combining_mark() {
-    // g_ 找最后非空白字符:行尾 mark 不是落点,应落到基字符
+    // g_ finds the last non-blank char: the trailing mark is not the landing spot, it falls to the base char
     let f = edit("ab\u{0301}\n", 0, 0, &["g", "_"]);
-    assert_eq!(f.cursor(), 1, "g_ 应落在 b(簇起点),不是 mark");
+    assert_eq!(f.cursor(), 1, "g_ should land on b (cluster start), not the mark");
 }
 
-// ---- 第二十四轮:全角空白(U+3000)的 w/W 语义 ------------------------------------
+// ---- round 24: w/W semantics around the ideographic space (U+3000) -----------
 
 #[test]
 fn w_skips_ideographic_space() {
-    // U+3000 是 is_whitespace:vim 的 w 从不停在空白字符上
-    // a=1 字节, U+3000=3 字节 → 'b' 在 4
+    // U+3000 is is_whitespace: vim's w never stops on a blank char
+    // a=1 byte, U+3000=3 bytes -> 'b' sits at 4
     let f = edit("a\u{3000}b\n", 0, 0, &["w"]);
-    assert_eq!(f.cursor(), 4, "w 应跳过全角空格落在 b");
+    assert_eq!(f.cursor(), 4, "w should skip the fullwidth space and land on b");
     let f = edit("a\u{3000}b\n", 0, 0, &["W"]);
-    assert_eq!(f.cursor(), 4, "W 同");
+    assert_eq!(f.cursor(), 4, "same for W");
 }
 
 #[test]
 fn w_crosses_ideographic_space_only_line() {
-    // 全角空格独占行不是空行:vim 的 w 自由越过(与 ASCII 空白行同款)。
-    // 行0 "x\u{3000}\n" 占 0..5;行1 "\u{3000}y":U+3000@5..8, y@8
+    // A line holding only an ideographic space is not an empty line: vim's w
+    // crosses it freely (same shape as ASCII blank lines).
+    // line 0 "x\u{3000}\n" spans 0..5; line 1 "\u{3000}y": U+3000@5..8, y@8
     let f = edit("x\u{3000}\n\u{3000}y\n", 0, 0, &["w"]);
-    assert_eq!(f.line(), 1, "应落在 y(第二行),不是空白处");
+    assert_eq!(f.line(), 1, "should land on y (line 2), not on a blank");
     assert_eq!(f.cursor(), 8);
 }
 
 #[test]
 fn g_ignores_ideographic_space_tail() {
-    // g_ 跳过尾部空白(含全角)落在最后非空白字符
+    // g_ skips trailing blanks (fullwidth included) and lands on the last non-blank char
     let f = edit("ab\u{3000}\n", 0, 0, &["g", "_"]);
-    assert_eq!(f.cursor(), 1, "g_ 应落在 b");
+    assert_eq!(f.cursor(), 1, "g_ should land on b");
 }
 
-// ---- 第二十四轮:f/t/F/T 的 till 停点簇感知 --------------------------------------
+// ---- round 24: cluster awareness of the f/t/F/T till stopping points ---------
 
 #[test]
 fn till_stops_never_park_on_combining_mark() {
-    // 行 "áx"(a + U+0301 + x):`tx` 的停点是 mark 所属簇的起点 'a'(0),
-    // 旧实现落在 mark 上(offset 1,簇中间)
+    // line "áx" (a + U+0301 + x): the `tx` stopping point is the start of the
+    // cluster owning the mark, 'a' (0); the old implementation landed on the
+    // mark (offset 1, mid-cluster)
     let f = edit("a\u{0301}x\n", 0, 0, &["t", "x"]);
-    assert_eq!(f.cursor(), 0, "tx 应停在簇起点 a");
-    // 反向:`Fa` 从 x? 此行无左侧 a——用 "xá" 测 Ta 的对称分支
+    assert_eq!(f.cursor(), 0, "tx should stop at the cluster start a");
+    // backward: is there an `Fa` left of x? this line has no a to the left —
+    // use "xá" to exercise Ta's symmetric branch
     let f = edit("xa\u{0301}b\n", 0, 4, &["F", "a"]);
-    assert_eq!(f.cursor(), 1, "Fa 落在 a(簇起点)");
-    // `ta` 的停点是 hit 前一个簇(á)的起点=光标原地(视觉上同一复合字符;
-    // 字节级 vim 也会落进组合字符内——引擎钳到簇起点)
+    assert_eq!(f.cursor(), 1, "Fa lands on a (cluster start)");
+    // `ta`'s stopping point is the start of the cluster before the hit (á) =
+    // the cursor stays in place (visually the same composite char; byte-wise
+    // vim would also land inside the combining char — the engine clamps to the cluster start)
     let f = edit("xa\u{0301}b\n", 0, 1, &["t", "b"]);
-    assert_eq!(f.cursor(), 1, "ta 停点 = hit 前一簇的起点(原地)");
+    assert_eq!(f.cursor(), 1, "ta stop = start of the cluster before the hit (in place)");
 }
 
 #[test]
 fn paste_lands_on_last_cluster_start() {
-    // yank 一个含组合字符的词后 p:光标落在最后一个簇的起点
+    // after yanking a word containing a combining char and p: the cursor
+    // lands on the start of the last cluster
     let mut f = Fixture::new("a\u{0301}b\n");
     f.feed(["y", "l"]); // yank "á"
     f.feed(["$", "p"]);
     assert_eq!(f.text(), "a\u{0301}ba\u{0301}\n");
-    assert_eq!(f.cursor(), 4, "p 后光标应落在粘贴文本最后簇的起点(第二个 á)");
+    assert_eq!(f.cursor(), 4, "after p the cursor should land on the start of the pasted text's last cluster (the second á)");
 }
 
 #[test]
 fn insert_backspace_deletes_whole_cluster() {
-    // IME 落地 "e"+U+0301 后 BS:删除整簇(vim delcombine=off 默认)
+    // after the IME commits "e"+U+0301, BS deletes the whole cluster (vim's delcombine=off default)
     let mut f = Fixture::new("\n");
     f.feed(["i"]);
     f.type_text("e\u{0301}");
     f.feed_raw(vimcore::key::Key::named("backspace"));
-    assert_eq!(f.text(), "\n", "BS 应删除 e+mark 整簇");
+    assert_eq!(f.text(), "\n", "BS should delete the whole e+mark cluster");
 }
 
-// ---- round 25:字素簇 × 行边界(w 空白跳过 / GB4 硬边界 / Del) ------------------
+// ---- round 25: grapheme clusters × line boundaries (w blank skip / GB4 hard boundary / Del) --
 
 #[test]
 fn w_skips_continuation_chars_attached_to_blanks() {
-    // `w` 的空白跳过必须把延续字符并入所属空白簇(基字符是空格):
-    // round 24 修了 b(prev_word_start 的 is_cont 臂)但漏了正向的 w——
-    // 光标停在宽度 0 的 mark 上,违反「光标不停宽度 0 字符」不变量。
+    // `w`'s blank skip must fold continuation chars into the blank cluster
+    // they belong to (base char being the space): round 24 fixed b
+    // (prev_word_start's is_cont arm) but missed forward w — the cursor parked
+    // on the width-0 mark, violating the "never stop on a width-0 char" invariant.
     let f = edit("a \u{0301}bc", 0, 0, &["w"]);
-    assert_eq!(f.cursor(), 4, "w 应越过空格+mark 落在 b");
+    assert_eq!(f.cursor(), 4, "w should cross space+mark and land on b");
     let f = edit("  \u{0301}abc", 0, 0, &["w"]);
-    assert_eq!(f.cursor(), 4, "缩进后的 mark 同样归属空白簇");
-    // "abc\ne \u{0301}fgh\nijk":mark 占 2 字节(6..8),f 簇起点在 8
+    assert_eq!(f.cursor(), 4, "a mark after indentation likewise belongs to the blank cluster");
+    // "abc\ne \u{0301}fgh\nijk": the mark takes 2 bytes (6..8), the f cluster starts at 8
     let f = edit("abc\ne \u{0301}fgh\nijk", 0, 4, &["w"]);
-    assert_eq!(f.cursor(), 8, "跨行场景:w 落在 f 簇起点,不停在 mark");
+    assert_eq!(f.cursor(), 8, "cross-line case: w lands on the f cluster start, not on the mark");
 }
 
 #[test]
 fn standalone_mark_line_is_its_own_cluster() {
-    // \n 是硬字素边界(UAX #29 GB4):行首独立 mark 不与上一行的 \n 胶合。
-    // 旧 prev_grapheme_offset 把 mark 回溯进 \n,w 到缓冲尾后 clamp_cursor
-    // 把光标钳到上一行的换行符上,x 会删掉换行并线。
+    // \n is a hard grapheme boundary (UAX #29 GB4): a standalone mark at the
+    // line start does not glue to the previous line's \n. The old
+    // prev_grapheme_offset walked the mark back into the \n, and after w
+    // reached the buffer end clamp_cursor parked the cursor on the previous
+    // line's newline, so x would delete the newline and join the lines.
     let f = edit("x\n\u{0301}", 0, 0, &["w"]);
-    assert_eq!(f.line(), 1, "w 应到达 mark 行");
-    assert_eq!(f.cursor(), 2, "落点是 mark 自身(独立簇,行首形态)");
-    assert_ne!(f.cursor(), f.buf.line_end(0), "不得停在上一行的换行符位置");
+    assert_eq!(f.line(), 1, "w should reach the mark line");
+    assert_eq!(f.cursor(), 2, "the landing is the mark itself (a standalone cluster, line-start shape)");
+    assert_ne!(f.cursor(), f.buf.line_end(0), "must not stop at the previous line's newline position");
 
-    // $ 于独立 mark 行:落点收在行内(mark),不越过行边界
+    // $ on a standalone-mark line: the landing stays inside the line (the mark), never past the line boundary
     let f = edit("ab\n\u{0301}", 0, 3, &["$"]);
-    assert_eq!(f.line(), 1, "$ 不得跳到上一行");
+    assert_eq!(f.line(), 1, "$ must not jump to the previous line");
 }
 
 #[test]
 fn zwj_at_line_start_does_not_glue_following_starter() {
-    // round 26:prev_grapheme_offset 的「starter 的前置 ZWJ 胶合」规则
-    // 没有检查 ZWJ 自身是否被胶合。行首(或缓冲首)的 ZWJ 在正向扫描里
-    // 自成一簇,backward 却把后面的 starter 胶给它——两个方向对同一
-    // 位置给出不同的簇边界:`$` 停在隐形 ZWJ 上,`x` 只删掉连接符、
-    // 剩下裸基字符(本应删掉的就是那个可见字符)。
-    // "ab\n\u{200D}b":ZWJ 占 3..6,b 在 6
+    // round 26: the "pre-ZWJ gluing to a following starter" rule in
+    // prev_grapheme_offset never checked whether the ZWJ itself is glued.
+    // A ZWJ at line start (or buffer start) forms its own cluster in the
+    // forward scan, yet backward glued the following starter to it — the two
+    // directions gave different cluster boundaries at the same position: `$`
+    // parked on the invisible ZWJ and `x` deleted only the joiner, leaving a
+    // bare base char (the visible char was the one that should have gone).
+    // "ab\n\u{200D}b": ZWJ occupies 3..6, b at 6
     let mut f = edit("ab\n\u{200D}b", 1, 0, &["$"]);
-    assert_eq!(f.cursor(), 6, "$ 落在可见字符 b 上,不停在隐形 ZWJ 上");
+    assert_eq!(f.cursor(), 6, "$ lands on the visible b, not the invisible ZWJ");
     f.feed(["x"]);
-    assert_eq!(f.text(), "ab\n\u{200D}", "x 删除 b,行首独立 ZWJ 保留");
-    // 缓冲首形态:ZWJ 后的 starter 同样不被胶合
+    assert_eq!(f.text(), "ab\n\u{200D}", "x deletes b; the standalone line-start ZWJ survives");
+    // buffer-start form: the starter after ZWJ is likewise not glued
     let f = Fixture::new("\u{200D}b");
     assert_eq!(
         vimcore::buffer::prev_grapheme_offset(&f.buf, 4),
         Some(3),
-        "缓冲首 ZWJ 也不胶合 starter"
+        "buffer-start ZWJ does not glue the starter either"
     );
 }
 
 #[test]
 fn grapheme_scan_directions_agree() {
-    // 镜像一致性不变量:正向扫描切出的每个簇 [s,e),backward 从 e 回溯
-    // 必须回到 s。正反两套语义一旦漂移,w/b、x/$ 的落点就会各说各话。
+    // mirror-consistency invariant: for every cluster [s,e) cut by the forward
+    // scan, backward from e must trace back to s. Once the two semantics
+    // drift apart, the landing points of w/b and x/$ disagree.
     let cases: &[&str] = &[
         "a\n\u{200D}b",
         "\u{200D}b",
@@ -2083,15 +2156,16 @@ fn grapheme_scan_directions_agree() {
             assert_eq!(
                 vimcore::buffer::prev_grapheme_offset(&f.buf, e),
                 Some(s),
-                "簇 [{s},{e}) 的反向回溯须回到起点({text:?})"
+                "backward trace of cluster [{s},{e}) must return to its start ({text:?})"
             );
         }
-        // &str 镜像:整串最后一个簇的起点须与缓冲侧 backward 一致
+        // &str mirror: the start of the last cluster of the whole string must
+        // agree with the buffer-side backward scan
         if let Some(&last_start) = boundaries.iter().rev().nth(1) {
             assert_eq!(
                 vimcore::buffer::last_grapheme_start(text),
                 Some(last_start),
-                "last_grapheme_start 须与 prev_grapheme_offset 同判({text:?})"
+                "last_grapheme_start must agree with prev_grapheme_offset ({text:?})"
             );
         }
     }
@@ -2099,106 +2173,114 @@ fn grapheme_scan_directions_agree() {
 
 #[test]
 fn last_grapheme_start_treats_newline_as_boundary() {
-    // prev_grapheme_offset 的 &str 镜像同规则:块插入会话的字节账本
-    // 依赖它与缓冲侧簇删除对齐。
+    // the &str mirror of prev_grapheme_offset follows the same rule: the block
+    // insert session's byte ledger relies on it agreeing with buffer-side
+    // cluster deletion.
     assert_eq!(
         vimcore::buffer::last_grapheme_start("x\n\u{0301}"),
         Some(2),
-        "独立 mark 自成簇,起点在自身"
+        "a standalone mark forms its own cluster, starting at itself"
     );
     assert_eq!(
         vimcore::buffer::last_grapheme_start("e\u{0301}"),
         Some(0),
-        "常规组合字符簇起点不变"
+        "regular combining-char cluster start unchanged"
     );
 }
 
 #[test]
 fn insert_delete_removes_whole_cluster() {
-    // Del 与 BS 同款簇语义(delcombine=off):只删基字符会留下裸 mark,
-    // mark 转而复合到前一字符上。
+    // Del shares BS's cluster semantics (delcombine=off): deleting only the
+    // base char leaves a bare mark, which then re-composes onto the previous char.
     let mut f = Fixture::new("");
     f.feed(["i"]);
     f.type_text("e\u{0301}x");
     f.feed(["<Esc>", "0", "i"]);
     f.feed_raw(vimcore::key::Key::named("delete"));
-    assert_eq!(f.text(), "x", "Del 应删除 e+mark 整簇");
+    assert_eq!(f.text(), "x", "Del should remove the whole e+mark cluster");
 }
 #[test]
 fn r_multibyte_on_zwj_line_end_does_not_panic() {
-    // ZWJ 曾把行尾的 \n 胶合进簇:base(b) 的簇跨过换行,advance_graphemes
-    // 消费 0 簇,replaced==0 时 `start + 0 - ch.len_utf8()` usize 下溢
-    // (debug panic)。GB4/GB5 修复后 ZWJ 不跨行;空替换守卫兜底。
+    // ZWJ used to glue the line-ending \n into the cluster: the base (b) cluster
+    // spanned the newline, advance_graphemes consumed 0 clusters, and with
+    // replaced==0 `start + 0 - ch.len_utf8()` underflowed usize (debug panic).
+    // After the GB4/GB5 fix ZWJ never crosses lines; the empty-replacement guard
+    // is the backstop.
     let mut f = Fixture::new("ab\u{200D}\ncd");
     f.vim.cursor.offset = 1; // 'b'
     f.feed(["r", "中"]);
-    // b+ZWJ 本就是一个簇(ZWJ 附着于前一字符),整体替换成 中;\n 不入簇
-    assert_eq!(f.text(), "a中\ncd", "r中 替换 b+ZWJ 簇,不吞换行");
-    assert_eq!(f.cursor(), 1, "光标落在替换后的簇起点");
+    // b+ZWJ is already one cluster (ZWJ attaches to the preceding char); replace
+    // it wholly with 中; \n does not enter the cluster
+    assert_eq!(f.text(), "a中\ncd", "r中 replaces the b+ZWJ cluster without eating the newline");
+    assert_eq!(f.cursor(), 1, "cursor lands at the start of the replaced cluster");
 }
 
 #[test]
 fn zwj_clusters_never_span_newlines() {
-    // next_grapheme_offset:x+ZWJ 簇在 \n 前收束(ZWJ 不吞 \n;
-    // ZWJ 占 3 字节,簇终点 = \n 的偏移 4)
+    // next_grapheme_offset: the x+ZWJ cluster ends before \n (ZWJ does not eat
+    // \n; ZWJ is 3 bytes, cluster end = offset 4 of the \n)
     let f = Fixture::new("x\u{200D}\ncd");
     assert_eq!(
         vimcore::buffer::next_grapheme_offset(&f.buf, 0),
         Some(4),
-        "x+ZWJ 簇止于 \n"
+        "x+ZWJ cluster ends at \n"
     );
-    // 行首独立 ZWJ 不与 \n 胶合(修复前 prev 会回溯进上一行的 \n);
-    // 且它也不把后面的 starter 胶进自己的簇——正向扫描里行首 ZWJ 自成
-    // 一簇、c 另成一簇,prev 必须给出同一条边界(round 26 前后者曾把
-    // "ZWJ c" 读成一簇,`$` 停在隐形 ZWJ 上、`x` 只删掉连接符剩裸基字)
+    // a standalone line-start ZWJ is not glued to \n (before the fix, prev
+    // traced back into the previous line's \n); and it does not glue the
+    // following starter into its own cluster either — in the forward scan the
+    // line-start ZWJ is its own cluster and c is another, so prev must give
+    // the same boundary (round 26 backward read "ZWJ c" as one cluster, `$`
+    // parked on the invisible ZWJ and `x` deleted only the joiner)
     let g = Fixture::new("ab\n\u{200D}c");
     assert_eq!(
         vimcore::buffer::prev_grapheme_offset(&g.buf, 6),
         Some(3),
-        "行首 ZWJ 自成簇"
+        "line-start ZWJ forms its own cluster"
     );
     assert_eq!(
         vimcore::buffer::prev_grapheme_offset(&g.buf, 7),
         Some(6),
-        "行首 ZWJ 不胶合后续 starter(与正向扫描同一边界)"
+        "line-start ZWJ does not glue the following starter (same boundary as the forward scan)"
     );
 }
 
 #[test]
 fn sentence_object_on_multibyte_cursor_char() {
-    // sentence_range 的 (offset+1) 落进多字节光标字符中间:prev_char_offset
-    // 返回 None,句子起点静默塌到 0——dis 于 "Hi. 你好 ok" 光标在 你 上
-    // 删掉的是 "Hi." 而非光标所在句。
+    // sentence_range's (offset+1) landed inside the multibyte cursor char:
+    // prev_char_offset returned None and the sentence start silently collapsed
+    // to 0 — dis on "Hi. 你好 ok" with the cursor on 你 deleted "Hi." instead of
+    // the sentence under the cursor.
     let mut f = Fixture::new("Hi. 你好 ok");
-    f.vim.cursor.offset = 4; // '你' 起点
+    f.vim.cursor.offset = 4; // start of '你'
     f.feed(["d", "i", "s"]);
-    assert_eq!(f.text(), "Hi. ", "dis 应删除光标所在句");
+    assert_eq!(f.text(), "Hi. ", "dis should delete the sentence under the cursor");
 }
 
 #[test]
 fn marks_listing_shows_both_visual_ends() {
-    // vim 的 :marks 同时列出 '< 与 '>（引擎曾只列 '<）；行格式为
-    // `" %c %6ld %4d %s"`，所以行以 " <"/" >" 起头
+    // vim's :marks lists both '< and '> (the engine listed only '<); the row
+    // format is `" %c %6ld %4d %s"`, so lines start with " <"/" >"
     let mut f = Fixture::new("alpha\nbeta\n");
     f.feed(["V", "j", "d"]);
     f.feed([":", "m", "a", "r", "k", "s", "<CR>"]);
     let joined = f.host.statuses.join("\n");
     assert!(
         f.host.statuses.iter().any(|s| s.starts_with(" <")),
-        "应列出 '<\n{joined}"
+        "should list '<\n{joined}"
     );
     assert!(
         f.host.statuses.iter().any(|s| s.starts_with(" >")),
-        "应列出 '>\n{joined}"
+        "should list '>\n{joined}"
     );
 }
 
-// ---- 第二十七轮：宿主历史轴（undo/redo）与组所有权 ---------------------------
+// ---- round 27: host history axis (undo/redo) and group ownership --------------
 
 #[test]
 fn count_undo_steps_and_edge_bell() {
-    // `Nu` 撤销 N 步；超出历史深度的余量在历史边缘响一次铃（vim: 撤到
-    // 底 + beep）。三次 x 三个组：2u 停在第二步、3u 到底、5u 到底 + 1 铃。
+    // `Nu` undoes N steps; the excess past the history depth rings once at the
+    // history edge (vim: undo to the bottom + beep). Three x = three groups:
+    // 2u stops at the second step, 3u reaches the bottom, 5u bottom + 1 bell.
     let mk = |keys: &[&str]| {
         let mut f = Fixture::new("aaa\nbbb\nccc\n");
         f.feed(["x", "x", "x"]);
@@ -2207,19 +2289,21 @@ fn count_undo_steps_and_edge_bell() {
         f
     };
     let f = mk(&["2", "u"]);
-    assert_eq!(f.text(), "aa\nbbb\nccc\n", "2u 撤两步");
+    assert_eq!(f.text(), "aa\nbbb\nccc\n", "2u undoes two steps");
     let f = mk(&["3", "u"]);
-    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "3u 撤三步到底");
+    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "3u undoes three steps to the bottom");
     let f = mk(&["5", "u"]);
-    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "5u 撤到底");
-    assert_eq!(f.host.bells, 1, "历史边缘恰好响一次");
+    assert_eq!(f.text(), "aaa\nbbb\nccc\n", "5u undoes to the bottom");
+    assert_eq!(f.host.bells, 1, "exactly one bell at the history edge");
 }
 
 #[test]
 fn undo_to_bottom_restores_initial_text() {
-    // 完备性不变量的定向版：混排编辑/可视算子/Ex 删除/IME 提交后，
-    // 一路 u 到底必须逐字节回到初始缓冲——任何一条编辑路径漏开 undo 组
-    // （不走 edit_* 漏斗）都会在这里静默现形。
+    // Directed version of the completeness invariant: after mixed edits /
+    // visual operators / Ex deletes / IME commits, undoing all the way down
+    // must return to the initial buffer byte-for-byte — any edit path that
+    // forgets to open an undo group (bypassing the edit_* funnel) silently
+    // shows up here.
     let initial = "hello world\nsecond line\n中文行\n";
     let mut f = Fixture::new(initial);
     f.feed(["x", "d", "d", "p", "J", "g", "J", "y", "y", "P"]);
@@ -2230,7 +2314,7 @@ fn undo_to_bottom_restores_initial_text() {
     f.type_text("X");
     f.feed(["<Esc>"]);
     f.feed([">", ">", "<", "<", "~"]);
-    assert_ne!(f.text(), initial, "前置：序列确实改了文本");
+    assert_ne!(f.text(), initial, "precondition: the sequence did change the text");
 
     let mut depth = 0;
     loop {
@@ -2240,35 +2324,38 @@ fn undo_to_bottom_restores_initial_text() {
             break;
         }
         depth += 1;
-        assert!(depth <= 100, "u 未在 100 步内到底");
+        assert!(depth <= 100, "u did not hit the bottom within 100 steps");
     }
-    assert_eq!(f.text(), initial, "undo 到底应回到初始缓冲");
+    assert_eq!(f.text(), initial, "undo to the bottom must restore the initial buffer");
 }
 
 #[test]
 fn substitute_and_block_insert_are_single_undo_groups() {
-    // vim 把整个 :{range}s 与整个块可视 I/A/c 会话各算一个 undo 块
+    // vim counts the whole :{range}s and the whole blockwise-visual I/A/c
+    // session as one undo block each
     let mut f = Fixture::new("aaa\naaa\naaa\n");
     f.feed([":", "%", "s", "/", "a", "/", "b", "/", "g", "\n"]);
     assert_eq!(f.text(), "bbb\nbbb\nbbb\n");
     let groups_before = f.host.group_count;
     f.feed(["u"]);
-    assert_eq!(f.text(), "aaa\naaa\naaa\n", "整个 :s 一个 undo 组");
-    assert!(f.host.group_count >= groups_before); // (u 不新增组)
+    assert_eq!(f.text(), "aaa\naaa\naaa\n", "the whole :s is one undo group");
+    assert!(f.host.group_count >= groups_before); // (u does not create groups)
 
     let mut g = Fixture::new("ab\ncd\nef\n");
-    // insert 模式可打印字符走宿主放置路径（type_text），键流只送控制键
+    // printable chars in insert mode go through the host placement path
+    // (type_text); the key stream only carries control keys
     g.feed(["<C-v>", "j", "I"]);
     g.type_text("X");
     g.feed(["<Esc>"]);
     assert_eq!(g.text(), "Xab\nXcd\nef\n");
     g.feed(["u"]);
-    assert_eq!(g.text(), "ab\ncd\nef\n", "块 I 会话含复制体一个 undo 组");
+    assert_eq!(g.text(), "ab\ncd\nef\n", "block I session incl. the copy body is one undo group");
 }
 
 #[test]
 fn undo_then_dot_replays_the_undone_change() {
-    // u 不改写 `.` 的重放记录：u 之后 `.` 重放被撤销的那个变更（vim 同）
+    // u does not rewrite the `.` replay record: after u, `.` replays the undone
+    // change (vim agrees)
     let mut f = Fixture::new("abc\nabc\n");
     f.feed(["x", "u", "."]);
     assert_eq!(f.text(), "bc\nabc\n");
@@ -2276,20 +2363,22 @@ fn undo_then_dot_replays_the_undone_change() {
 
 #[test]
 fn q_uppercase_appends_to_macro_recording() {
-    // `qA` 在 a 的既有步骤上追加录制（vim :h q_a），停录落回小写槽
+    // `qA` records, appending to a's existing steps (vim :h q_a); stopping
+    // the recording lands back in the lowercase slot
     let mut f = Fixture::new("line1\nline2\nline3\n");
     f.feed(["q", "a", "x", "q"]);
     assert_eq!(f.vim.macro_len('a'), 1);
     f.feed(["q", "A", "x", "q"]);
-    assert_eq!(f.vim.macro_len('a'), 2, "qA 追加而非覆盖");
+    assert_eq!(f.vim.macro_len('a'), 2, "qA appends instead of overwriting");
     f.feed(["j", "@", "a"]);
-    assert_eq!(f.text(), "ne1\nne2\nline3\n", "@a 回放两步 x");
+    assert_eq!(f.text(), "ne1\nne2\nline3\n", "@a replays the two x steps");
 }
 
 #[test]
 fn insert_ctrl_o_passes_through_to_host() {
-    // insert 模式只认 C-w/C-u/C-r 等既定弦；<C-o>（临时 normal）未建模，
-    // 以 Unknown 交还宿主——宿主可自行认领（与 printable 字符同款合同）
+    // insert mode only recognizes the established chords C-w/C-u/C-r etc.;
+    // <C-o> (temporary normal) is not modeled and returns Unknown to the
+    // host — the host may claim it (same contract as printable chars)
     let mut f = Fixture::new("ab\n");
     f.feed(["i"]);
     let r = f.feed_raw(Key::ctrl_char('o'));
@@ -2298,24 +2387,27 @@ fn insert_ctrl_o_passes_through_to_host() {
 
 #[test]
 fn normal_u_undo_line_is_not_bound() {
-    // 普通模式的 U（行级撤销）未实现：响铃不动光标。引擎把历史委托给
-    // 宿主的线性栈，行级撤销需要宿主协作 API（见 NOTES 分歧 70）。
-    // visual U（大写化算子）不受影响，另有测试覆盖。
+    // normal-mode U (undo a line) is unbound: it rings the bell and leaves the
+    // cursor. The engine delegates history to the host's linear stack; a
+    // line-undo needs a host cooperation API (see NOTES divergence 70).
+    // visual U (the upper-case operator) is unaffected and covered elsewhere.
     let mut f = Fixture::new("aaa bbb\n");
     f.feed(["x", "U"]);
-    assert_eq!(f.host.bells, 1, "U 未绑定应响铃");
-    assert_eq!(f.cursor(), 0, "U 不动光标");
+    assert_eq!(f.host.bells, 1, "unbound U should ring the bell");
+    assert_eq!(f.cursor(), 0, "U leaves the cursor alone");
 }
 
-// ---- 第二十七轮二批：可视算子后 gv 的选区存活 -------------------------------
+// ---- round 27 batch 2: selection survival of gv after visual operators --------
 
 #[test]
 fn gv_after_charwise_delete_selects_the_line_head() {
-    // vim 9.1：`vllld` 后 '< '> 保持选区的行列坐标——gv 在删除后的行上
-    // 复选行首同宽 span，而不是塌成零宽。旧行为把 last_visual 经
-    // adjust_delete 折进删除点，gv 复选空、`gv d` 变 no-op。
+    // vim 9.1: after `vllld`, '< '> keep the selection's row/col coordinates —
+    // gv reselects the same-width span at the head of the post-delete line,
+    // instead of collapsing to zero width. The old behavior folded last_visual
+    // through adjust_delete into the deletion point, so gv selected nothing and
+    // `gv d` became a no-op.
     let mut f = Fixture::new("hello world\nsecond\n");
-    f.feed(["v", "l", "l", "d"]); // 删 "hel" → "lo world"
+    f.feed(["v", "l", "l", "d"]); // deletes "hel" → "lo world"
     assert_eq!(f.text(), "lo world\nsecond\n");
     f.feed(["g", "v"]);
     assert!(matches!(f.vim.mode(), vimcore::Mode::Visual { .. }));
@@ -2323,16 +2415,17 @@ fn gv_after_charwise_delete_selects_the_line_head() {
     assert_eq!(
         f.text(),
         "world\nsecond\n",
-        "gv 复选删除后行的头部三字符 \"lo \"（vim: 行列坐标投影）并删除"
+        "gv reselects the first three chars \"lo \" of the post-delete line (vim: row/col projection) and deletes"
     );
 }
 
 #[test]
 fn gv_after_undo_reselects_the_original_selection() {
-    // vim 9.1：vllld 后 u，同一对 '< '> 落回复原的文本上——gv 重选
-    // 原选区（"hel"）。旧行为 last_visual 已被删除折叠成 (0,0)，
-    // undo 救不回来。
-    // "abcdef" 删 "abc" → "def"；undo 复原后 gv 必须重选 "abc"
+    // vim 9.1: after vllld then u, the same '< '> pair lands back on the
+    // restored text — gv reselects the original span ("hel"). The old behavior
+    // had last_visual already folded to (0,0) by the deletion, unrecoverable
+    // by undo.
+    // "abcdef" deletes "abc" → "def"; after undo restores, gv must reselect "abc"
     let mut f = Fixture::new("abcdef\nsecond\n");
     f.feed(["v", "l", "l", "d"]);
     assert_eq!(f.text(), "def\nsecond\n");
@@ -2340,21 +2433,22 @@ fn gv_after_undo_reselects_the_original_selection() {
     assert_eq!(f.text(), "abcdef\nsecond\n");
     f.feed(["g", "v"]);
     f.feed(["d"]);
-    assert_eq!(f.text(), "def\nsecond\n", "gv 复活原选区 abc 并删除");
+    assert_eq!(f.text(), "def\nsecond\n", "gv revives the original selection abc and deletes it");
 }
 
 #[test]
 fn gv_after_linewise_delete_still_targets_the_surviving_line() {
-    // 行级选区走另一条 vim 规则：被删行的 mark 折到接续行（round 7
-    // 的 `Vjd` 语义不能被 charwise 冻结规则破坏）
+    // linewise selections follow a different vim rule: the deleted lines' marks
+    // fold onto the following line (round 7's `Vjd` semantics must not be broken
+    // by the charwise freezing rule)
     let mut f = Fixture::new("aaa\nbbb\nccc\nddd\n");
     f.feed(["V", "j", "d"]);
     assert_eq!(f.text(), "ccc\nddd\n");
     f.feed(["g", "v", "d"]);
-    assert_eq!(f.text(), "ddd\n", "gv 复选接续行 ccc 并删除");
+    assert_eq!(f.text(), "ddd\n", "gv reselects the surviving line ccc and deletes it");
 }
 
-// ---- round 28：空 linewise 删除不碰寄存器（vim 9.1 PTY 探针） ---------------
+// ---- round 28: empty linewise delete leaves registers alone (vim 9.1 PTY probe) ---
 
 fn unnamed(f: &Fixture) -> Option<String> {
     f.vim.registers.get('"').map(|r| r.text.clone())
@@ -2362,10 +2456,12 @@ fn unnamed(f: &Fixture) -> Option<String> {
 
 #[test]
 fn empty_linewise_delete_leaves_registers_alone() {
-    // vim 9.1 探针：空缓冲上 dd/Vd/dip/dap/dG 全部不动寄存器（p 后 bell，
-    // `:reg` 只有 "%）。引擎把 0..0 的 linewise span 送进了编号环 + unnamed，
-    // 之后一个 p 会开出幽灵空行。yank 是相反规则：yy/yip 在空缓冲上**要**
-    // 存空行（见下一测试）——这个不对称是 vim 的原样。
+    // vim 9.1 probe: on an empty buffer dd/Vd/dip/dap/dG all leave the
+    // registers untouched (p rings a bell, `:reg` shows only "%). The engine
+    // had fed the 0..0 linewise span into the numbered ring + unnamed, so a
+    // later p opened a ghost empty line. Yank is the opposite rule: yy/yip on
+    // an empty buffer **do** store an empty line (see next test) — the
+    // asymmetry is exactly vim's.
     for keys in [
         vec!["d", "d"],
         vec!["V", "d"],
@@ -2376,26 +2472,28 @@ fn empty_linewise_delete_leaves_registers_alone() {
         let mut f = Fixture::new("");
         f.feed(keys.iter().copied());
         assert_eq!(f.text(), "");
-        assert_eq!(unnamed(&f), None, "keys {keys:?} 必须不写 unnamed");
+        assert_eq!(unnamed(&f), None, "keys {keys:?} must not write unnamed");
         assert_eq!(f.vim.registers.get('1').map(|r| r.text.clone()), None);
     }
 }
 
 #[test]
 fn empty_linewise_yank_stores_an_empty_line() {
-    // vim 9.1 探针：空缓冲 yy 后 `:reg` 里 ""/"0 各有一条 linewise 空行，
-    // p 开出一个新行——与 delete 的不写形成刻意对照。2026-10-08 字节级
-    // oracle 复核（od -c）：空文件 `yyp` 写回 "\n\n"（lines 1→2）；旧断言
-    // "\n" 在本夹具的行模型里仍是 1 行，与自己的 oracle 结论相矛盾。
+    // vim 9.1 probe: after yy on an empty buffer, `:reg` shows a linewise empty
+    // line in "" and "0 each, and p opens a new line — deliberately contrasted
+    // with delete's non-write. 2026-10-08 byte-level oracle re-verification
+    // (od -c): `yyp` on an empty file writes back "\n\n" (lines 1→2); the old
+    // assertion "\n" was still 1 line in this fixture's line model, contradicting
+    // its own oracle conclusion.
     let mut f = Fixture::new("");
     f.feed(["y", "y"]);
     assert_eq!(unnamed(&f), Some(String::new()));
     assert_eq!(f.vim.registers.get('0').map(|r| r.text.clone()), Some(String::new()));
     f.feed(["p"]);
-    assert_eq!(f.text(), "\n\n", "空缓冲 yy+p 开一个空行（vim lines=1→2）");
+    assert_eq!(f.text(), "\n\n", "empty-buffer yy+p opens one empty line (vim lines=1→2)");
 }
 
-// ---- round 28：:s 旗标校验（E488）与 `e` 旗标 -------------------------------
+// ---- round 28: :s flag validation (E488) and the `e` flag ----------------------
 
 fn ex(f: &mut Fixture, line: &str) {
     let mut keys: Vec<String> = vec![":".to_owned()];
@@ -2406,11 +2504,12 @@ fn ex(f: &mut Fixture, line: &str) {
 
 #[test]
 fn substitute_rejects_junk_flags_with_e488() {
-    // vim 9.1 探针：`:s/a/X/z` → "E488: Trailing characters: z"，缓冲不动。
-    // 旧引擎忽略未知旗标字母照常替换——打错旗标悄悄改了文本。
+    // vim 9.1 probe: `:s/a/X/z` → "E488: Trailing characters: z", buffer unchanged.
+    // The old engine ignored unknown flag letters and substituted anyway — a
+    // typo'd flag quietly changed the text.
     let mut f = Fixture::new("aaa zzz\n");
     ex(&mut f, "s/a/X/z");
-    assert_eq!(f.text(), "aaa zzz\n", "垃圾旗标必须让整条命令不运行");
+    assert_eq!(f.text(), "aaa zzz\n", "a junk flag must keep the whole command from running");
     assert!(
         f.host.statuses.iter().any(|s| s.contains("E488")),
         "statuses = {:?}",
@@ -2420,7 +2519,7 @@ fn substitute_rejects_junk_flags_with_e488() {
 
 #[test]
 fn substitute_still_accepts_valid_flag_letters() {
-    // 合法旗标（g/i/I/n + 容忍集 c/e/l/p/#/&）不触发 E488
+    // valid flags (g/i/I/n + the tolerated set c/e/l/p/#/&) do not trigger E488
     let mut f = Fixture::new("aaa\n");
     ex(&mut f, "s/a/X/g");
     assert_eq!(f.text(), "XXX\n");
@@ -2428,39 +2527,41 @@ fn substitute_still_accepts_valid_flag_letters() {
 
 #[test]
 fn substitute_e_flag_suppresses_the_miss_report() {
-    // vim 9.1 探针：`:s/q/W/e` 未命中 → 无 E486（e 的本职就是压掉它）
+    // vim 9.1 probe: `:s/q/W/e` with no match → no E486 (suppressing it is the
+    // e flag's whole purpose)
     let mut f = Fixture::new("aaa zzz\n");
     ex(&mut f, "s/q/W/e");
     assert_eq!(f.text(), "aaa zzz\n");
     assert!(f.host.statuses.is_empty(), "statuses = {:?}", f.host.statuses);
-    // 无 e 时照旧报 E486
+    // without e, E486 is still reported
     let mut f = Fixture::new("aaa zzz\n");
     ex(&mut f, "s/q/W/");
     assert!(f.host.statuses.iter().any(|s| s.contains("E486")));
 }
 
-// ---- round 28：块可视 `$`（:h v_$，PTY 探针） --------------------------------
+// ---- round 28: blockwise-visual `$` (:h v_$, PTY probe) -----------------------
 
 #[test]
 fn block_dollar_delete_extends_to_every_line_end() {
-    // vim 9.1 探针：`<C-v>j$d` → ['','','def']——块延伸到**每行**行尾。
-    // 旧引擎把 $ 当普通 motion，只删到光标行 $ 所在列（"g line here"）。
+    // vim 9.1 probe: `<C-v>j$d` → ['','','def'] — the block extends to **every**
+    // line's end. The old engine treated $ as an ordinary motion and deleted
+    // only up to the cursor line's $ column ("g line here").
     let f = edit("long line here\nabc\ndef\n", 0, 0, &["<C-v>", "j", "$", "d"]);
     assert_eq!(f.text(), "\n\ndef\n");
 }
 
 #[test]
 fn block_dollar_ignores_the_anchor_column() {
-    // vim 9.1 探针：`<C-v>jll$d` 与 `<C-v>j$d` 同果——$ 一旦按下，
-    // 锚点列出局，每行整行内容被覆盖。
+    // vim 9.1 probe: `<C-v>jll$d` yields the same as `<C-v>j$d` — once $ is
+    // pressed the anchor column is out of play and each row is covered whole.
     let f = edit("long line here\nabc\ndef\n", 0, 0, &["<C-v>", "j", "l", "l", "$", "d"]);
     assert_eq!(f.text(), "\n\ndef\n");
 }
 
 #[test]
 fn block_dollar_i_inserts_at_line_starts_and_a_at_line_ends() {
-    // vim 9.1 探针：$+I 在每行行首插（"_Xabc…）；$+A 在各行自己的行尾
-    // 追加且**不填充**（"long line hereX"/"abcX"）。
+    // vim 9.1 probe: $+I inserts at each line's start ("_Xabc…); $+A appends at
+    // each row's own line end and **does not pad** ("long line hereX"/"abcX").
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "$", "I"]);
     f.type_text("_X");
@@ -2476,7 +2577,7 @@ fn block_dollar_i_inserts_at_line_starts_and_a_at_line_ends() {
 
 #[test]
 fn block_dollar_change_replicates_over_whole_rows() {
-    // vim 9.1 探针：`<C-v>j$cyz<Esc>` → 两行都变成 "yz"
+    // vim 9.1 probe: `<C-v>j$cyz<Esc>` → both rows become "yz"
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "$", "c"]);
     f.type_text("yz");
@@ -2486,7 +2587,7 @@ fn block_dollar_change_replicates_over_whole_rows() {
 
 #[test]
 fn block_dollar_yank_register_is_unpadded() {
-    // vim 9.1 探针（:reg）：$ 块 yank 的寄存器是未填充的整行文本
+    // vim 9.1 probe (:reg): a $ block yank's register holds unpadded whole-row text
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "$", "y"]);
     let reg = f.vim.registers.get('"').expect("unnamed set");
@@ -2494,31 +2595,32 @@ fn block_dollar_yank_register_is_unpadded() {
     assert_eq!(reg.kind, vimcore::registers::RegisterKind::Blockwise);
 }
 
-// ---- round 28：块可视的寄存器语义 -------------------------------------------
+// ---- round 28: blockwise-visual register semantics ----------------------------
 
 #[test]
 fn block_delete_stores_the_block_for_paste() {
-    // vim 9.1 探针：`<C-v>jlld` 后 p 粘回被删块（块寄存器行不填充），
-    // "0 不动。旧引擎的块删除不写任何寄存器。
+    // vim 9.1 probe: after `<C-v>jlld`, p pastes the deleted block back (block
+    // register rows are unpadded), "0 untouched. The old engine's block delete
+    // wrote no register at all.
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "l", "d"]);
     let reg = f.vim.registers.get('"').expect("unnamed set");
     assert_eq!(reg.text, "lon\nabc");
     assert_eq!(reg.kind, vimcore::registers::RegisterKind::Blockwise);
-    assert_eq!(f.vim.registers.get('0'), None, "删除不进 \"0");
-    // p 粘回
+    assert_eq!(f.vim.registers.get('0'), None, "delete must not enter \"0");
+    // p pastes it back
     f.feed(["g", "g", "0", "p"]);
     assert_eq!(f.text(), "glon line here\n abc\ndef\n");
 }
 
 #[test]
 fn block_change_stores_the_deleted_block() {
-    // vim 9.1 探针：`<C-v>jlc` + 输入 + Esc 后 p 粘回被删块
+    // vim 9.1 probe: after `<C-v>jlc` + typing + Esc, p pastes the deleted block back
     let mut f = Fixture::at("ab\nef\nij\nkl\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "c"]);
     f.type_text("X");
     f.feed(["<Esc>"]);
-    // 块 2 列宽（"ab"/"ef" 被删），X 复制到两行
+    // block 2 cols wide ("ab"/"ef" deleted), X replicated onto both rows
     assert_eq!(f.text(), "X\nX\nij\nkl\n");
     f.feed(["g", "g", "0", "p"]);
     assert_eq!(f.text(), "Xab\nXef\nij\nkl\n");
@@ -2526,11 +2628,14 @@ fn block_change_stores_the_deleted_block() {
 
 #[test]
 fn block_yank_keeps_rows_unpadded() {
-    // vim 9.1 探针（:reg strtrans）：块 yank 短行不填充——寄存器就是
-    // "long\nabc"。填充是 put 侧的职责（put_blockwise 已做）。
-    // 光标行是 "abc"（3 列），l 在行尾钳住：块宽 3（"lon"/"abc"）。
-    // 断言点是短行 "abc" 不带填充——vim 的寄存器同款（宽度在寄存器
-    // 类型里，填充是 put 侧的事）。
+    // vim 9.1 probe (:reg strtrans): block yank does not pad short rows — the
+    // register is exactly "long\nabc". Padding is the put side's job
+    // (put_blockwise already does it).
+    // The cursor row is "abc" (3 cols), l clamps at the line end: block width 3
+    // ("lon"/"abc").
+    // The assertion point is that the short row "abc" carries no padding —
+    // vim's register works the same (the width lives in the register type;
+    // padding is a put-side concern).
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "l", "y"]);
     let reg = f.vim.registers.get('"').expect("unnamed set");
@@ -2539,22 +2644,24 @@ fn block_yank_keeps_rows_unpadded() {
 
 #[test]
 fn visual_block_put_swaps_with_the_deleted_selection() {
-    // vim 9.1 探针（交换成语）：`<C-v>jy` + `<C-v>jp` 再 p，第二次 p
-    // 粘回的是刚被删掉的 ij/kl。
-    // 1 列块（"a"/"e"）与 vim 探针同形：第一次 p 替换 i/k 列，第二次
-    // p（普通模式）粘回被删块 "i"/"k" → "aij"/"ekl"
+    // vim 9.1 probe (swap idiom): `<C-v>jy` + `<C-v>jp` then p again — the
+    // second p pastes back the ij/kl just deleted.
+    // A 1-col block ("a"/"e") matches the vim probe shape: the first p
+    // replaces the i/k column, the second p (normal mode) pastes back the
+    // deleted block "i"/"k" → "aij"/"ekl"
     let mut f = Fixture::at("ab\nef\nij\nkl\n", 0, 0);
     f.feed(["<C-v>", "j", "y"]);
     f.feed(["j", "j", "<C-v>", "j", "p"]);
     assert_eq!(f.text(), "ab\nef\naj\nel\n");
     f.feed(["p"]);
-    assert_eq!(f.text(), "ab\nef\naij\nekl\n", "第二次 p 粘回被删块（交换）");
+    assert_eq!(f.text(), "ab\nef\naij\nekl\n", "the second p pastes back the deleted block (swap)");
 }
 
 #[test]
 fn visual_put_leaves_the_explicit_paste_register_alone() {
-    // vim 9.1 探针：viw"ap 后 "a 仍是 aaa，被替换文本进 unnamed。
-    // 旧引擎把粘贴寄存器传给了 delete_span，把 "a 覆盖掉了。
+    // vim 9.1 probe: after viw"ap, "a is still aaa; the replaced text goes to
+    // unnamed. The old engine passed the paste register into delete_span and
+    // overwrote "a.
     let mut f = Fixture::at("aaa bbb\n", 0, 0);
     f.feed(["\"", "a", "y", "i", "w"]);
     f.feed(["w", "v", "i", "w", "\"", "a", "p"]);
@@ -2562,38 +2669,41 @@ fn visual_put_leaves_the_explicit_paste_register_alone() {
     assert_eq!(
         f.vim.registers.get('a').map(|r| r.text.clone()),
         Some("aaa".to_owned()),
-        "粘贴源寄存器不能被被删文本覆盖"
+        "the source register must not be overwritten by the deleted text"
     );
     assert_eq!(unnamed(&f), Some("bbb".to_owned()));
 }
 
 #[test]
 fn block_put_extra_register_rows_append_below_the_selection() {
-    // vim 9.1 探针：3 行块寄存器贴到 2 行块选区上——第三行成为最后
-    // 覆盖行下方的新行（旧引擎直接丢弃）。
+    // vim 9.1 probe: a 3-row block register put onto a 2-row block selection —
+    // the third row becomes a new line below the last covered row (the old
+    // engine dropped it outright).
     let mut f = Fixture::at("aa\nbb\ncc\ndd\nee\n", 0, 0);
     f.feed(["<C-v>", "j", "j", "y"]);
     f.feed(["j", "j", "j", "<C-v>", "j", "p"]);
     assert_eq!(f.text(), "aa\nbb\ncc\nad\nbe\nc\n");
 }
 
-// ---- round 28：块 put 的合并模型（PTY 探针修正「推下去」旧模型） --------------
+// ---- round 28: blockwise put merge model (PTY probes corrected the old "push down" model) --
 
 #[test]
 fn blockwise_put_merges_into_existing_lines_below() {
-    // vim 9.1 探针：`2G0p` 于中段——寄存器第 2/3 行并到光标行**下方已有的
-    // 行**上（同列插入，行长先补空格），不再无条件开新行。旧「推下去」
-    // 模型来自只压在末行上的探针（两种模型在缓冲末尾重合）。
+    // vim 9.1 probe: `2G0p` mid-buffer — register rows 2/3 merge onto the
+    // **existing lines below** the cursor line (insert at the same column,
+    // padding the row to line length with spaces first), no longer opening new
+    // lines unconditionally. The old "push down" model came from probes placed
+    // only at the last line (both models coincide at the buffer end).
     let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
-    f.feed(["<C-v>", "j", "y"]); // 1 列块 ["a", "b"]
+    f.feed(["<C-v>", "j", "y"]); // 1-col block ["a", "b"]
     f.feed(["2", "G", "0", "p"]);
     assert_eq!(f.text(), "aaaa\nbabbb\ncbccc\ndddd\n");
 }
 
 #[test]
 fn blockwise_put_before_merges_at_cursor_column() {
-    // vim 9.1 探针：`2G0P` → "abbbb"/"bcccc"（P 在光标列本身，
-    // 后续行仍向下走）
+    // vim 9.1 probe: `2G0P` → "abbbb"/"bcccc" (P inserts at the cursor column
+    // itself, following rows still run downward)
     let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
     f.feed(["<C-v>", "j", "y"]);
     f.feed(["2", "G", "0", "P"]);
@@ -2602,20 +2712,22 @@ fn blockwise_put_before_merges_at_cursor_column() {
 
 #[test]
 fn blockwise_put_merges_mid_line_at_display_column() {
-    // vim 9.1 探针：`3G02lp` —— 行宽 4、列 2：插入点在第 3 字符前，
-    // "cccc"+"aaaa" → "cccaaaac"；下一行同列 "dddd" → "ddbbbbdd"
+    // vim 9.1 probe: `3G02lp` — row width 4, column 2: the insertion point is
+    // before the 3rd char, "cccc"+"aaaa" → "cccaaaac"; the next row at the same
+    // column "dddd" → "ddbbbbdd"
     let mut f = Fixture::at("aaaa\nbbbb\ncccc\ndddd\n", 0, 0);
-    f.feed(["<C-v>", "j", "l", "l", "l", "y"]); // 4 列块
+    f.feed(["<C-v>", "j", "l", "l", "l", "y"]); // 4-col block
     f.feed(["3", "G", "0", "2", "l", "p"]);
     assert_eq!(f.text(), "aaaa\nbbbb\ncccaaaac\ndddbbbbd\n");
 }
 
 #[test]
 fn visual_block_put_overflow_merges_into_the_next_line() {
-    // vim 9.1 探针：3 行寄存器贴到 2 行选区——第 3 行并入选区**下方的
-    // 已有行**（"ee" → "cee"）；只有越过缓冲末尾才开新行
+    // vim 9.1 probe: a 3-row register put onto a 2-row selection — the 3rd row
+    // merges into the **existing line below** the selection ("ee" → "cee");
+    // only past the buffer end does a new line open
     let mut f = Fixture::at("aa\nbb\ncc\ndd\nee\nff\n", 0, 0);
     f.feed(["<C-v>", "j", "j", "y"]); // ["a", "b", "c"]
-    f.feed(["3", "G", "<C-v>", "j", "p"]); // 选区 = 行 2-3
+    f.feed(["3", "G", "<C-v>", "j", "p"]); // selection = lines 2-3
     assert_eq!(f.text(), "aa\nbb\nac\nbd\ncee\nff\n");
 }
