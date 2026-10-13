@@ -1,316 +1,318 @@
-//! 第三十三轮独立审计（C 组）：可视模式 v/V/C-v 三 kind 及其交互域（2026-10-08）。
+//! Round-33 independent audit (group C): the three visual kinds v/V/C-v and their interaction area (2026-10-08).
 //!
-//! 每个 `#[test]` 对应一个新发现；断言写的是 **vim 9.1（patches 1-1752，
-//! `-Nu NONE -N -i NONE -s` typeahead oracle）实证过的期望结果**，因此在当前
-//! 工作树上必须失败。各测试注释给出：严重度、复现（缓冲 / (行,列) / 按键）、
-//! vim 期望 vs 引擎现状、oracle 证据（oracle 脚本输出原文）。已对照
-//! NOTES.md 已知分歧（含 #58 可视 J count、#74 $-块 gv）、第三十一轮审计
-//! 50 项（G/K 系列）与 第三十二轮审计 59 项（E 系列：块 o/O 矩形、`'>`
-//! 落点、gv 折叠、`` `[``/`` `] ``、可视 C-o、g;）逐条去重，下列条目均不在
-//! 既有账上。
+//! Each `#[test]` corresponds to one newly found issue; the assertions encode the **expected results
+//! empirically verified against vim 9.1 (patches 1-1752, `-Nu NONE -N -i NONE -s` typeahead oracle)**,
+//! so they must fail on the current working tree. Each test comment gives: severity, reproduction
+//! (buffer / (row, col) / keys), vim expectation vs current engine behavior, and oracle evidence
+//! (verbatim oracle script output). Cross-checked item by item against the known divergences in
+//! NOTES.md (incl. #58 visual J count, #74 $-block gv), the 50 round-31 audit items (G/K series)
+//! and the 59 round-32 audit items (E series: block o/O rectangles, `'>` landing, gv folding,
+//! `` `[``/`` `] ``, visual C-o, g;); none of the entries below is already on the books.
 //!
-//! 探针通道教训（本轮采样的一个假阴性来源）：以可视态结束时用 `:call
-//! writefile` 采样，可视 `:` 会把 `'<,'>` 种进命令行、执行范围命令把光标
-//! 拽到范围首行——gv/o 的光标采样必须在采样前先 Esc 回 Normal。
+//! Probe-channel lesson (one source of false negatives in this round's sampling): when sampling with
+//! `:call writefile` while still in visual state, the visual `:` seeds `'<,'>` into the command line,
+//! and executing a range command drags the cursor to the range's first line — cursor sampling for
+//! gv/o must Esc back to Normal before sampling.
 //!
-//! 本轮证伪（oracle 已证引擎与 vim 一致，免下轮重查）：
-//! - `$` 块状态经 V→C-v 往返存活（c1b：`<C-v>j$V<C-v>A` 两侧都在各行行尾追加）；
-//! - `5h` 超越行首：vim 也钳到 col 0 并视为移动成功、不响铃（c3a/c3b，块内外一致）；
-//! - 可视 `r` 后 `.`：vim 重放整个可视替换（"abcdefgh" 上 `vlllrXllll.` →
-//!   "XXXXXXXX"，r4），引擎的键序重放同构；
-//! - 可视 `p` 带 count：vim 按寄存器 × count 替换选区（c21 "aababab"），引擎一致；
-//! - Esc 落点在**反向**选区上：两侧都落选区起点（=光标端，c7b）；
-//! - 块 `o` 两次对合还原矩形（c26 "bcdef\nb"）、块 `o` 后 d（q10）、块 `o`
-//!   后 `$A`（q11 各行自己行尾追加）：oracle 与引擎一致；
-//! - linewise/charwise 可视 `C`/`S` 的「多行塌成一行」语义（q4/q5/q6）：
-//!   引擎 `ops::apply` Change 的 effective span 与 vim 一致（分歧只剩块 C，
-//!   见 C10）；
-//! - `Vj>` 的光标（r10 落首行首个非空白）、`Vju` 的光标（c13 落行首）、
-//!   前向选区的 gv 光标（r1 落 '> 侧末字符）、`Vj` 形 gv 的 linewise 光标
-//!   （E3b 修复的 col-0 形状两侧巧合一致）；
-//! - linewise `Vj<` 正常去缩进（b1）；`3g C-a` 于单行 linewise 选区（c4：
-//!   两侧都只给首个数字 +3）。
+//! Falsified this round (oracle proved engine and vim agree; no need to re-check next round):
+//! - `$` survives a blockstate V→C-v round trip (c1b: `<C-v>j$V<C-v>A` appends at each line's end on both sides);
+//! - `5h` past the line start: vim also clamps to col 0, treats the motion as successful and does not ring the bell (c3a/c3b, same inside and outside blocks);
+//! - visual `r` then `.`: vim replays the whole visual replace (`vlllrXllll.` on "abcdefgh" →
+//!   "XXXXXXXX", r4); the engine's key-sequence replay is isomorphic;
+//! - visual `p` with count: vim replaces the selection with register × count (c21 "aababab"); engine agrees;
+//! - Esc landing on a **reversed** selection: both sides land at the selection start (= cursor end, c7b);
+//! - block `o` twice restores the rectangle involution (c26 "bcdef\nb"), block `o` then d (q10), block `o`
+//!   then `$A` (q11 appends at each line's own end): oracle and engine agree;
+//! - the "collapse multiple lines into one" semantics of linewise/charwise visual `C`/`S` (q4/q5/q6):
+//!   the effective span of the engine's `ops::apply` Change agrees with vim (only block C diverges, see C10);
+//! - cursor of `Vj>` (r10 lands at first non-blank of the first line), cursor of `Vju` (c13 lands at line
+//!   start), gv cursor of a forward selection (r1 lands at the last char on the '> side), the linewise cursor
+//!   of the `Vj`-shaped gv (the col-0 shape fixed in E3b coincidentally agrees on both sides);
+//! - linewise `Vj<` dedents normally (b1); `3g C-a` on a single-line linewise selection (c4: both sides add +3 only to the first number).
 
 mod common;
 
 use common::edit;
 
 // ---------------------------------------------------------------------------
-// C1（P1）v/V/C-v kind 切换不重置块虚拟列——陈旧 block_cursor_col 把矩形压窄
+// C1 (P1) switching v/V/C-v kind does not reset the block virtual column — a stale block_cursor_col squeezes the rectangle narrow
 //
-// 复现 A：buffer "abc\nabc\n"、(0,0)，按键 <C-v> l v l <C-v> d。
-//   vim 9.1（oracle c1a，两次复跑一致）：C-v→v→C-v 转换保留锚点/光标的
-//   实际列，块 = col 0..3（单行）→ d 删掉第 1 行全部 → "\nabc\n"。
-//   引擎：`VisualCmd::ToggleKind` 只改 kind，`block_cursor_col` 仍是第一次
-//   `l` 留下的 1 → 块被读成 col 0..2 → 只删 "ab" → "c\nabc\n"。
-// 复现 B：buffer "abc\ndef\n"、(0,0)，按键 <C-v> l j v l <C-v> d。
-//   vim（oracle c1a2）：两行各删 3 列 → "\n\n"。
-//   引擎：陈旧虚拟列 1 → "c\nf\n"。
-//   （root cause 线索：src/state.rs `execute_visual_cmd` 的
-//   `VisualCmd::ToggleKind` 臂不清理 block_cursor_col/block_anchor_vcol。）
+// Repro A: buffer "abc\nabc\n", (0,0), keys <C-v> l v l <C-v> d.
+//   vim 9.1 (oracle c1a, two re-runs agree): the C-v→v→C-v transitions keep the anchor/cursor's
+//   actual columns, block = col 0..3 (single line) → d deletes all of line 1 → "\nabc\n".
+//   Engine: `VisualCmd::ToggleKind` only changes the kind; `block_cursor_col` stays at 1 left over
+//   from the first `l` → the block is read as col 0..2 → only "ab" is deleted → "c\nabc\n".
+// Repro B: buffer "abc\ndef\n", (0,0), keys <C-v> l j v l <C-v> d.
+//   vim (oracle c1a2): 3 columns deleted from each line → "\n\n".
+//   Engine: stale virtual column 1 → "c\nf\n".
+//   (root-cause clue: the `VisualCmd::ToggleKind` arm of `execute_visual_cmd` in src/state.rs does
+//   not clean up block_cursor_col/block_anchor_vcol.)
 #[test]
 fn c1_toggle_kind_keeps_stale_block_virtual_column() {
     let f = edit("abc\nabc\n", 0, 0, &["<C-v>", "l", "v", "l", "<C-v>", "d"]);
-    assert_eq!(f.text(), "\nabc\n", "vim 9.1: v→C-v 转换后块为 col 0..3，d 删整行内容");
+    assert_eq!(f.text(), "\nabc\n", "vim 9.1: after the v→C-v transition the block is col 0..3, d deletes the whole line content");
     let f = edit("abc\ndef\n", 0, 0, &["<C-v>", "l", "j", "v", "l", "<C-v>", "d"]);
-    assert_eq!(f.text(), "\n\n", "vim 9.1: 两行各删 col 0..3");
+    assert_eq!(f.text(), "\n\n", "vim 9.1: col 0..3 deleted from each of the two lines");
 }
 
 // ---------------------------------------------------------------------------
-// C2（P1）j/k 的块列钳制是永久性的——空行/短行上走一遭后矩形宽度不再恢复
+// C2 (P1) the block-column clamping of j/k is permanent — after passing an empty/short line the rectangle width never comes back
 //
-// 复现 A：buffer "abcdef\n\nabcdef\n"、(0,0)，按键 <C-v> 3 l j k d。
-//   vim 9.1（oracle c2）：curswant 是列记忆，j 到空行矩形在该行呈零宽，
-//   k 回来后恢复 col 0..4 → 两行各删 "abcd" → "ef\n\nef\n"。
-//   引擎：goto_motion 的 Up/Down 臂把 min(col, 着陆行宽) 写回
-//   block_cursor_col 本体（src/state.rs ~1959），col 永久变 0 → 只删各
-//   行 'a' → "bcdef\n\nabcdef\n"。
-// 复现 B（短行）：buffer "abcdef\nab\nabcdef\n"、(0,0)，同键。
-//   vim（oracle c2c）：→ "ef\nab\nabcdef\n"（中间行内容保留）。
-//   引擎：col 钳到 2 后回不来 → "def\n\ndef\n"。
-//   （E1c 修的「在短行上时矩形收窄」本身与 vim 一致；缺口是 vim 只在
-//   该行收窄显示，curswant 从不因 j/k 改写。）
+// Repro A: buffer "abcdef\n\nabcdef\n", (0,0), keys <C-v> 3 l j k d.
+//   vim 9.1 (oracle c2): curswant is a column memory; j to the empty line shows the rectangle at
+//   zero width on that line, and k coming back restores col 0..4 → "abcd" deleted from each line →
+//   "ef\n\nef\n".
+//   Engine: the Up/Down arms of goto_motion write min(col, landing-line width) back into
+//   block_cursor_col itself (src/state.rs ~1959); col becomes permanently 0 → only 'a' is deleted
+//   from each line → "bcdef\n\nabcdef\n".
+// Repro B (short line): buffer "abcdef\nab\nabcdef\n", (0,0), same keys.
+//   vim (oracle c2c): → "ef\nab\nabcdef\n" (middle-line content preserved).
+//   Engine: col clamped to 2 and never restored → "def\n\ndef\n".
+//   (The "rectangle narrows while on the short line" fixed in E1c itself agrees with vim; the gap
+//   is that vim only narrows the display on that line — curswant is never rewritten by j/k.)
 #[test]
 fn c2_jk_clamp_destroys_block_width_permanently() {
-    // oracle 复验（2026-10-08）：`<C-v>3ljk` 之后 k 把选区折叠回首行，
-    // `d` 只删 row 0 的 cols 0..4（初稿 case A 的 "ef\n\nef" 是通道伪影
-    // ——与本文件头部警告的采样陷阱同源）；case B 与复验一致。语义点：
-    // curswant 不因 j/k 永久收窄（旧引擎把 min(col,row宽) 写回 bcc，
-    // 之后连 row 0 的宽度都回不来）。
+    // Oracle re-verification (2026-10-08): after `<C-v>3ljk`, k collapses the selection back to the
+    // first line and `d` deletes only cols 0..4 of row 0 (the "ef\n\nef" in the draft case A was a
+    // channel artifact — same origin as the sampling trap warned about in this file's header); case
+    // B matches the re-verification. Semantic point: curswant is not permanently narrowed by j/k
+    // (the old engine wrote min(col, row width) back to bcc, after which even row 0's width could not come back).
     let f = edit("abcdef\n\nabcdef\n", 0, 0, &["<C-v>", "3", "l", "j", "k", "d"]);
-    assert_eq!(f.text(), "ef\n\nabcdef\n", "vim 9.1: k 折叠选区，块宽在 row 0 恢复满宽");
+    assert_eq!(f.text(), "ef\n\nabcdef\n", "vim 9.1: k collapses the selection, block width restored to full at row 0");
     let f = edit("abcdef\nab\nabcdef\n", 0, 0, &["<C-v>", "3", "l", "j", "k", "d"]);
     assert_eq!(
         f.text(),
         "ef\nab\nabcdef\n",
-        "vim 9.1: 短行内容不参与删除，row 0 删 col 0..4"
+        "vim 9.1: short-line content is not deleted, col 0..4 deleted at row 0"
     );
 }
 
 // ---------------------------------------------------------------------------
-// C3（P1）块可视 g C-a 的 count 公式：vim 逐行 +count*(i+1)，引擎 +count+i
+// C3 (P1) count formula of block-visual g C-a: vim adds +count*(i+1) per line, engine adds +count+i
 //
-// 复现：buffer "1\n1\n1\n"、(0,0)，按键 <C-v> j j 2 g <C-a>。
-//   vim 9.1（oracle r11/g5）：3\n5\n7（第 i 行 +2*(i+1)）。
-//   引擎：SequentialIncrement 用 `base + i`（src/state.rs
-//   VisualCmd::SequentialIncrement）→ 3\n4\n5。count=1 时两公式重合
-//   （K1 的探针恰好只压了 count=1）。
+// Repro: buffer "1\n1\n1\n", (0,0), keys <C-v> j j 2 g <C-a>.
+//   vim 9.1 (oracle r11/g5): 3\n5\n7 (line i gets +2*(i+1)).
+//   Engine: SequentialIncrement uses `base + i` (src/state.rs VisualCmd::SequentialIncrement) →
+//   3\n4\n5. With count=1 the two formulas coincide (the K1 probe happened to only exercise count=1).
 #[test]
 fn c3_block_gca_count_multiplies_per_line() {
     let f = edit("1\n1\n1\n", 0, 0, &["<C-v>", "j", "j", "2", "g", "<C-a>"]);
-    assert_eq!(f.text(), "3\n5\n7\n", "vim 9.1: 第 i 行 +count*(i+1) → 3/5/7");
+    assert_eq!(f.text(), "3\n5\n7\n", "vim 9.1: line i gets +count*(i+1) → 3/5/7");
 }
 
 // ---------------------------------------------------------------------------
-// C4（P1）块可视 g C-a 无视块列边界——把块外整行的数字也递增
+// C4 (P1) block-visual g C-a ignores the block column bounds — it increments numbers outside the block too
 //
-// 复现：buffer "x1\nx2\nx3\n"、(0,0)（块只罩住各行的 'x' 列），按键
-// <C-v> g <C-a>。
-//   vim 9.1（oracle c5）：块列内没有数字 → 缓冲原样不动。
-//   引擎：SequentialIncrement 对 span 覆盖的「行」逐行把光标摆到行首再
-//   增量（span 又是 anchor==cursor 的对角 charwise 跨度，实际只处理第 1
-//   行）→ 第 1 行变 "x2" → "x2\nx2\nx3\n"。两处都错：作用行与作用列都
-//   越出块边界。
+// Repro: buffer "x1\nx2\nx3\n", (0,0) (the block only covers the 'x' column of each line), keys
+// <C-v> g <C-a>.
+//   vim 9.1 (oracle c5): no number inside the block columns → buffer untouched.
+//   Engine: SequentialIncrement walks the lines covered by the span, placing the cursor at each
+//   line start before incrementing (and the span is the diagonal charwise span of anchor==cursor,
+//   so it effectively only processes line 1) → line 1 becomes "x2" → "x2\nx2\nx3\n". Wrong on both
+//   counts: both the affected lines and columns escape the block bounds.
 #[test]
 fn c4_block_gca_ignores_block_columns() {
     let f = edit("x1\nx2\nx3\n", 0, 0, &["<C-v>", "g", "<C-a>"]);
-    assert_eq!(f.text(), "x1\nx2\nx3\n", "vim 9.1: 块列内无数字时 g C-a 不动缓冲");
+    assert_eq!(f.text(), "x1\nx2\nx3\n", "vim 9.1: g C-a leaves the buffer alone when no number lies in the block columns");
 }
 
 // ---------------------------------------------------------------------------
-// C5（P1）块可视 `>` 响铃拒绝——vim 对三种 kind 都缩进高亮行
+// C5 (P1) block-visual `>` rings the bell and refuses — vim indents highlighted lines for all three kinds
 //
-// 复现：buffer "ab\ncd\n"、(0,0)，按键 <C-v> j >。（引擎默认 et/ts=4/sw=4
-// 与 oracle 的 `:set ts=4 sw=4 et` 对齐。）
-//   vim 9.1（oracle f1）：两行各缩进一格 → "    ab\n    cd\n"，光标落
-//   首行行首（offset 0），无铃声。
-//   引擎：apply_block_operator 的 `_ =>` 兜底臂对 Indent* 只响铃
-//   （src/state.rs ~2903）→ 文本不动 + bell。
-//   对照：linewise `Vj>` 引擎与 vim 一致（r10，光标落首个非空白）。
+// Repro: buffer "ab\ncd\n", (0,0), keys <C-v> j >. (Engine defaults et/ts=4/sw=4 align with the
+// oracle's `:set ts=4 sw=4 et`.)
+//   vim 9.1 (oracle f1): one column of indent added to each line → "    ab\n    cd\n", cursor lands
+//   at the first line's start (offset 0), no bell.
+//   Engine: the `_ =>` fallback arm of apply_block_operator only rings the bell for Indent*
+//   (src/state.rs ~2903) → text unchanged + bell.
+//   For contrast: linewise `Vj>` agrees between engine and vim (r10, cursor at first non-blank).
 #[test]
 fn c5_block_gt_indents_instead_of_bell() {
     let f = edit("ab\ncd\n", 0, 0, &["<C-v>", "j", ">"]);
-    assert_eq!(f.text(), "    ab\n    cd\n", "vim 9.1: 块 > 缩进高亮行（et 4 空格）");
-    assert_eq!(f.cursor(), 0, "vim 9.1: 光标落首行行首");
-    assert_eq!(f.host.bells, 0, "vim 9.1: 成功的缩进不响铃");
+    assert_eq!(f.text(), "    ab\n    cd\n", "vim 9.1: block > indents the highlighted lines (et, 4 spaces)");
+    assert_eq!(f.cursor(), 0, "vim 9.1: cursor lands at the first line's start");
+    assert_eq!(f.host.bells, 0, "vim 9.1: a successful indent does not ring the bell");
 }
 
 // ---------------------------------------------------------------------------
-// C6（P1）块可视 I/A 丢弃 count——vim 把键入文本在每行重复 count 次
+// C6 (P1) block-visual I/A discards the count — vim repeats the typed text count times on each line
 //
-// 复现 A：buffer "aa\nbb\n"、(0,0)，按键 <C-v> j 3 I，键入 "-"，Esc。
-//   vim 9.1（oracle c9）："---aa\n---bb\n"。
-//   引擎：visual_key 的 I/A 直通 begin_block_insert，insert_repeat 只在
-//   execute_command 的 EnterInsert 臂装配、且显式排除块会话 → "-aa\n-bb\n"。
-// 复现 B（A 同族）：buffer "ab\ncd\n"、(0,0)，<C-v> j 3 A + "-" + Esc。
-//   vim（oracle d2）："a---b\nc---d\n"；引擎："a-b\nc-d\n"。
+// Repro A: buffer "aa\nbb\n", (0,0), keys <C-v> j 3 I, type "-", Esc.
+//   vim 9.1 (oracle c9): "---aa\n---bb\n".
+//   Engine: the I/A of visual_key goes straight into begin_block_insert; insert_repeat is only
+//   assembled in the EnterInsert arm of execute_command and explicitly excludes block sessions → "-aa\n-bb\n".
+// Repro B (same family as A): buffer "ab\ncd\n", (0,0), <C-v> j 3 A + "-" + Esc.
+//   vim (oracle d2): "a---b\nc---d\n"; engine: "a-b\nc-d\n".
 #[test]
 fn c6_block_insert_ignores_count_repeat() {
     let mut f = edit("aa\nbb\n", 0, 0, &["<C-v>", "j", "3", "I"]);
     f.type_text("-");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "---aa\n---bb\n", "vim 9.1: 3I 在每行键入三份文本");
+    assert_eq!(f.text(), "---aa\n---bb\n", "vim 9.1: 3I types three copies of the text on each line");
 
     let mut f = edit("ab\ncd\n", 0, 0, &["<C-v>", "j", "3", "A"]);
     f.type_text("-");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "a---b\nc---d\n", "vim 9.1: 3A 在每行行尾重复三份");
+    assert_eq!(f.text(), "a---b\nc---d\n", "vim 9.1: 3A repeats three copies at each line's end");
 }
 
 // ---------------------------------------------------------------------------
-// C7（P2）进入可视模式的 count 被丢弃——vim 的 {count}v/V/C-v 预选 count 个单元
+// C7 (P2) the count entering visual mode is discarded — vim's {count}v/V/C-v preselects count units
 //
-// 复现 A：buffer "abcdef\n"、(0,0)，按键 3 v x。
-//   vim 9.1（oracle c10）：3v 选中 3 个字符 → "def\n"。
-//   引擎：EnterVisual 臂忽略 count（src/state.rs ~3905）→ 选 1 字符 → "bcdef\n"。
-// 复现 B：buffer "aaa\nbbb\nccc\n"、(0,0)，3 V x。vim（oracle c19）删 3 行 →
-//   空缓冲；引擎删 1 行 → "bbb\nccc\n"。
-// 复现 C：buffer "abcdef\nabcdef\n"、(0,0)，3 <C-v> x。vim（oracle c20）删
-//   第 1 行 3 列 → "def\nabcdef\n"；引擎删 1 列 → "bcdef\nabcdef\n"。
-//   （与 audit2 证伪项「3vj 的 count 被 vim 丢弃」不同账：那是选区 motion
-//   前的 count，这里 count 属于 v/V/C-v 键本身。）
+// Repro A: buffer "abcdef\n", (0,0), keys 3 v x.
+//   vim 9.1 (oracle c10): 3v selects 3 characters → "def\n".
+//   Engine: the EnterVisual arm ignores the count (src/state.rs ~3905) → selects 1 character → "bcdef\n".
+// Repro B: buffer "aaa\nbbb\nccc\n", (0,0), 3 V x. vim (oracle c19) deletes 3 lines →
+//   empty buffer; engine deletes 1 line → "bbb\nccc\n".
+// Repro C: buffer "abcdef\nabcdef\n", (0,0), 3 <C-v> x. vim (oracle c20) deletes 3
+//   columns of line 1 → "def\nabcdef\n"; engine deletes 1 column → "bcdef\nabcdef\n".
+//   (Distinct from the audit2 falsified item "3vj's count is discarded by vim": that count precedes
+//   the selection motion; here the count belongs to the v/V/C-v key itself.)
 #[test]
 fn c7_count_on_visual_entry_selects_count_units() {
     let f = edit("abcdef\n", 0, 0, &["3", "v", "x"]);
-    assert_eq!(f.text(), "def\n", "vim 9.1: 3v 预选 3 个字符");
+    assert_eq!(f.text(), "def\n", "vim 9.1: 3v preselects 3 characters");
     let f = edit("aaa\nbbb\nccc\n", 0, 0, &["3", "V", "x"]);
-    assert_eq!(f.text(), "", "vim 9.1: 3V 预选 3 行");
+    assert_eq!(f.text(), "", "vim 9.1: 3V preselects 3 lines");
     let f = edit("abcdef\nabcdef\n", 0, 0, &["3", "<C-v>", "x"]);
-    assert_eq!(f.text(), "def\nabcdef\n", "vim 9.1: 3C-v 预选 3 列块");
+    assert_eq!(f.text(), "def\nabcdef\n", "vim 9.1: 3C-v preselects a 3-column block");
 }
 
 // ---------------------------------------------------------------------------
-// C8（P1）块可视 X 删掉整行——vim 在块模式下按块列删（同 x）
+// C8 (P1) block-visual X deletes whole lines — vim deletes by block columns in block mode (same as x)
 //
-// 复现：buffer "ab\ncd\nef\n"、(0,0)，按键 <C-v> j X。
-//   vim 9.1（oracle c11a）：块 1 列（col 0）→ 删掉前两行各 1 字符 →
-//   "b\nd\nef\n"。
-//   引擎：X 注册成 LinewiseOp(Delete)（src/tables.rs ~664，oracle 探针当时
-//   只压过 charwise 形）→ 前两行整行消失 → "ef\n"。
+// Repro: buffer "ab\ncd\nef\n", (0,0), keys <C-v> j X.
+//   vim 9.1 (oracle c11a): 1-column block (col 0) → deletes 1 character from each of the first two
+//   lines → "b\nd\nef\n".
+//   Engine: X is registered as LinewiseOp(Delete) (src/tables.rs ~664; the oracle probe at the time
+//   only exercised the charwise form) → both first lines vanish entirely → "ef\n".
 #[test]
 fn c8_block_x_deletes_block_not_lines() {
     let f = edit("ab\ncd\nef\n", 0, 0, &["<C-v>", "j", "X"]);
-    assert_eq!(f.text(), "b\nd\nef\n", "vim 9.1: 块模式下 X 删块列（此处 1 列）");
+    assert_eq!(f.text(), "b\nd\nef\n", "vim 9.1: in block mode X deletes the block columns (here 1 column)");
 }
 
 // ---------------------------------------------------------------------------
-// C9（P1）块可视 Y 按行 yank——vim 在块模式下 yank 矩形块
+// C9 (P1) block-visual Y yanks linewise — vim yanks the rectangular block in block mode
 //
-// 复现：buffer "ab\ncd\nef\n"、(0,0)，按键 <C-v> j Y j P。
-//   vim 9.1（oracle c11b）：Y 拿到 1 列块寄存器 ["a","c"]，光标回块首
-//   (0,0)；j 到第 2 行后 P 按块粘贴在 col 0 前 → "ab\nacd\ncef\n"。
-//   引擎：Y → LinewiseOp(Yank) → 按行 yank ["ab","cd"]，光标滞留在可视
-//   光标端 (1,0)；j P 按行粘出两整行 → "ab\ncd\nab\ncd\nef\n"。
+// Repro: buffer "ab\ncd\nef\n", (0,0), keys <C-v> j Y j P.
+//   vim 9.1 (oracle c11b): Y gets a 1-column block register ["a","c"], cursor returns to the block
+//   start (0,0); after j to line 2, P puts the block before col 0 → "ab\nacd\ncef\n".
+//   Engine: Y → LinewiseOp(Yank) → linewise yank ["ab","cd"], cursor stays at the visual cursor end
+//   (1,0); j P puts two whole lines linewise → "ab\ncd\nab\ncd\nef\n".
 #[test]
 fn c9_block_y_yanks_block_not_lines() {
     let f = edit("ab\ncd\nef\n", 0, 0, &["<C-v>", "j", "Y", "j", "P"]);
-    assert_eq!(f.text(), "ab\nacd\ncef\n", "vim 9.1: 块 Y yank 矩形，P 块粘回");
+    assert_eq!(f.text(), "ab\nacd\ncef\n", "vim 9.1: block Y yanks the rectangle, P puts it back as a block");
 }
 
 // ---------------------------------------------------------------------------
-// C10（P1）块可视 C 按行级 change 塌行——vim 每个高亮行各保留一行进入插入
+// C10 (P1) block-visual C collapses lines with a linewise change — vim keeps one line per highlighted line and enters insert
 //
-// 复现：buffer "abcd\nefgh\nijkl\n"、(0,0)，按键 <C-v> j C，键入 "-"，Esc。
-//   vim 9.1（oracle q4；c12a 同形）：两行各变 "-" → "-\n-\nijkl\n"。
-//   引擎：C/S 共用 LinewiseOp(Change)，effective span 删掉两行内容**含
-//   中间换行** → 塌成一行 "-\nijkl\n"（S 的语义；charwise/linewise 的
-//   C 与 S 塌缩两侧一致已证伪，缺口只在块 C）。
+// Repro: buffer "abcd\nefgh\nijkl\n", (0,0), keys <C-v> j C, type "-", Esc.
+//   vim 9.1 (oracle q4; c12a same shape): each of the two lines becomes "-" → "-\n-\nijkl\n".
+//   Engine: C/S share LinewiseOp(Change), the effective span deletes both lines' content **including
+//   the newline between them** → collapses to one line "-\nijkl\n" (S's semantics; the falsified
+//   result showed charwise/linewise C and S collapse identically on both sides — the gap is only block C).
 #[test]
 fn c10_block_c_keeps_one_line_per_highlighted_line() {
     let mut f = edit("abcd\nefgh\nijkl\n", 0, 0, &["<C-v>", "j", "C"]);
     f.type_text("-");
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "-\n-\nijkl\n", "vim 9.1: 块 C 逐行 change，行数不塌");
+    assert_eq!(f.text(), "-\n-\nijkl\n", "vim 9.1: block C changes per line without collapsing the line count");
 }
 
 // ---------------------------------------------------------------------------
-// C11（P2）Esc 退出可视模式后光标被搬回选区起点——vim 停在可视光标端
+// C11 (P2) after Esc exits visual mode the cursor is moved back to the selection start — vim stays at the visual cursor end
 //
-// 复现 A：buffer "abcdef\n"、(0,0)，按键 l l l v l l l <Esc>。
-//   vim 9.1（oracle e1）：光标停在可视光标端 offset 5。
-//   引擎：exit_visual 无条件 `cursor.offset = lo`（src/state.rs ~2725）→
-//   锚点列 offset 3。
-// 复现 B：buffer "aaa\nbbb\nccc\n"、(0,0)，V j <Esc>。vim（oracle e3）光标
-//   (2,1)=offset 4；引擎 offset 0。
-// 复现 C：buffer "abcdef\nabcdef\nabcdef\n"、(0,0)，<C-v> j j <Esc>。
-//   vim（oracle e6）光标 (3,1)=offset 12；引擎 offset 0。
-//   （反向选区两侧一致落选区起点=光标端，已证伪；缺口是全部前向选区。）
+// Repro A: buffer "abcdef\n", (0,0), keys l l l v l l l <Esc>.
+//   vim 9.1 (oracle e1): cursor stays at the visual cursor end, offset 5.
+//   Engine: exit_visual unconditionally sets `cursor.offset = lo` (src/state.rs ~2725) → the anchor
+//   column, offset 3.
+// Repro B: buffer "aaa\nbbb\nccc\n", (0,0), V j <Esc>. vim (oracle e3) cursor at
+//   (2,1)=offset 4; engine offset 0.
+// Repro C: buffer "abcdef\nabcdef\nabcdef\n", (0,0), <C-v> j j <Esc>.
+//   vim (oracle e6) cursor at (3,1)=offset 12; engine offset 0.
+//   (For reversed selections both sides agree at the selection start = cursor end, falsified; the
+//   gap is all forward selections.)
 #[test]
 fn c11_esc_keeps_cursor_at_visual_end() {
     let f = edit("abcdef\n", 0, 0, &["l", "l", "l", "v", "l", "l", "l", "<Esc>"]);
-    assert_eq!(f.cursor(), 5, "vim 9.1: Esc 后光标停在可视光标端");
+    assert_eq!(f.cursor(), 5, "vim 9.1: after Esc the cursor stays at the visual cursor end");
     let f = edit("aaa\nbbb\nccc\n", 0, 0, &["V", "j", "<Esc>"]);
-    assert_eq!(f.cursor(), 4, "vim 9.1: linewise 前向选区 Esc 光标在末行");
+    assert_eq!(f.cursor(), 4, "vim 9.1: forward linewise selection's Esc cursor is on the last line");
     let f = edit("abcdef\nabcdef\nabcdef\n", 0, 0, &["<C-v>", "j", "j", "<Esc>"]);
-    // (3,1) 1-based = 第 3 行行首 = offset 14（探针初稿把 \n 算漏了）
-    assert_eq!(f.cursor(), 14, "vim 9.1: 块选区 Esc 光标在末行行首");
+    // (3,1) 1-based = start of line 3 = offset 14 (the probe draft miscounted the \n)
+    assert_eq!(f.cursor(), 14, "vim 9.1: block selection's Esc cursor is at the last line's start");
 }
 
 // ---------------------------------------------------------------------------
-// C12（P2）gv 恢复反向选区时光标落在 '> 侧——vim 回到当初的光标端
+// C12 (P2) gv restoring a reversed selection puts the cursor on the '> side — vim returns to the original cursor end
 //
-// 复现：buffer "abcdef\n"、(0,0)，按键 l l l v h <Esc> g v（选区 col 2..3，
-// 锚在 3、光标在 2）。
-//   vim 9.1（oracle r2，Esc 后 Normal 态采样）：gv 把光标放回原可视光标端
-//   offset 2。
-//   引擎：RestoreVisual 一律 cursor = floor(hi-1)（src/state.rs ~4840）→
-//   offset 3。前向选区两公式重合（r1 已证伪）；last_visual 不记「哪端是
-//   当时光标」是根因。
+// Repro: buffer "abcdef\n", (0,0), keys l l l v h <Esc> g v (selection col 2..3,
+// anchored at 3, cursor at 2).
+//   vim 9.1 (oracle r2, sampled in Normal state after Esc): gv puts the cursor back at the original
+//   visual cursor end, offset 2.
+//   Engine: RestoreVisual always sets cursor = floor(hi-1) (src/state.rs ~4840) → offset 3. For
+//   forward selections the two formulas coincide (r1 falsified); the root cause is that last_visual
+//   does not record which end was the cursor at the time.
 #[test]
 fn c12_gv_backward_cursor_returns_to_original_end() {
     let f = edit("abcdef\n", 0, 0, &["l", "l", "l", "v", "h", "<Esc>", "g", "v"]);
-    assert_eq!(f.cursor(), 2, "vim 9.1: gv 反向恢复落在原光标端 offset 2");
+    assert_eq!(f.cursor(), 2, "vim 9.1: gv restoring a reversed selection lands on the original cursor end, offset 2");
 }
 
 // ---------------------------------------------------------------------------
-// C13（P2）gv 恢复 linewise 选区丢光标列——vim 保留当初的列，引擎钳回首非空白
+// C13 (P2) gv restoring a linewise selection loses the cursor column — vim keeps the original column, engine clamps to first non-blank
 //
-// 复现：buffer "aaa\nbbbb\nccc\n"、(0,0)，按键 V $ j <Esc> g v。
-//   vim 9.1（oracle r3）：$ 把 curswant 定在行尾虚列，j 带列下移，gv 后
-//   光标回到 (2,4)（"bbbb" 末字符，offset 7）。
-//   引擎：RestoreVisual 的 Line 臂落 `first_non_blank(末行)`（注释引用的
-//   「audit E3b follow-up」探针用的是 col 0 的 Vj 形，两种落法巧合重合）
-//   → offset 4。
+// Repro: buffer "aaa\nbbbb\nccc\n", (0,0), keys V $ j <Esc> g v.
+//   vim 9.1 (oracle r3): $ sets curswant to the virtual column at line end, j carries the column
+//   down, and after gv the cursor returns to (2,4) (last char of "bbbb", offset 7).
+//   Engine: the Line arm of RestoreVisual lands on `first_non_blank(last line)` (the "audit E3b
+//   follow-up" probe cited in the comment used the col-0 Vj shape, where both landings coincide by
+//   accident) → offset 4.
 #[test]
 fn c13_gv_linewise_restores_cursor_column() {
     let f = edit("aaa\nbbbb\nccc\n", 0, 0, &["V", "$", "j", "<Esc>", "g", "v"]);
-    assert_eq!(f.cursor(), 7, "vim 9.1: gv 恢复 linewise 选区保留光标列");
+    assert_eq!(f.cursor(), 7, "vim 9.1: gv restoring a linewise selection keeps the cursor column");
 }
 
 // ---------------------------------------------------------------------------
-// C14（P3）块可视 `<` 的光标不动——vim 文本不变（quirk）但光标落首行首非空白
+// C14 (P3) cursor does not move after block-visual `<` — vim's text is unchanged (quirk) but the cursor lands at the first line's first non-blank
 //
-// 复现：buffer "    ab\n    cd\n"、(0,0)，按键 <C-v> j <。（et/ts=4/sw=4
-// 与 oracle 对齐。）
-//   vim 9.1（oracle f2/r9）：文本不变（块 `<` 不去缩进是 vim 自身行为），
-//   光标落 (1,5) = offset 4（首行首个非空白），无失败感。
-//   引擎：apply_block_operator 兜底臂响铃且光标滞留可视端 offset 7。
-//   （文本面两侧一致；差异在光标落点与铃声。）
+// Repro: buffer "    ab\n    cd\n", (0,0), keys <C-v> j <. (et/ts=4/sw=4 aligned with the oracle.)
+//   vim 9.1 (oracle f2/r9): text unchanged (block `<` not dedenting is vim's own behavior), cursor
+//   lands at (1,5) = offset 4 (first non-blank of the first line), no failure feedback.
+//   Engine: the fallback arm of apply_block_operator rings the bell and the cursor stays at the
+//   visual end, offset 7.
+//   (Text side agrees on both sides; the difference is the cursor landing and the bell.)
 #[test]
 fn c14_block_lt_moves_cursor_to_first_non_blank() {
     let f = edit("    ab\n    cd\n", 0, 0, &["<C-v>", "j", "<"]);
-    assert_eq!(f.text(), "    ab\n    cd\n", "vim 9.1: 块 < 不改文本（两侧一致）");
-    assert_eq!(f.cursor(), 4, "vim 9.1: 光标落首行首个非空白");
-    assert_eq!(f.host.bells, 0, "vim 9.1: 不作失败反馈");
+    assert_eq!(f.text(), "    ab\n    cd\n", "vim 9.1: block < does not change the text (both sides agree)");
+    assert_eq!(f.cursor(), 4, "vim 9.1: cursor lands at the first line's first non-blank");
+    assert_eq!(f.host.bells, 0, "vim 9.1: no failure feedback");
 }
 
 // ---------------------------------------------------------------------------
-// C15（P1）块列模型整链按 1 格计 TAB——块选区跨 TAB 行的列边界全错
+// C15 (P1) the block column model counts a TAB as one cell throughout — block selections crossing TAB lines have wrong column bounds
 //
-// 复现：buffer "\tab\nabcdef\n"、(0,0)，按键 <C-v> l j d。（引擎默认 ts=4，
-// oracle 以 `:set ts=4` 对齐。）
+// Repro: buffer "\tab\nabcdef\n", (0,0), keys <C-v> l j d. (Engine default ts=4; oracle aligned
+// with `:set ts=4`.)
 //
-// 修正（audit6 复验）：本用例的原期望 "\t\nabcd\n" 是**错的**——它来自对
-// oracle 的误读，当时也自认"TAB 块缘取整规则未完全逆向"。9.1 权威 oracle
-// 复核（ts=4，ad-hoc PTY/typeahead 各一次，`getreg` 佐证）：
-//   `\tab\nabcdef\n` + `<C-v>ljd` → 缓冲区 "b\nf\n"，
-//   `"` 寄存器 = blockwise 宽 5、内容 "\\ta\nabcde"。
-//   即块 = 显示列 [0,4]：第 1 行覆盖 TAB(列0-3)+'a'(列4) → 删 "\\ta" 留 "b"；
-//   第 2 行覆盖 "abcde" → 留 "f"。块左缘就是锚点的显示列（TAB 的**起点** 0），
-//   并非"吸附到 TAB 末端"。引擎的 TAB 特判分支据此删除，块列统一走
-//   `display_column_with(ts)`（含 `l`/`h` 的虚列推进按字符显示宽度）。
+// Correction (re-verified in audit6): the original expectation of this case, "\t\nabcd\n", was
+// **wrong** — it came from a misreading of the oracle, and at the time already admitted "the TAB
+// block-edge rounding rule was not fully reverse-engineered". Re-check against the authoritative
+// 9.1 oracle (ts=4, one ad-hoc PTY run and one typeahead run, corroborated by `getreg`):
+//   `\tab\nabcdef\n` + `<C-v>ljd` → buffer "b\nf\n",
+//   `"` register = blockwise, width 5, content "\\ta\nabcde".
+//   I.e. the block = display columns [0,4]: line 1 covers TAB (cols 0-3) + 'a' (col 4) → deletes "\\ta" leaving "b";
+//   line 2 covers "abcde" → leaves "f". The block's left edge is the anchor's display column (the
+//   TAB's **start**, 0), not "snapped to the TAB's end". The engine's TAB special-case branch is
+//   removed accordingly; block columns uniformly go through `display_column_with(ts)` (and the
+//   virtual-column advance of `l`/`h` uses each character's display width).
 #[test]
 fn c15_block_columns_count_tab_as_one_cell() {
     let f = edit("\tab\nabcdef\n", 0, 0, &["<C-v>", "l", "j", "d"]);
-    assert_eq!(f.text(), "b\nf\n", "vim 9.1: 块缘按 tabstop 虚列计（块=[0,4]）");
+    assert_eq!(f.text(), "b\nf\n", "vim 9.1: block edges counted in tabstop virtual columns (block = [0,4])");
 }

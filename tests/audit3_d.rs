@@ -1,41 +1,44 @@
-//! audit3_d：寄存器 / 宏 / `.` 重放 / undo-redo / 插入-Replace 模式 独立审计
-//! （2026-10-08，第三轮）。
+//! audit3_d: independent audit of registers / macros / `.` replay / undo-redo / insert-Replace mode
+//! (2026-10-08, round 3).
 //!
-//! 每个发现一个 `#[test]`，断言写的是 **vim 9.1 oracle 的期望结果**，因此在
-//! 当前工作树上应当失败。oracle 证据写在各测试注释里：
-//! - typeahead 通道：`cd /tmp/ora && printf '<初始缓冲>' > N.txt && python3 -c
-//!   "open('k','wb').write(b'<按键字节>:wq\n')" && vim -Nu NONE -N -i NONE -n
-//!   -s k N.txt </dev/null`，读回 N.txt / writefile 采样；
-//! - undo/交互通道（typeahead 不等键、undo 块合并是通道伪影）：expect 驱动的
-//!   真 PTY 逐键 0.35s 投递（/tmp/ora/pty3.exp）。
+//! One `#[test]` per finding; the assertions hold the **expected results of the vim 9.1 oracle**, so
+//! they should fail on the current working tree. Oracle evidence is recorded in each test's comment:
+//! - typeahead channel: `cd /tmp/ora && printf '<initial buffer>' > N.txt && python3 -c
+//!   "open('k','wb').write(b'<key bytes>:wq\n')" && vim -Nu NONE -N -i NONE -n -s k N.txt
+//!   </dev/null`, read N.txt back / sample with writefile;
+//! - undo/interaction channel (typeahead does not wait for keys; undo-block merging is a channel
+//!   artifact): a real PTY driven by expect delivering keys one by one at 0.35s (/tmp/ora/pty3.exp).
 //!
-//! 范围：src/registers.rs、src/state.rs 的宏/`.`/undo 段、src/insert_mode.rs、
-//! src/ops.rs 寄存器漏斗、src/cmdline.rs `@:`/`:undo` 面。
+//! Scope: src/registers.rs, the macro/`.`/undo sections of src/state.rs, src/insert_mode.rs, the
+//! register funnel of src/ops.rs, the `@:`/`:undo` surface of src/cmdline.rs.
 //!
-//! 已证伪的怀疑（oracle 对照引擎一致，免下轮重查）：
-//! - 小删除重复进 "1（经典 1P-点 习惯用法）：oracle B 证伪——`x.` 后
-//!   @1=''、@-='b'，引擎一致（复核 15）；
-//! - `i<C-v>` 十进制/八进制口径：oracle E1-E3——vim 9.1 `C-v 65`/`C-v 065`/
-//!   `C-v x41` 全部得 'A'（十进制 + 显式 o/x 前缀），引擎一致；
-//! - 行首 <BS> 并线（bs=2 边界）：oracle F/F2——vim -Nu NONE 默认即允许
-//!   BS 跨行首（并线发生），引擎一致；行首无输入时 C-w/C-u 均无操作也已对齐；
-//! - undo 光标（普通命令）：oracle M1-M3——`Axy<Esc>u`/`ofoo<Esc>u`/行中
-//!   `x u` 的行列与引擎「首个编辑点」模型一致；
-//! - undo 粒度（`.` 是否独立 undo 步）：typeahead 通道会合并 undo 块（通道
-//!   伪影），PTY 逐键实证 `x.` `u` 只撤点重放那一步；引擎每命令一组，一致；
-//! - 算子待决中按 `u`：oracle W1/W2——vim 直接吞掉 u（撤销不执行）并取消
-//!   算子；引擎 Pending-trie Miss 同款吞键+取消，一致；
-//! - `.` 重放寄存器前缀 / yank 不清 redo / 小删除只进 `"-` / 块可视算子的
-//!   `.` 重放 / 计数插入里的 C-u（净文本为空，重复不粘出陈旧文本）/
-//!   Replace 模式 C-r 按打字覆盖（oracle Z21："Xac"）：全部一致；
-//! - `J`/`r` 不写寄存器（oracle AA1/AA3）：引擎漏斗不经过 store_delete，一致；
-//! - Ex `:d` 推移编号环（oracle L2：@1='l2'）：引擎同一漏斗，一致；
-//! - `3ifoo<C-w>x<Esc>`（计数插入里 C-w 取消重复，oracle W5="xzz"）与
-//!   `3Rab<C-w>x<Esc>`（oracle W6="xzzz"）：引擎同样放弃重复，一致；
-//! - 宏跨模式录制（type_text 的 Text 步进 macro_capture）、`qA` 追加、`@@`
-//!   链、`:reg` 含 "-/"/ 特殊槽：读码+既有探针一致。
-//! 另记轻微分歧（不立项）：`:reg` 行版式（vim 为「两空格+类型+两空格+
-//! "名+三空格+内容」，引擎为 "名在前的自有版式，PTY 采样式见 oracle RG）。
+//! Suspicions already falsified (oracle vs engine agree; skip next round):
+//! - repeated small deletes going into "1 (the classic 1P-dot idiom): falsified by oracle B — after
+//!   `x.` @1='' and @-='b'; engine agrees (re-check 15);
+//! - the decimal/octal convention of `i<C-v>`: oracle E1-E3 — vim 9.1 `C-v 65`/`C-v 065`/`C-v x41`
+//!   all yield 'A' (decimal + explicit o/x prefixes); engine agrees;
+//! - <BS> at line start joining lines (the bs=2 boundary): oracle F/F2 — `vim -Nu NONE` allows BS
+//!   across the line start by default (the join happens); engine agrees; C-w/C-u at line start with
+//!   nothing typed being no-ops is also aligned;
+//! - undo cursor (ordinary commands): oracle M1-M3 — the row/column of `Axy<Esc>u`/`ofoo<Esc>u`/mid-line
+//!   `x u` agrees with the engine's "first edit position" model;
+//! - undo granularity (whether `.` is an independent undo step): the typeahead channel merges undo
+//!   blocks (channel artifact); PTY per-key evidence shows `x.` then `u` undoes only the dot-replay
+//!   step; the engine groups one command per group — agrees;
+//! - pressing `u` in operator-pending: oracle W1/W2 — vim swallows the u directly (no undo executes)
+//!   and cancels the operator; the engine's Pending-trie Miss does the same swallow+cancel — agrees;
+//! - `.` replay carrying the register prefix / yank not clearing redo / small deletes only into `"-` /
+//!   `.` replay of block-visual operators / C-u inside counted inserts (net text empty, the repeat
+//!   pastes nothing stale) / Replace-mode C-r overwriting by typing (oracle Z21: "Xac"): all agree;
+//! - `J`/`r` not writing registers (oracle AA1/AA3): the engine's funnel never reaches store_delete — agrees;
+//! - Ex `:d` shifting the numbered ring (oracle L2: @1='l2'): the engine uses the same funnel — agrees;
+//! - `3ifoo<C-w>x<Esc>` (C-w cancels the repeat inside a counted insert, oracle W5="xzz") and
+//!   `3Rab<C-w>x<Esc>` (oracle W6="xzzz"): the engine also abandons the repeat — agrees;
+//! - macros recorded across modes (type_text's Text step feeding macro_capture), `qA` append, `@@`
+//!   chaining, `:reg` including the "-/"/ special slots: code reading + existing probes agree.
+//! Also noted, minor divergences (not filed): the line format of `:reg` (vim uses "two spaces + type
+//! + two spaces + name + three spaces + content", the engine has its own format with the name first;
+//! see oracle RG for the PTY sampling expression).
 
 mod common;
 
@@ -44,28 +47,29 @@ use std::matches;
 use vimcore::key::Key;
 use vimcore::mode::Mode;
 
-// ------------------------------------------------ `.` 重放 × count（oracle A / PTY V10）
+// ------------------------------------------------ `.` replay × count (oracle A / PTY V10)
 
-/// **发现 1（P1）**：`.` 的 [count] 应当**替换**被重放变更里记录的 count
-/// （`:h .` "Repeat last change, with count replaced with [count]"），
-/// 引擎却把 `last_change` 里的旧 count 键原样重放再乘以新 count。
-/// oracle（PTY 逐键 + typeahead 双通道）：`abcdef` 上 `3x` 得 `def`，随后
-/// `2.` vim 得 `f`（重放 x、count=2）；引擎把 [3,x] 重放两轮 → `def` 上先删
-/// 2 个再删 1 个 → 空行。
+/// **Finding 1 (P1)**: `.`'s [count] should **replace** the count recorded in the replayed change
+/// (`:h .` "Repeat last change, with count replaced with [count]"), but the engine replays the old
+/// count keys from `last_change` verbatim and then multiplies by the new count.
+/// oracle (PTY per-key + typeahead, both channels): on `abcdef`, `3x` yields `def`, then `2.` gives
+/// `f` in vim (replay x with count=2); the engine runs the [3,x] replay for two rounds → from `def`
+/// it deletes 2 then 1 more → empty line.
 #[test]
 fn dot_count_replaces_recorded_count_not_multiplies() {
     let mut f = Fixture::at("abcdef\n", 0, 0);
     f.feed(["3", "x"]);
     assert_eq!(f.text(), "def\n");
     f.feed(["2", "."]);
-    assert_eq!(f.text(), "f\n", "vim 9.1: 2. 重放 x 且 count 取 2，不是 3x×2");
+    assert_eq!(f.text(), "f\n", "vim 9.1: 2. replays x with count taken as 2, not 3x×2");
 }
 
-/// **发现 1b（P2）**：同一根因的计数插入变体。`3iab<Esc>` 后 `2.`：vim 重放
-/// 插入会话、count 替换为 2（净效果 "ab"×5，12 字节）；引擎把 [3,i,Text,Esc]
-/// 重放两轮，每轮 exit_insert 又按 count=3 复制 → "ab"×9。
-/// oracle（typeahead）：`zz` 上 `3iab<Esc>2.` → getline(1) 长度 12
-/// （"ababaababbzz"，5 份 "ab"）；引擎得 20 字节（9 份 "ab"）。
+/// **Finding 1b (P2)**: the counted-insert variant of the same root cause. After `3iab<Esc>`, `2.`:
+/// vim replays the insert session with the count replaced by 2 (net effect "ab"×5, 12 bytes); the
+/// engine replays [3,i,Text,Esc] for two rounds and each round's exit_insert copies again with
+/// count=3 → "ab"×9.
+/// oracle (typeahead): on `zz`, `3iab<Esc>2.` → getline(1) length 12 ("ababaababbzz", 5 copies of
+/// "ab"); the engine yields 20 bytes (9 copies of "ab").
 #[test]
 fn dot_after_counted_insert_replays_session_with_new_count() {
     let mut f = Fixture::at("zz\n", 0, 0);
@@ -79,36 +83,37 @@ fn dot_after_counted_insert_replays_session_with_new_count() {
     assert_eq!(
         line.chars().count(),
         12,
-        "vim 9.1: 2. 后共 5 份 \"ab\"（12 字节）；引擎把 3i 再跑两轮得 9 份"
+        "vim 9.1: after 2. there are 5 copies of \"ab\" (12 bytes); the engine runs the 3i for two more rounds getting 9 copies"
     );
 }
 
-// ------------------------------------------------ 宏（oracle D / X1 / Z）
+// ------------------------------------------------ macros (oracle D / X1 / Z)
 
-/// **发现 2（P1）**：宏执行中任一命令失败（响铃）必须**中止整条重放**——
-/// 本轮剩余键与 `@` 的剩余次数都不再执行（`:h @` 错误中止语义）。
-/// 引擎把 count 轮全部预入 pending_keys，失败后照常继续。
-/// oracle：`xa\nab\n` 上 `qafxDq`（录制轮在 "xa" 上成功：fx 命中 col0，D 删成
-/// 空行）；光标 j 到 "ab" 行后 `2@a`：vim 里 round1 的 fx 找不到 x → 整条中止，
-/// 缓冲保持 ["","ab"]；引擎继续执行 D 把 "ab" 删空、round2 再跑一遍 →
-/// ["",""]。
+/// **Finding 2 (P1)**: if any command fails during macro execution (bell), the **entire replay must
+/// abort** — neither the remaining keys of this round nor the remaining `@` count executes (`:h @`
+/// error-abort semantics). The engine pre-enqueues all count rounds into pending_keys and keeps
+/// going after a failure.
+/// oracle: on `xa\nab\n`, `qafxDq` (the recording round succeeds on "xa": fx hits col0, D deletes to
+/// an empty line); after moving the cursor with j to the "ab" line, `2@a`: in vim, round1's fx finds
+/// no x → the whole thing aborts, buffer stays ["","ab"]; the engine continues executing D, deleting
+/// "ab" empty, and round2 runs again → ["",""].
 #[test]
 fn macro_error_aborts_remaining_keys_and_rounds() {
     let mut f = Fixture::at("xa\nab\n", 0, 0);
     f.feed(["q", "a", "f", "x", "D", "q"]);
-    assert_eq!(f.text(), "\nab\n", "录制轮本身在第一行成功执行");
+    assert_eq!(f.text(), "\nab\n", "the recording round itself executes successfully on the first line");
     f.feed(["j", "2", "@", "a"]);
     assert_eq!(
         f.text(),
         "\nab\n",
-        "vim 9.1: fx 失败中止整条 @a，第二行 'ab' 幸存；引擎继续执行 D 把它删空"
+        "vim 9.1: fx failing aborts the whole @a, the second line 'ab' survives; the engine kept executing D and deleted it"
     );
 }
 
-/// **发现 3（P2）**：`@:`（重放最近 Ex 命令行）接受 [count]，`2@:` 把命令行
-/// 执行两遍；引擎的 `@:` 分支完全无视 count、只执行一次。
-/// oracle：`a\na\na\n` 上 `:1d<CR>` 后 `2@:` → 三行全删（缓冲空）；引擎只剩
-/// 一行（`1d` + 一次重放）。
+/// **Finding 3 (P2)**: `@:` (replay the last Ex command line) accepts [count]; `2@:` executes the
+/// command line twice; the engine's `@:` branch completely ignores the count and executes once.
+/// oracle: on `a\na\na\n` after `:1d<CR>`, `2@:` → all three lines deleted (empty buffer); the
+/// engine leaves one line (`1d` + one replay).
 #[test]
 fn at_colon_honors_count() {
     let mut f = Fixture::at("a\na\na\n", 0, 0);
@@ -118,54 +123,55 @@ fn at_colon_honors_count() {
     assert_eq!(
         f.text(),
         "",
-        "vim 9.1: 2@: 把 :1d 等价命令再执行两遍（逐行删光）；引擎只执行一遍"
+        "vim 9.1: 2@: executes the :1d-equivalent command two more times (deletes every line); the engine executes it once"
     );
 }
 
-/// **发现 4（P2）**：vim 的宏**就是寄存器**——`"ayy` 会覆写寄存器 a 里录好的
-/// 宏（Z2 oracle：`qaxqj\"ayy` 后 @a='YY\n'），`@a` 从此重放的是 yank 宏；
-/// 引擎的宏槽（macros map）与寄存器文件是两个存储，`"ayy` 后 `@a` 仍重放
-/// 旧键序。
-/// oracle：`ZZ\nYY\n` 上 `qaxq`（录下 x），j 到第二行 `"ayy`，再 `@a`：
-/// vim 缓冲不变（@a 重放 yy，再次 yank 第二行）；引擎重放录制体里的 x，
-/// 把 'Y' 删掉 → "Z\nY"。
+/// **Finding 4 (P2)**: vim's macros **are registers** — `"ayy` overwrites the macro recorded in
+/// register a (oracle Z2: after `qaxqj\"ayy`, @a='YY\n'), and `@a` thereafter replays the yank macro;
+/// the engine's macro slot (the macros map) and the register file are two separate storages, so
+/// after `"ayy` the `@a` still replays the old key sequence.
+/// oracle: on `ZZ\nYY\n`, `qaxq` (records x), j to the second line, `"ayy`, then `@a`: vim's buffer
+/// is unchanged (@a replays yy, yanking the second line again); the engine replays the x from the
+/// recorded body and deletes the 'Y' → "Z\nY".
 #[test]
 fn yank_into_register_overwrites_recorded_macro() {
     let mut f = Fixture::at("ZZ\nYY\n", 0, 0);
     f.feed(["q", "a", "x", "q"]);
-    assert_eq!(f.text(), "Z\nYY\n", "录制即执行：x 删掉第一个 Z");
+    assert_eq!(f.text(), "Z\nYY\n", "recording also executes: x deletes the first Z");
     f.feed(["j", "\"", "a", "y", "y"]);
     f.feed(["@", "a"]);
     assert_eq!(
         f.text(),
         "Z\nYY\n",
-        "vim 9.1: \"ayy 覆写宏，@a 重放 yy（无文本变化）；引擎重放旧宏删掉 Y"
+        "vim 9.1: \"ayy overwrites the macro, @a replays yy (no text change); the engine replayed the old macro and deleted the Y"
     );
 }
 
-/// **发现 4b（P2）**：同一身份的另一面——录好的宏内容必须**可粘贴**：
-/// `qaxq` 后寄存器 a 的内容是 "x"（Z1 oracle：string(@a)='x'，`"ap` 粘出
-/// "ZZx"）；引擎的录制只进 macros map，寄存器 a 仍是空的，`"ap` 响铃无物。
+/// **Finding 4b (P2)**: the other face of the same identity — a recorded macro's content must be
+/// **pasteable**: after `qaxq` the content of register a is "x" (oracle Z1: string(@a)='x', `"ap`
+/// pastes "ZZx"); the engine's recording only goes into the macros map, register a stays empty, and
+/// `"ap` rings with nothing to paste.
 #[test]
 fn recorded_macro_text_is_pasteable_from_the_register() {
     let mut f = Fixture::at("ZZ\n", 0, 0);
     f.feed(["q", "a", "x", "q"]);
     f.feed(["$", "\"", "a", "p"]);
-    // oracle 复验（2026-10-08）：录制即执行，x 删掉首个 Z 后缓冲为 "Z"，
-    // `"ap` 粘出 'x' → "Zx"（初稿的 "ZZx" 算术滑笔）
+    // oracle re-verified (2026-10-08): recording also executes; after x deletes the first Z the
+    // buffer is "Z", `"ap` pastes 'x' → "Zx" (the draft's "ZZx" was an arithmetic slip)
     assert_eq!(
         f.text(),
         "Zx\n",
-        "vim 9.1: \"ap 粘出宏文本 'x'；引擎宏/寄存器分离，无物可粘"
+        "vim 9.1: \"ap pastes the macro text 'x'; the engine separates macro/register storage and has nothing to paste"
     );
 }
 
-// ------------------------------------------------ Replace 模式（oracle H）
+// ------------------------------------------------ Replace mode (oracle H)
 
-/// **发现 5（P2）**：计数 Replace 的重复条件与 net 文本——`3Rab<BS><Esc>`：
-/// 退格不取消重复、每轮的净文本 "a" 重复 3 次（oracle：`zzzz` 上得
-/// "aaaz"）；引擎在退格后光标/锚失配，重复整段放弃 → "az"（或等价的
-/// 单轮净文本）。
+/// **Finding 5 (P2)**: the repeat condition and net text of counted Replace — `3Rab<BS><Esc>`: the
+/// backspace does not cancel the repeat, and each round's net text "a" repeats 3 times (oracle: on
+/// `zzzz` the result is "aaaz"); after the backspace the engine's cursor/anchor mismatch abandons
+/// the whole repeat → "az" (or an equivalent single-round net text).
 #[test]
 fn r_mode_count_repeat_survives_backspace() {
     let mut f = Fixture::at("zzzz\n", 0, 0);
@@ -175,44 +181,46 @@ fn r_mode_count_repeat_survives_backspace() {
     assert_eq!(
         f.text(),
         "aaaz\n",
-        "vim 9.1: 3Rab<BS><Esc> 每轮净文本 'a' 共三份；引擎放弃重复"
+        "vim 9.1: 3Rab<BS><Esc> yields 'a' as each round's net text, three copies; the engine abandoned the repeat"
     );
 }
 
-// ------------------------------------------------ 插入 <C-v> 数字（oracle E4）
+// ------------------------------------------------ insert <C-v> digits (oracle E4)
 
-/// **发现 6（P3，audit6 复验修正）**：`i<C-v>0` 后按 Esc。
+/// **Finding 6 (P3, corrected by the audit6 re-verification)**: `i<C-v>0` then Esc.
 ///
-/// 原期望（"取消数字输入、不插 NUL"）**是错的**——它误读了 oracle。9.1 权威
-/// oracle 复核（`edit.c:get_literal`：`i==1, cc==0` 走 `if (cc == 0) cc = '\n'`
-/// → 返回 NUL；终结键 ESC 被 `vungetc` 退回、随后照常退出插入模式）：
-///   `printf 'z\n'` → 键 `i\x160\x1b:call writefile(getline(1,"$"),out)\r:wq\r`
-///   → `od -c out` = `\0 z \n`（NUL 插在 'z' 之前），`:wq` 执行 = 已退出 insert。
-/// 引擎修复后与此一致：插入 `\0` 且 Esc 退出插入模式。
+/// The original expectation ("cancel the digit entry, do not insert NUL") was **wrong** — it
+/// misread the oracle. Re-check against the authoritative 9.1 oracle (`edit.c:get_literal`: with
+/// `i==1, cc==0` it goes through `if (cc == 0) cc = '\n'` → returns NUL; the terminating key ESC is
+/// pushed back via `vungetc` and then exits insert mode normally):
+///   `printf 'z\n'` → keys `i\x160\x1b:call writefile(getline(1,"$"),out)\r:wq\r`
+///   → `od -c out` = `\0 z \n` (the NUL inserted before 'z'), `:wq` executing = insert already exited.
+/// After the fix the engine matches this: insert `\0` and Esc exits insert mode.
 #[test]
 fn cv_zero_then_esc_inserts_nul_and_exits_insert() {
     let mut f = Fixture::at("z\n", 0, 0);
     f.feed(["i"]);
     f.feed_raw(Key::ctrl_char('v'));
-    // 数字必须走键管线（i_CTRL-V 的收位器在 insert_key 里拦在 printable 之前）
+    // digits must go through the key pipeline (the i_CTRL-V digit collector is intercepted in
+    // insert_key before the printable path)
     f.feed(["0"]);
     f.feed(["<Esc>"]);
     assert_eq!(
         f.text(),
         "\0z\n",
-        "vim 9.1: <C-v>0<Esc> 插入 NUL（内部存为 NL）后再退出插入"
+        "vim 9.1: <C-v>0<Esc> inserts NUL (stored internally as NL) and then exits insert mode"
     );
     assert!(
         matches!(f.vim.mode(), Mode::Normal),
-        "vim 9.1: 终结的 Esc 照常退出插入模式"
+        "vim 9.1: the terminating Esc exits insert mode as usual"
     );
 }
 
-// ------------------------------------------------ Ex 面辅助（oracle AA5）
+// ------------------------------------------------ Ex surface helpers (oracle AA5)
 
-/// **发现 7（P3）**：`:u`/`:un`（`:undo` 的缩写；oracle AA5/UN：改动后
-/// `:u<CR>` 与 `:un<CR>` 都恢复 "abc"）在引擎报 E492——Ex 表只收
-/// `undo`/`und`/`undo!`/`und!`，不收 `u`/`un`。
+/// **Finding 7 (P3)**: `:u`/`:un` (the abbreviations of `:undo`; oracles AA5/UN: after a change both
+/// `:u<CR>` and `:un<CR>` restore "abc") report E492 in the engine — the Ex table only accepts
+/// `undo`/`und`/`undo!`/`und!`, not `u`/`un`.
 #[test]
 fn ex_single_letter_u_abbreviation_undoes() {
     let mut f = Fixture::at("abc\n", 0, 0);
@@ -221,7 +229,7 @@ fn ex_single_letter_u_abbreviation_undoes() {
     assert_eq!(
         f.text(),
         "abc\n",
-        "vim 9.1: :u 等价 :u[ndo]，恢复被删字符；引擎 E492 静默不动"
+        "vim 9.1: :u is equivalent to :u[ndo] and restores the deleted character; the engine silently does nothing with E492"
     );
 
     let mut g = Fixture::at("abc\n", 0, 0);
@@ -230,22 +238,23 @@ fn ex_single_letter_u_abbreviation_undoes() {
     assert_eq!(
         g.text(),
         "abc\n",
-        "vim 9.1: :un 同为 :undo 缩写；引擎 E492"
+        "vim 9.1: :un is likewise an abbreviation of :undo; the engine gives E492"
     );
 }
 
-// ------------------------------------------------ 计数插入 × <C-t>（oracle K1）
+// ------------------------------------------------ counted insert × <C-t> (oracle K1)
 
-/// **发现 12（P3）**：计数插入会话里的 `<C-t>`：vim 的重复按**键序**逐轮重放，
-/// 每轮的缩进位移都生效（oracle K1：noet ts=8 sw=8 下 `3i<C-t>x<Esc>` 于
-/// "ab" 得 "\t\t\txxxab"——三轮各抬一个 shiftwidth，且行首的打字点随缩进
-/// 右移，x 落在缩进之后）；引擎把 C-t 的位移当作会话外编辑，`InsertRepeat`
-/// 只账打字文本，且行首（at==ls）的光标不随缩进右移——得 "xxx\tab"
-///（丢两轮缩进、x 还落在了缩进前面）。
+/// **Finding 12 (P3)**: `<C-t>` inside a counted insert session: vim's repeat replays the **key
+/// sequence** round by round, so every round's indent shift takes effect (oracle K1: under noet
+/// ts=8 sw=8, `3i<C-t>x<Esc>` on "ab" yields "\t\t\txxxab" — three rounds each raising one
+/// shiftwidth, and the typing point at the line start moves right with the indent, x landing after
+/// the indent); the engine treats the C-t shift as an edit outside the session, `InsertRepeat` only
+/// accounts for the typed text, and the cursor at line start (at==ls) does not shift right with the
+/// indent — yielding "xxx\tab" (two rounds of indent lost, and x landed before the indent).
 #[test]
 fn counted_insert_ctrl_t_shifts_repeat_every_round() {
     let mut f = Fixture::at("ab\n", 0, 0);
-    // oracle 环境（vim -Nu NONE）：noet + ts=8 + sw=8
+    // oracle environment (vim -Nu NONE): noet + ts=8 + sw=8
     f.feed([":", "s", "e", "t", " ", "n", "o", "e", "t", " ", "t", "s", "=", "8", " ", "s", "w", "=", "8", "<CR>"]);
     f.feed(["3", "i"]);
     f.feed_raw(Key::ctrl_char('t'));
@@ -254,14 +263,15 @@ fn counted_insert_ctrl_t_shifts_repeat_every_round() {
     assert_eq!(
         f.text(),
         "\t\t\txxxab\n",
-        "vim 9.1: 3i<C-t>x 每轮重放 C-t，三个 shiftwidth；引擎只账 x 丢轮次位移"
+        "vim 9.1: 3i<C-t>x replays C-t every round, three shiftwidths; the engine only accounts the x and loses the per-round shift"
     );
 }
 
-// ------------------------------------------------ 定向复核（期望与 oracle 一致的形状，失败即新发现）
+// ------------------------------------------------ Directed re-checks (shapes expected to agree with the oracle; a failure means a new finding)
 
-/// **复核 8（预期一致）**：`.` 重放含寄存器前缀的删除——oracle C：`aa\nbb\ncc`
-/// 上 `"add`、j、`.`，vim 把第二行删进寄存器 a（重放 `"a` 前缀，@a='cc\n'）。
+/// **Re-check 8 (expected to agree)**: `.` replaying a delete with a register prefix — oracle C: on
+/// `aa\nbb\ncc` do `"add`, j, `.`; vim deletes the second line into register a (the `"a` prefix is
+/// replayed, @a='cc\n').
 #[test]
 fn dot_replay_carries_the_register_prefix() {
     let mut f = Fixture::at("aa\nbb\ncc\n", 0, 0);
@@ -271,44 +281,46 @@ fn dot_replay_carries_the_register_prefix() {
     assert_eq!(
         f.text(),
         "bb\n",
-        "vim 9.1: . 重放 \"add（含前缀），cc 行被删进寄存器 a"
+        "vim 9.1: . replays \"add (prefix included), the cc line is deleted into register a"
     );
 }
 
-/// **复核 9（预期一致）**：yank 不清账——`x`、`"ayy`、`.`：vim 重放的是
-/// 更早的 x（AA21 oracle："abcdef" 上得 "cdef"）。
+/// **Re-check 9 (expected to agree)**: yank does not clear the ledger — `x`, `"ayy`, `.`: vim replays
+/// the earlier x (oracle AA21: on "abcdef" the result is "cdef").
 #[test]
 fn yank_does_not_overwrite_the_dot_record() {
     let mut f = Fixture::at("abcdef\n", 0, 0);
     f.feed(["x"]);
     f.feed(["\"", "a", "y", "y"]);
     f.feed(["."]);
-    assert_eq!(f.text(), "cdef\n", "vim 9.1: yank 不进 redo，. 重放 x");
+    assert_eq!(f.text(), "cdef\n", "vim 9.1: yank does not enter redo, . replays x");
 }
 
-/// **复核 10（预期一致）**：小删除连续两次都只进 `"-`、不动编号环
-/// （oracle B：`x.` 后 @1=''、@-='b'）。行为面用粘贴探针：`"-p` 在光标后
-/// 粘出第二次删除的 'b'；`"1P` 无物可粘（"1 从未被写入）。
+/// **Re-check 10 (expected to agree)**: two consecutive small deletes both go only into `"-` and do
+/// not touch the numbered ring (oracle B: after `x.` @1='' and @-='b'). The behavior side uses paste
+/// probes: `"-p` pastes the second delete's 'b' after the cursor; `"1P` has nothing to paste ("1 was
+/// never written).
 #[test]
 fn repeated_small_deletes_stay_out_of_the_numbered_ring() {
     let mut f = Fixture::at("abcdef\n", 0, 0);
     f.feed(["x", "."]);
     assert_eq!(f.text(), "cdef\n");
     f.feed(["\"", "-", "p"]);
-    assert_eq!(f.text(), "cbdef\n", "vim 9.1: \"- 粘出第二次小删除 'b'");
+    assert_eq!(f.text(), "cbdef\n", "vim 9.1: \"- pastes the second small delete 'b'");
     let mut g = Fixture::at("abcdef\n", 0, 0);
     g.feed(["x", ".", "\"", "1", "P"]);
-    assert_eq!(g.text(), "cdef\n", "vim 9.1: 小删除不进 \"1，\"1P 无物可粘");
+    assert_eq!(g.text(), "cdef\n", "vim 9.1: small deletes do not go into \"1, so \"1P has nothing to paste");
 }
 
-// ------------------------------------------------ undo 光标（oracle Y1 / Z22）
+// ------------------------------------------------ undo cursor (oracle Y1 / Z22)
 
-/// **发现 11（P2）**：undo 的光标应落在**被撤销变更的第一行**上；对 Ex 范围
-/// 命令引擎把「begin_undo_group 提示游标」（= 命令前的光标位置）当作变更
-/// 位置，undo 后光标停在命令前的行而不是被删/被换的行。
-/// oracle Y1（typeahead）：5 行缓冲、光标行 1，`:5d<CR>` 后 `u` →
-/// line(".") = 5（被删行）；oracle Z22：`G` 后 `:1,2s/x/Y/<CR>` 再 `u` →
-/// line(".") = 1（首个变更行）。
+/// **Finding 11 (P2)**: the undo cursor should land on the **first line of the undone change**; for
+/// Ex range commands the engine treats the "begin_undo_group hint cursor" (= the cursor position
+/// before the command) as the change position, so after undo the cursor stays on the pre-command
+/// line instead of the deleted/changed line.
+/// oracle Y1 (typeahead): on a 5-line buffer with the cursor on line 1, `u` after `:5d<CR>` →
+/// line(".") = 5 (the deleted line); oracle Z22: after `G`, `:1,2s/x/Y/<CR>` then `u` → line(".") =
+/// 1 (the first changed line).
 #[test]
 fn undo_cursor_lands_on_the_first_line_of_the_undone_ex_change() {
     let mut f = Fixture::at("l1\nl2\nl3\nl4\nl5\n", 0, 0);
@@ -318,7 +330,7 @@ fn undo_cursor_lands_on_the_first_line_of_the_undone_ex_change() {
     assert_eq!(
         f.line(),
         4,
-        "vim 9.1: :5d 后 u 光标落第 5 行（被撤销删除的范围行）；引擎落命令前行 1"
+        "vim 9.1: after :5d, u lands the cursor on line 5 (the range line of the undone delete); the engine lands on the pre-command line 1"
     );
 
     let mut g = Fixture::at("x1\nx2\nx3\nx4\nx5\n", 4, 0);
@@ -327,16 +339,17 @@ fn undo_cursor_lands_on_the_first_line_of_the_undone_ex_change() {
     assert_eq!(
         g.line(),
         0,
-        "vim 9.1: :1,2s 后 u 光标落第 1 行（首个变更行）；引擎落 G 所在第 5 行"
+        "vim 9.1: after :1,2s, u lands the cursor on line 1 (the first changed line); the engine lands on line 5 where G was"
     );
 }
 
-// ------------------------------------------------ 计数插入 × C-u（oracle Y3）
+// ------------------------------------------------ counted insert × C-u (oracle Y3)
 
-/// **发现 12（P2）**：计数插入会话里 `<C-u>` 清空已输入文本后，剩余轮次按
-/// **净文本（空）** 继续——oracle Y3：`zz` 上 `3iab<C-u><Esc>` → 缓冲仍 "zz"
-/// （三轮的净效果都是空，重复照发但不粘出任何东西）。引擎的 C-u 路径不裁
-/// `InsertRepeat` 的账、光标回到锚点又满足重复条件 → 按陈旧的 "ab" 整段复制。
+/// **Finding 12 (P2)**: in a counted insert session, after `<C-u>` clears the typed text, the
+/// remaining rounds continue with the **net text (empty)** — oracle Y3: on `zz`, `3iab<C-u><Esc>` →
+/// buffer still "zz" (all three rounds net to empty; the repeats still fire but paste nothing). The
+/// engine's C-u path does not trim `InsertRepeat`'s ledger, and the cursor returning to the anchor
+/// meets the repeat condition again → it copies out the stale "ab" wholesale.
 #[test]
 fn counted_insert_ctrl_u_repeats_the_empty_net_text() {
     let mut f = Fixture::at("zz\n", 0, 0);
@@ -347,23 +360,24 @@ fn counted_insert_ctrl_u_repeats_the_empty_net_text() {
     assert_eq!(
         f.text(),
         "zz\n",
-        "vim 9.1: 3iab<C-u><Esc> 净效果为空；引擎把陈旧的 ab 复制出来"
+        "vim 9.1: 3iab<C-u><Esc> nets to empty; the engine copied out the stale ab"
     );
 }
 
-// ------------------------------------------------ 块可视算子的 `.`（对照 D11 的插入侧）
+// ------------------------------------------------ `.` of block-visual operators (vs the insert side of D11)
 
-/// **复核 13（预期一致）**：块可视**算子**变更（`<C-v>jlx`）之后 `.` 应当
-/// 重放同形块删除（vim 的 `.` 会重做可视块变更；D11 只修了块**插入**侧）。
+/// **Re-check 13 (expected to agree)**: after a block-visual **operator** change (`<C-v>jlx`), `.`
+/// should replay the same-shaped block delete (vim's `.` redoes visual block changes; D11 only fixed
+/// the block **insert** side).
 #[test]
 fn dot_after_block_visual_operator_redoes_the_block_delete() {
     let mut f = Fixture::at("aa\nbb\ncc\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "x"]);
-    assert_eq!(f.text(), "\n\ncc\n", "块删除 rows0-1 cols0-1");
+    assert_eq!(f.text(), "\n\ncc\n", "block delete of rows0-1 cols0-1");
     f.feed(["G", ".", "k"]);
     assert_eq!(
         f.text(),
         "\n\n\n",
-        "vim 9.1: . 重放块可视删除，把 cc 行的 cc 也删掉"
+        "vim 9.1: . replays the block-visual delete, also deleting the cc of the cc line"
     );
 }

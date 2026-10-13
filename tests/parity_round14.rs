@@ -1,42 +1,43 @@
-//! 第十四轮回归（一）：motion 重复、operator 变更记录、quote 转义、段落对象、
-//! 寄存器前缀。所有期望行为均经 vim 9.1 探针实证（探针脚本见 NOTES 第十四轮）。
+//! Round-14 regressions (part 1): motion repetition, operator change records, quote escaping,
+//! paragraph objects, register prefixes. All expected behaviors were empirically verified with vim
+//! 9.1 probes (probe scripts see NOTES round 14).
 
 mod common;
 
 use common::{edit, Fixture};
 use vimcore::buffer::VimBuffer;
 
-/// PROBE: vim 9.1 `a1b2c3d2e` 上 `gg0t2;` → col 7（第二个 2 之前）。
-/// 旧引擎 `;` 从光标重扫，立即重新命中同一个 2，原地假成功。
+/// PROBE: vim 9.1, on `a1b2c3d2e`, `gg0t2;` → col 7 (before the second 2).
+/// The old engine's `;` rescanned from the cursor and immediately re-hit the same 2 — a fake success in place.
 #[test]
 fn till_repeat_semicolon_advances_to_next_target() {
     let f = edit("a1b2c3d2e\n", 0, 0, &["t", "2", ";"]);
     assert_eq!(f.vim.cursor_offset(), 6, "t2; must park before the SECOND 2");
 }
 
-/// PROBE: vim 9.1 `t2;;` — 第二个 `;` 无目标可用，光标原地不动。
+/// PROBE: vim 9.1, `t2;;` — the second `;` has no target left, the cursor stays put.
 #[test]
 fn till_repeat_without_target_stays() {
     let f = edit("a1b2c3d2e\n", 0, 0, &["t", "2", ";", ";"]);
     assert_eq!(f.vim.cursor_offset(), 6, "exhausted repeat must not move");
 }
 
-/// PROBE: vim 9.1 `a1b2c3d3e` 上 `gg0d2t3` → `3e`（删到第二个 3 之前）。
+/// PROBE: vim 9.1, on `a1b2c3d3e`, `gg0d2t3` → `3e` (deleted up to before the second 3).
 #[test]
 fn counted_till_repeat_deletes_through() {
     let f = edit("a1b2c3d3e\n", 0, 0, &["d", "2", "t", "3"]);
     assert_eq!(f.text(), "3e\n", "d2t3 stops before the second 3");
 }
 
-/// PROBE: vim 9.1 `a1b2c3d3e` 上 `gg02t3` → col 7：全新（非重复）的
-/// count till 不跳过紧邻目标，count 就是查找次数。
+/// PROBE: vim 9.1, on `a1b2c3d3e`, `gg02t3` → col 7: a fresh (non-repeat) counted till does not
+/// skip the adjacent target — the count is simply the number of finds.
 #[test]
 fn fresh_counted_till_counts_finds() {
     let f = edit("a1b2c3d3e\n", 0, 0, &["2", "t", "3"]);
     assert_eq!(f.vim.cursor_offset(), 6, "2t3 = second find, no skip");
 }
 
-/// PROBE: 紧邻目标上的全新 `t` 必须保持「成功但不动」语义（`dx` 删掉目标）。
+/// PROBE: a fresh `t` on an adjacent target must keep the "success but don't move" semantics (`dx` deletes the target).
 #[test]
 fn fresh_till_adjacent_target_stays_put_without_bell() {
     let mut f = Fixture::new("a2x\n");
@@ -45,15 +46,15 @@ fn fresh_till_adjacent_target_stays_put_without_bell() {
     assert_eq!(f.host.bells, 0, "adjacent target is a SUCCESS, not a miss");
 }
 
-/// PROBE: vim 9.1 `a22` 上 `gg0t2;` → col 2（跳过一个紧邻目标后再找）。
+/// PROBE: vim 9.1, on `a22`, `gg0t2;` → col 2 (skip the adjacent target once, then find again).
 #[test]
 fn till_repeat_skips_adjacent_target_pair() {
     let f = edit("a22\n", 0, 0, &["t", "2", ";"]);
     assert_eq!(f.vim.cursor_offset(), 1);
 }
 
-/// PROBE: vim 9.1 `:changes` 在 yiw 前后条目数不变（yank 不是 change）。
-/// 引擎可观测面：yank 之后 `g;` 落在真正的编辑处，而不是 yank 处。
+/// PROBE: vim 9.1, `:changes` shows the same number of entries before and after yiw (a yank is not a change).
+/// Engine-observable surface: after a yank, `g;` lands on the real edit position, not the yank position.
 #[test]
 fn yank_does_not_enter_changelist() {
     let mut f = Fixture::new("abc\ndef\n");
@@ -67,7 +68,7 @@ fn yank_does_not_enter_changelist() {
     );
 }
 
-/// 空行上的 `d$` 是 no-op（vim 9.1），不得污染 changelist：g; 跳过它。
+/// `d$` on an empty line is a no-op (vim 9.1) and must not pollute the changelist: g; skips it.
 #[test]
 fn noop_operator_does_not_enter_changelist() {
     let mut f = Fixture::new("abc\n\n");
@@ -77,9 +78,9 @@ fn noop_operator_does_not_enter_changelist() {
     assert_eq!(f.vim.cursor_offset(), 0, "empty-span d$ must not record a change");
 }
 
-/// PROBE: vim 9.1 `"a\\"`（行内容 `"a\"`，收尾引号前是双反斜杠 = 字面
-/// 反斜杠 + 真引号）上 `gg0ci"X<Esc>` → `"X"`。单反斜杠判定把收尾引号
-/// 当转义引号，整行失去配对。
+/// PROBE: vim 9.1, on `"a\\"` (the line content is `"a\"` — a double backslash before the closing
+/// quote = literal backslash + real quote), `gg0ci"X<Esc>` → `"X"`. The single-backslash check
+/// treated the closing quote as an escaped quote, so the whole line lost its pairing.
 #[test]
 fn quote_object_counts_backslash_run_parity() {
     let mut f = Fixture::new("\"a\\\\\"\n");
@@ -89,7 +90,7 @@ fn quote_object_counts_backslash_run_parity() {
     assert_eq!(f.text(), "\"X\"\n", "double backslash = literal, quote is real");
 }
 
-/// 单反斜杠的转义引号仍被跳过（`"a\"b"` 配对为 "a\"b"）。
+/// A single-backslash escaped quote is still skipped (`"a\"b"` pairs as "a\"b").
 #[test]
 fn quote_object_single_escape_still_skipped() {
     let mut f = Fixture::new("\"a\\\"b\"\n");
@@ -99,15 +100,15 @@ fn quote_object_single_escape_still_skipped() {
     assert_eq!(f.text(), "\"X\"\n");
 }
 
-/// PROBE: vim 9.1 [para1,"",para2] 上 `3Gdap` → ['para1']。末段无尾随
-/// 空白时吞前导空行（:h ap）。
+/// PROBE: vim 9.1, on [para1,"",para2], `3Gdap` → ['para1']. The last paragraph with no trailing
+/// whitespace takes the leading blank line (:h ap).
 #[test]
 fn ap_on_last_paragraph_takes_leading_blank() {
     let f = edit("para1\n\npara2\n", 2, 0, &["d", "a", "p"]);
     assert_eq!(f.text(), "para1\n", "separator blank goes with the paragraph");
 }
 
-/// PROBE: vim 9.1 `abc` 上 `gg0"ax` → @a='a' 且 unnamed 也是 'a'。
+/// PROBE: vim 9.1, on `abc`, `gg0"ax` → @a='a' and the unnamed register is also 'a'.
 #[test]
 fn register_prefix_routes_x_into_named_register() {
     let f = edit("abc\n", 0, 0, &["\"", "a", "x"]);
@@ -115,7 +116,7 @@ fn register_prefix_routes_x_into_named_register() {
     assert_eq!(reg.text, "a", "\"ax must delete into register a");
 }
 
-/// PROBE: vim 9.1 `xabc` 上 `$h"aX` → @a='a'。
+/// PROBE: vim 9.1, on `xabc`, `$h"aX` → @a='a'.
 #[test]
 fn register_prefix_routes_x_backwards_into_named_register() {
     let f = edit("xabc\n", 0, 2, &["\"", "a", "X"]);
@@ -123,7 +124,7 @@ fn register_prefix_routes_x_backwards_into_named_register() {
     assert_eq!(reg.text, "a", "\"X must delete into register a");
 }
 
-/// PROBE: vim 9.1 `abc` 上 `gg0"asZ<Esc>` → @a='a'、行 = 'Zbc'。
+/// PROBE: vim 9.1, on `abc`, `gg0"asZ<Esc>` → @a='a', line = 'Zbc'.
 #[test]
 fn register_prefix_routes_substitute_into_named_register() {
     let mut f = Fixture::new("abc\n");
@@ -135,17 +136,18 @@ fn register_prefix_routes_substitute_into_named_register() {
     assert_eq!(f.text(), "Zbc\n");
 }
 
-/// PROBE: vim 9.1 ['a','b'] 上 `dd`、`""dd`、`"1p` → ['','b']：`""` 前缀
-/// 完全等价于无前缀，编号环照常轮转。
+/// PROBE: vim 9.1, on ['a','b'] do `dd`, `""dd`, `"1p` → ['','b']: the `""` prefix is fully
+/// equivalent to no prefix, and the numbered ring rotates as usual.
 #[test]
 fn double_quote_register_prefix_behaves_like_no_prefix() {
     let f = edit("a\nb\n", 0, 0, &["d", "d", "\"\"", "d", "d", "g", "g", "\"", "1", "p"]);
-    // 字节口径随 'fixendofline'（写回补末尾换行）
+    // Byte convention follows 'fixendofline' (write-back appends the trailing newline)
     assert_eq!(f.text(), "\nb\n", "\"\"dd must rotate the numbered ring");
 }
 
-/// PROBE: vim 9.1 `:nnoremap j G` 后输入 `gj` → 光标落第 2 行（builtin gj
-/// 直接触发，续键不查映射表）。引擎原先让映射劫持续键，G 跳到了末行。
+/// PROBE: vim 9.1, after `:nnoremap j G`, typing `gj` → the cursor lands on line 2 (the builtin gj
+/// fires directly; the continuation key is not looked up in the map table). The engine previously
+/// let the mapping hijack the continuation key and G jumped to the last line.
 #[test]
 fn mapping_does_not_hijack_partial_builtin_continuation() {
     let mut f = Fixture::new("one\ntwo\nthree\n");
@@ -157,12 +159,13 @@ fn mapping_does_not_hijack_partial_builtin_continuation() {
     assert_eq!(
         f.vim.cursor_offset(),
         4,
-        "gj 的续键 j 必须完成 builtin，映射的 G 不得触发"
+        "gj's continuation key j must complete the builtin; the mapped G must not fire"
     );
 }
 
-/// `:nnoremap j gj` 后输入 `gj` 不熔断（旧引擎在展开重放里再次命中映射，
-/// map_depth 熔断、响铃、gj 完全失效）。
+/// After `:nnoremap j gj`, typing `gj` does not trip the circuit breaker (the old engine hit the
+/// mapping again inside the expansion replay, tripping map_depth, ringing the bell, and gj failed
+/// completely).
 #[test]
 fn noremap_self_referential_builtin_no_runaway() {
     let mut f = Fixture::new("one\ntwo\nthree\n");
@@ -170,11 +173,11 @@ fn noremap_self_referential_builtin_no_runaway() {
         .keymaps
         .map_str_noremap(vimcore::keymap::ModeClass::Normal, "j", "gj", true);
     f.feed(["g", "j"]);
-    assert_eq!(f.host.bells, 0, "无 runaway 熔断");
-    assert_eq!(f.vim.cursor_offset(), 4, "builtin gj 触发一次");
+    assert_eq!(f.host.bells, 0, "no runaway circuit-breaker");
+    assert_eq!(f.vim.cursor_offset(), 4, "builtin gj fires once");
 }
 
-/// 命令之间映射照常工作：`j→G` 映射下单独输入 `j` 仍然展开为 G。
+/// Between commands mappings keep working: under the `j→G` mapping, a lone `j` still expands to G.
 #[test]
 fn mapping_still_applies_between_commands() {
     let mut f = Fixture::new("one\ntwo\nthree\n");
@@ -186,115 +189,118 @@ fn mapping_still_applies_between_commands() {
     assert_eq!(
         f.vim.cursor_offset(),
         8,
-        "命令边界的 j 按映射展开为 G（跳到末行行首）"
+        "j at a command boundary expands to G via the mapping (jumping to the last line's start)"
     );
 }
 
-/// 引擎不变量：互映射自引用（`:map x y` + `:map y x`）在 maxmapdepth
-/// （现与 vim 默认一致 = 1000）处熔断：响铃、清队列、不挂死。
+/// Engine invariant: mutually-mapped self-reference (`:map x y` + `:map y x`) trips at maxmapdepth
+/// (now matching vim's default = 1000): bell, queue cleared, no hang.
 #[test]
 fn recursive_mapping_depth_guard_stops() {
     let mut f = Fixture::new("abc\n");
     f.vim.keymaps.map_str(vimcore::keymap::ModeClass::Normal, "x", "y");
     f.vim.keymaps.map_str(vimcore::keymap::ModeClass::Normal, "y", "x");
     f.feed(["x"]);
-    assert!(f.host.bells > 0, "互映射必须熔断响铃");
-    assert_eq!(f.text(), "abc\n", "队列被清空，缓冲不动");
+    assert!(f.host.bells > 0, "mutual mappings must trip the breaker and ring");
+    assert_eq!(f.text(), "abc\n", "the queue is cleared, buffer untouched");
 }
 
-/// 引擎不变量：流水线守卫清空队列后，剩余 no_remap 预算归零——后续
-/// 按键照常走映射解析（预算泄漏曾让之后所有按键绕过映射）。
+/// Engine invariant: after the pipeline guard clears the queue, the leftover no_remap budget resets
+/// to zero — subsequent keys go through mapping resolution normally (a leaked budget once made every
+/// later key bypass mappings).
 #[test]
 fn guard_abort_resets_noremap_budget() {
-    // 大 RHS 触发 MAX_PIPELINE_STEPS 守卫（预算 100k 键）
+    // A large RHS triggers the MAX_PIPELINE_STEPS guard (budget 100k keys)
     let big_rhs = "x".repeat(120_000);
     let mut f = Fixture::new("abc\n");
     f.vim
         .keymaps
         .map_str_noremap(vimcore::keymap::ModeClass::Normal, "q", &big_rhs, true);
-    f.feed(["q"]); // 不挂死即通过（守卫在 100k 键处清队列）
+    f.feed(["q"]); // passing without a hang suffices (the guard clears the queue at 100k keys)
 
-    // 守卫中止是每会话的：后续会话的映射照常解析（w→dd 删行）
+    // The guard abort is per-session: later sessions resolve mappings normally (w→dd deletes the line)
     let mut f2 = Fixture::new("abc\n");
     f2.vim
         .keymaps
         .map_str_noremap(vimcore::keymap::ModeClass::Normal, "w", "dd", true);
     f2.feed(["w"]);
-    assert_eq!(f2.text(), "", "映射 w→dd 生效（若预算泄漏则 w 走词移动、缓冲不变）");
+    assert_eq!(f2.text(), "", "mapping w→dd takes effect (a leaked budget would make w move by words and leave the buffer)");
 }
 
-// ---- cmdline 的 count/register 卫生（vim 9.1 探针 P7/P8b/P9/P9b）----------
+// ---- cmdline count/register hygiene (vim 9.1 probes P7/P8b/P9/P9b) ----------
 
-/// PROBE: vim 9.1 `3:<CR>` → 光标落第 3 行：count 变成范围 `.,.+2` 并
-/// 被消费（引擎原先只开空提示符，count 挂着漏给下一条命令）。
+/// PROBE: vim 9.1, `3:<CR>` → the cursor lands on line 3: the count becomes the range `.,.+2` and
+/// is consumed (the engine previously just opened an empty prompt, letting the count leak into the
+/// next command).
 #[test]
 fn count_before_colon_becomes_range() {
     let f = edit("a\nb\nc\nd\ne\n", 0, 0, &["3", ":", "enter"]);
-    assert_eq!(f.vim.cursor_offset(), 4, "3: 的范围末地址 = 第 3 行（1-based）");
+    assert_eq!(f.vim.cursor_offset(), 4, "3:'s range end address = line 3 (1-based)");
 }
 
-/// PROBE: vim 9.1 `3:<Esc>` 后 `j` 只移动 1 行——count 在提示符取消时被消费。
+/// PROBE: vim 9.1, after `3:<Esc>`, `j` moves exactly 1 line — the count is consumed when the prompt is cancelled.
 #[test]
 fn count_dropped_on_cancelled_colon() {
     let f = edit("a\nb\nc\nd\ne\n", 0, 0, &["3", ":", "escape", "j"]);
-    assert_eq!(f.vim.cursor_offset(), 2, "取消后 count 不得放大后续 j");
+    assert_eq!(f.vim.cursor_offset(), 2, "after cancelling, the count must not amplify the following j");
 }
 
-/// PROBE: vim 9.1 `2/x<Esc>` 后 `x` 只删 1 个字符。
+/// PROBE: vim 9.1, after `2/x<Esc>`, `x` deletes exactly 1 character.
 #[test]
 fn count_dropped_on_cancelled_search() {
     let f = edit("aXbXc\n", 0, 0, &["2", "/", "x", "escape", "x"]);
-    assert_eq!(f.text(), "XbXc\n", "取消的搜索不得让 x 删两个字符");
+    assert_eq!(f.text(), "XbXc\n", "a cancelled search must not make x delete two characters");
 }
 
-/// PROBE: vim 9.1 `3/foo<CR>`（光标不在匹配上）→ 跳到第 3 个匹配。
+/// PROBE: vim 9.1, `3/foo<CR>` (cursor not on a match) → jump to the 3rd match.
 #[test]
 fn count_before_search_jumps_to_nth_match() {
     let f = edit("x\nfoo\ny\nfoo\nz\nfoo\n", 0, 0, &["3", "/", "f", "o", "o", "enter"]);
     assert_eq!(
         f.vim.cursor_offset(),
         f.buf.line_start(5),
-        "3/foo 落第 3 个匹配"
+        "3/foo lands on the 3rd match"
     );
 }
 
-/// visual `:` 的 count 被消费（vim 取消挂起的 count，不放大后续命令）。
+/// The count before a visual `:` is consumed (vim cancels the pending count; it does not amplify the next command).
 #[test]
 fn visual_colon_drops_count() {
     let f = edit("a\nb\nc\n", 0, 0, &["V", "3", "v", ":", "escape", "j"]);
-    assert_eq!(f.vim.cursor_offset(), 2, "visual : 后 count 不得漏给 j");
+    assert_eq!(f.vim.cursor_offset(), 2, "after a visual : the count must not leak into j");
 }
 
-// ---- Ex 命令面（vim 9.1 探针 P13-P17/P50/P54、B1-B8）----------------------
+// ---- Ex command surface (vim 9.1 probes P13-P17/P50/P54, B1-B8) ------------
 
-/// PROBE: `:1,2d!` / `:1,2y!` → E477 "No ! allowed"，命令不执行。
+/// PROBE: `:1,2d!` / `:1,2y!` → E477 "No ! allowed", the command does not execute.
 #[test]
 fn bang_on_delete_yank_reports_e477() {
     let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "d", "!", "<CR>"]);
-    assert_eq!(f.text(), "a\nb\nc\n", ":d! 不删除");
+    assert_eq!(f.text(), "a\nb\nc\n", ":d! does not delete");
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert!(last.starts_with("E477"), "got {last:?}");
 
     let f2 = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "y", "!", "<CR>"]);
-    // audit A15：vim 9.1 的 E477 不带原命令行后缀（round14 的"带原行"结论
-    // 是当年 oracle 误读，messages 采样复验）
+    // audit A15: vim 9.1's E477 does not carry the original command line as a suffix (round14's
+    // "with the original line" conclusion was a misreading of the oracle back then; re-verified via
+    // messages sampling)
     assert_eq!(f2.host.statuses.last().unwrap(), "E477: No ! allowed");
     assert_eq!(
         f2.vim.registers.get('0').map(|r| r.text.as_str()),
         None,
-        "y! 未执行（无 yank 寄存器副作用）"
+        "y! did not execute (no yank-register side effect)"
     );
 }
 
-/// PROBE: `:y a3` 打包形式 = 寄存器 a + count 3（@a = 'b c '）。
+/// PROBE: the packed form `:y a3` = register a + count 3 (@a = 'b c ').
 #[test]
 fn packed_register_count_yank() {
     let f = edit("a\nb\nc\nd\ne\n", 0, 0, &[":", "2", "y", " ", "a", "3", "<CR>"]);
     let reg = f.vim.registers.get('a').expect("register a");
-    assert_eq!(reg.text, "b\nc\nd\n", "a3 = 寄存器 a + 3 行");
+    assert_eq!(reg.text, "b\nc\nd\n", "a3 = register a + 3 lines");
 }
 
-/// PROBE: `:d a b` → E488 trailing 'b'，不删除。
+/// PROBE: `:d a b` → E488 trailing 'b', no deletion.
 #[test]
 fn garbage_register_tail_reports_e488() {
     let f = edit("a\nb\nc\n", 0, 0, &[":", "d", " ", "a", " ", "b", "<CR>"]);
@@ -303,7 +309,8 @@ fn garbage_register_tail_reports_e488() {
     assert!(last.starts_with("E488"), "got {last:?}");
 }
 
-/// PROBE: `:j 3x` 尾参垃圾同样 E488（原先静默按 0 处理照常 join）。
+/// PROBE: garbage in the tail argument of `:j 3x` likewise reports E488 (previously it silently
+/// counted 0 and joined anyway).
 #[test]
 fn join_garbage_count_reports_e488() {
     let f = edit("a\nb\nc\n", 0, 0, &[":", "j", " ", "3", "x", "<CR>"]);
@@ -312,17 +319,17 @@ fn join_garbage_count_reports_e488() {
     assert!(last.starts_with("E488"), "got {last:?}");
 }
 
-/// PROBE: 越界地址报 E16 且命令不执行：`:1000000d`、`:2,99999d`、
-/// `:.+99d`、裸 `:99999999`（原先静默钳制到末行并执行）。
+/// PROBE: out-of-range addresses report E16 and the command does not execute: `:1000000d`,
+/// `:2,99999d`, `:.+99d`, bare `:99999999` (previously clamped to the last line silently and executed).
 #[test]
 fn out_of_range_addresses_report_e16() {
     for line in ["1000000d", "2,99999d"] {
         let f = edit("a\nb\nc\n", 0, 0, &[":", &line[..line.len() - 1], "<CR>"]);
-        // feed 逐字符，上面的切片行不通 —— 用一条条构造
+        // feed goes character by character, so the slice above does not work —— construct them one by one
         drop(f);
     }
     let f = edit("a\nb\nc\n", 0, 0, &[":", "1", "0", "0", "0", "0", "0", "0", "d", "<CR>"]);
-    assert_eq!(f.text(), "a\nb\nc\n", "越界 d 不执行");
+    assert_eq!(f.text(), "a\nb\nc\n", "an out-of-range d does not execute");
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert!(last.starts_with("E16"), "got {last:?}");
 
@@ -331,49 +338,49 @@ fn out_of_range_addresses_report_e16() {
     assert!(last.starts_with("E16"), "got {last:?}");
     assert_eq!(f2.text(), "a\nb\nc\n");
 
-    // 地址 0 / 负数仍合法：作用在首行（vim 9.1 探针 B1/B3）
+    // Address 0 / negative are still legal: acting on the first line (vim 9.1 probes B1/B3)
     let f3 = edit("a\nb\nc\n", 1, 0, &[":", "0", "d", "<CR>"]);
     assert_eq!(f3.text(), "b\nc\n");
 }
 
-/// PROBE: `:s/a\/b/x/` 匹配字面 `a/b`（转义分隔符，原先解析被切碎）。
+/// PROBE: `:s/a\/b/x/` matches the literal `a/b` (escaped delimiter; previously the parse was chopped up).
 #[test]
 fn escaped_delimiter_in_substitute() {
     let f = edit("a/b\n", 0, 0, &[
         ":", "s", "/", "a", "\\", "/", "b", "/", "x", "/", "<CR>",
     ]);
-    assert_eq!(f.text(), "x\n", "转义分隔符不切开模式");
+    assert_eq!(f.text(), "x\n", "an escaped delimiter does not split the pattern");
 }
 
-/// PROBE: `:%s/foo//n` → "2 matches on 2 lines"，缓冲不动（`n` = 仅报告；
-/// 原先忽略该标志并执行破坏性替换）。
+/// PROBE: `:%s/foo//n` → "2 matches on 2 lines", buffer untouched (`n` = report only; previously
+/// the flag was ignored and a destructive substitution ran).
 #[test]
 fn substitute_n_flag_reports_without_modifying() {
     let f = edit("foo bar\nx foo y\n", 0, 0, &[
         ":", "%", "s", "/", "f", "o", "o", "/", "/", "n", "<CR>",
     ]);
-    assert_eq!(f.text(), "foo bar\nx foo y\n", "n 标志不修改缓冲");
+    assert_eq!(f.text(), "foo bar\nx foo y\n", "the n flag does not modify the buffer");
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert_eq!(last, "2 matches on 2 lines");
 }
 
-/// `:se` 缩写、`:setlocal`、`:set ts&` 重置到默认。
+/// The `:se` abbreviation, `:setlocal`, and `:set ts&` resetting to default.
 #[test]
 fn set_spellings_and_amp_reset() {
     let mut f = Fixture::new("a\n");
     f.feed([":", "s", "e", " ", "t", "s", "=", "2", "<CR>"]);
-    assert_eq!(f.vim.options.tabstop, 2, ":se ts=2 生效");
+    assert_eq!(f.vim.options.tabstop, 2, ":se ts=2 takes effect");
     f.feed([":", "s", "e", "t", "l", "o", "c", "a", "l", " ", "t", "s", "=", "6", "<CR>"]);
     assert_eq!(f.vim.options.tabstop, 6, ":setlocal = :set");
     f.feed([":", "s", "e", "t", " ", "t", "s", "&", "<CR>"]);
-    assert_eq!(f.vim.options.tabstop, 4, "ts& 重置默认");
+    assert_eq!(f.vim.options.tabstop, 4, "ts& resets to default");
     f.feed([":", "s", "e", "t", " ", "t", "s", "=", "3", "<CR>"]);
     f.feed([":", "s", "e", "t", " ", "t", "s", "&", "v", "i", "m", "<CR>"]);
-    assert_eq!(f.vim.options.tabstop, 4, "ts&vim 同样重置");
+    assert_eq!(f.vim.options.tabstop, 4, "ts&vim resets the same way");
 }
 
-/// PROBE: `:set ts ?`（问号前有空格）= 查询；裸数字选项名 `:set ts` 也是
-/// 查询（原先 bell 并中止整行）。
+/// PROBE: `:set ts ?` (a space before the question mark) = query; the bare numeric option name
+/// `:set ts` is also a query (previously it belled and aborted the whole line).
 #[test]
 fn set_spaced_question_mark_queries() {
     let mut f = Fixture::new("a\n");
@@ -381,7 +388,7 @@ fn set_spaced_question_mark_queries() {
     assert_eq!(
         f.host.statuses.last().map(String::as_str),
         Some("  tabstop=4"),
-        "ts ? 查询不响铃"
+        "ts ? queries without ringing"
     );
     assert_eq!(f.host.bells, 0);
     let mut f2 = Fixture::new("a\n");
@@ -389,20 +396,20 @@ fn set_spaced_question_mark_queries() {
     assert_eq!(
         f2.host.statuses.last().map(String::as_str),
         Some("  tabstop=4"),
-        "裸 ts = 查询"
+        "bare ts = query"
     );
-    // 布尔名 + 空格问号 = 查询而非置位
+    // boolean name + spaced question mark = query, not set
     let mut f3 = Fixture::new("a\n");
     f3.feed([":", "s", "e", "t", " ", "n", "o", "i", "c", "<CR>"]);
     f3.feed([":", "s", "e", "t", " ", "i", "c", " ", "?", "<CR>"]);
     assert_eq!(
         f3.host.statuses.last().map(String::as_str),
         Some("  noignorecase"),
-        "ic ? 是查询，不置位"
+        "ic ? is a query, not a set"
     );
 }
 
-/// `:bn[ext]`/`:bp[revious]` 等完整 vim 前缀缩写（`:bne` 原先 E492）。
+/// The full vim prefix abbreviations of `:bn[ext]`/`:bp[revious]` (`:bne` previously gave E492).
 #[test]
 fn buffer_command_prefix_spellings() {
     for spelling in ["bn", "bne", "bnex", "bnext"] {
@@ -414,49 +421,50 @@ fn buffer_command_prefix_spellings() {
         f.feed(keys);
         assert!(
             f.host.statuses.is_empty(),
-            ":{spelling} 不应报错（got {:?}）",
+            ":{spelling} must not report an error (got {:?})",
             f.host.statuses.last()
         );
     }
 }
 
-// ---- Replace 模式 BS 位置栈 + count-repeat 的 autoindent（vim 9.1 探针
-//      P23 矩阵 / Q8 矩阵 / P24）----------------------------------------------
+// ---- Replace-mode BS position stack + count-repeat autoindent (vim 9.1 probes
+//      P23 matrix / Q8 matrix / P24) -------------------------------------------
 
-/// PROBE 矩阵（Q8a）：`wxyz` 上 `Rab<BS><Esc>` → 'axyz'：BS 恢复被覆盖的
-/// 原字符。None 条目（行尾追加）匹配时按删除处理（Q8e）。
+/// PROBE matrix (Q8a): on `wxyz`, `Rab<BS><Esc>` → 'axyz': BS restores the overwritten original
+/// character. A None entry (appended past line end) is treated as a delete when it matches (Q8e).
 #[test]
 fn replace_bs_restores_matching_position() {
     let mut f = edit("wxyz\n", 0, 0, &["R"]);
     f.type_text("ab");
     f.feed(["<BS>"]);
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "axyz\n", "BS 恢复位置匹配的条目");
+    assert_eq!(f.text(), "axyz\n", "BS restores the entry matching the position");
 }
 
-/// PROBE 矩阵（Q8b/Q8c/P23b/P23d）：光标移动后的 BS 是**整体 no-op**——
-/// 栈顶条目不属于当前退格位置，vim 既不恢复也不动光标。旧 LIFO 弹出后
-/// 写错位置（`Rabc<Left><Right><BS>` 曾得 'ayy'）。
+/// PROBE matrix (Q8b/Q8c/P23b/P23d): BS after a cursor move is a **complete no-op** — the top-of-stack
+/// entry does not belong to the current backspace position, so vim neither restores nor moves the
+/// cursor. The old LIFO pop wrote to the wrong place (`Rabc<Left><Right><BS>` once yielded 'ayy').
 #[test]
 fn replace_bs_after_cursor_move_is_noop() {
-    // Left 一次再 BS：栈顶是 c@2，退格位是 1 → 不恢复
+    // Left once then BS: top of stack is c@2, the backspace position is 1 → no restore
     let mut f = edit("xyz\n", 0, 0, &["R"]);
     f.type_text("abc");
     f.feed(["<Left>"]);
     f.feed(["<BS>"]);
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "abc\n", "P23b：移动后 BS 不改文本");
+    assert_eq!(f.text(), "abc\n", "P23b: BS after a move does not change the text");
 
-    // P23d：Left Left Right BS → 同样不动
+    // P23d: Left Left Right BS → likewise nothing moves
     let mut f2 = edit("xyz\n", 0, 0, &["R"]);
     f2.type_text("abc");
     f2.feed(["<Left>", "<Left>", "<Right>"]);
     f2.feed(["<BS>"]);
     f2.feed(["<Esc>"]);
-    assert_eq!(f2.text(), "abc\n", "P23d：移动后 BS 不改文本");
+    assert_eq!(f2.text(), "abc\n", "P23d: BS after a move does not change the text");
 }
 
-/// PROBE（P23c）：Right 在行尾无处可去，光标仍在打字末端 → BS 照常恢复。
+/// PROBE (P23c): Right has nowhere to go at line end, the cursor is still at the typing frontier →
+/// BS restores as usual.
 #[test]
 fn replace_bs_at_stuck_right_still_restores() {
     let mut f = edit("xyz\n", 0, 0, &["R"]);
@@ -464,10 +472,11 @@ fn replace_bs_at_stuck_right_still_restores() {
     f.feed(["<Right>"]);
     f.feed(["<BS>"]);
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "abz\n", "P23c：Right 卡在行尾，BS 正常恢复");
+    assert_eq!(f.text(), "abz\n", "P23c: Right stuck at line end, BS restores normally");
 }
 
-/// PROBE（Q8d）：行尾追加字符 BS = 纯删除（None 条目），随后恢复被覆盖的 z。
+/// PROBE (Q8d): BS on a character appended past line end = a pure delete (None entry), then the
+/// overwritten z is restored.
 #[test]
 fn replace_bs_appended_char_deletes_then_restores() {
     let mut f = edit("wxyz\n", 0, 0, &["R"]);
@@ -475,12 +484,12 @@ fn replace_bs_appended_char_deletes_then_restores() {
     f.feed(["<BS>"]);
     f.feed(["<BS>"]);
     f.feed(["<Esc>"]);
-    assert_eq!(f.text(), "abcz\n", "Q8d：追加字符删除、覆盖字符恢复");
+    assert_eq!(f.text(), "abcz\n", "Q8d: appended character deleted, overwritten character restored");
 }
 
-/// PROBE（P24）：autoindent 下 `3ifoo<CR>bar<Esc>` 得三组 foo/bar——count
-/// 以**展开后**（含缩进）的文本为单元复制（原先 rep.text 原文长度不变式
-/// 失败，count 被静默丢弃）。
+/// PROBE (P24): under autoindent, `3ifoo<CR>bar<Esc>` yields three foo/bar groups — the count
+/// copies the **expanded** text (indent included) as the unit (previously the rep.text
+/// original-length invariant failed and the count was silently dropped).
 #[test]
 fn count_repeat_insert_with_autoindent_newline_replicates() {
     let mut f = Fixture::new("start\n");
@@ -493,11 +502,11 @@ fn count_repeat_insert_with_autoindent_newline_replicates() {
     assert_eq!(
         f.text(),
         "foo\nbarfoo\nbarfoo\nbarstart\n",
-        "vim P24：三组 foo/bar"
+        "vim P24: three foo/bar groups"
     );
 }
 
-/// 无换行的 count-repeat 行为不变（`3ix<Esc>` → 'xxx'）。
+/// The newline-free count-repeat behavior is unchanged (`3ix<Esc>` → 'xxx').
 #[test]
 fn count_repeat_insert_plain_still_works() {
     let mut f = Fixture::new("y\n");
@@ -507,63 +516,63 @@ fn count_repeat_insert_plain_still_works() {
     assert_eq!(f.text(), "xxxy\n");
 }
 
-// ---- config 解析（vimrc 面）------------------------------------------------
+// ---- config parsing (the vimrc surface) -------------------------------------
 
-/// `let mapleader2 = ";"` 是无关变量——不得劫持 `<Leader>`，且要有痕迹。
+/// `let mapleader2 = ";"` is an unrelated variable — it must not hijack `<Leader>`, and must leave a trace.
 #[test]
 fn mapleader_variable_requires_word_boundary() {
     let rc = "let mapleader = \",\"\nlet mapleader2 = \";\"\nnnoremap <Leader>x ix<Esc>\n";
     let config = vimcore::config::parse(rc);
-    // leader 仍是 ","
+    // the leader is still ","
     let lhs = &config.mappings[0].lhs;
     assert_eq!(
         lhs,
         &vec![vimcore::key::Key::char(','), vimcore::key::Key::char('x')],
-        "<Leader> 解析为逗号 + x"
+        "<Leader> resolves to comma + x"
     );
     assert!(
         config.ignored.iter().any(|l| l.contains("mapleader2")),
-        "mapleader2 行应进 ignored（got {:?}）",
+        "the mapleader2 line should land in ignored (got {:?})",
         config.ignored
     );
 }
 
-/// `set\tnumber`（TAB 分隔）必须生效——旧实现静默进 ignored。
+/// `set\tnumber` (TAB-separated) must take effect — the old implementation silently ignored it.
 #[test]
 fn tab_separated_set_line_applies() {
     let config = vimcore::config::parse("set\tnumber\n");
     assert_eq!(
         config.settings,
         vec![vimcore::config::Setting::On("number".to_owned())],
-        "TAB 分隔的 set 生效"
+        "the TAB-separated set line takes effect"
     );
     assert!(config.ignored.is_empty());
 }
 
-/// `set ts=4 " note`：注释尾随不产生垃圾 Setting（曾虚增 ignored 计数）。
+/// `set ts=4 " note`: the trailing comment must not produce a garbage Setting (it once inflated the ignored count).
 #[test]
 fn set_line_trailing_comment_dropped() {
     let config = vimcore::config::parse("set ts=4 \" my preference\n");
     assert_eq!(
         config.settings,
         vec![vimcore::config::Setting::Value("ts".to_owned(), "4".to_owned())],
-        "只有 ts=4 一个设置"
+        "only one setting, ts=4"
     );
 }
 
-/// `set ts&` 在 rc 里重置默认；`set ic?` 查询被静默丢弃（不产生垃圾）。
+/// `set ts&` resets to default in an rc; `set ic?` queries are silently dropped (no garbage produced).
 #[test]
 fn set_reset_and_query_forms_in_rc() {
     let config = vimcore::config::parse("set ts&\nset ic?\n");
     assert_eq!(
         config.settings,
         vec![vimcore::config::Setting::Reset("ts".to_owned())],
-        "ts& = Reset，ic? 被丢弃"
+        "ts& = Reset, ic? dropped"
     );
 }
 
-/// `<LocalLeader>` 经 `let maplocalleader` 解析（原先残留 Named 键，
-/// 映射永久无法触发）。
+/// `<LocalLeader>` resolves via `let maplocalleader` (previously a Named key remained and the
+/// mapping could never fire).
 #[test]
 fn local_leader_resolves_from_let_variable() {
     let rc = "let maplocalleader = \"-\"\nnnoremap <LocalLeader>x ix<Esc>\n";
@@ -573,34 +582,35 @@ fn local_leader_resolves_from_let_variable() {
     assert_eq!(
         lhs[0],
         vimcore::key::Key::char('-'),
-        "<LocalLeader> 解析为 -"
+        "<LocalLeader> resolves to -"
     );
     assert_eq!(lhs[1], vimcore::key::Key::char('x'));
 }
 
-/// PROBE: vim 9.1 Q1——`*` 在非词非空白字符上搜该字符的**字面**（pattern
-/// 为 `!`），不是响铃也不是复用旧 pattern。行内向后首个非空白同理。
+/// PROBE: vim 9.1 Q1 — `*` on a non-word non-blank character searches that character **literally**
+/// (pattern `!`), neither ringing the bell nor reusing the old pattern. The backward first non-blank
+/// on the line works the same way.
 #[test]
 fn star_on_non_word_char_searches_it_literally() {
     let mut f = Fixture::new("foo !\nbar !\n");
-    f.feed(["/", "b", "a", "r", "<Enter>"]); // 先武装一个无关 pattern
-    f.feed(["g", "g"]); // 回第 1 行
-    f.feed(["$"]); // 光标到 '!'
+    f.feed(["/", "b", "a", "r", "<Enter>"]); // first arm an unrelated pattern
+    f.feed(["g", "g"]); // back to line 1
+    f.feed(["$"]); // cursor onto the '!'
     f.feed(["*"]);
     assert_eq!(
         f.vim.search.pattern.as_deref(),
         Some("!"),
-        "字面 ! 成为主 pattern"
+        "the literal ! becomes the main pattern"
     );
-    assert_eq!(f.vim.cursor_offset(), 10, "跳到下一个 !（第 2 行）");
+    assert_eq!(f.vim.cursor_offset(), 10, "jumps to the next ! (line 2)");
 }
 
-/// 光标行全是空白时 `*` 报 E348（vim 的错误串），不再引用陈旧 pattern。
+/// When the cursor line is all whitespace, `*` reports E348 (vim's error string) and no longer references a stale pattern.
 #[test]
 fn star_on_blank_line_reports_e348() {
     let mut f = Fixture::new("word\n   \n");
     f.feed(["/", "w", "o", "r", "d", "<Enter>"]);
-    f.feed(["j", "j"]); // 空白行
+    f.feed(["j", "j"]); // whitespace line
     f.feed(["*"]);
     let last = f.host.statuses.last().map(String::as_str).unwrap_or("");
     assert_eq!(last, "E348: No string under cursor");
