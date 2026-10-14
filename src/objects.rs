@@ -410,21 +410,45 @@ fn sentence_range(
     };
     let on_gap = offset >= term_end
         && buf.char_at(offset).is_some_and(|c| c.is_whitespace());
-    if !inner && on_gap && next < buf.len() {
+    if inner && on_gap && matches!(buf.char_at(offset), Some(' ' | '\t')) {
+        // 9.1: `i s` with the cursor ON the spacer blanks between sentences
+        // selects the whitespace RUN of that line (probes: "Aa. Bb." at the
+        // space — `dis` -> "Aa.Bb."; 2- and 3-space runs are eaten whole).
+        // A cursor sitting on a NEWLINE keeps the old sentence anchoring.
+        let mut run_start = offset;
+        while matches!(buf.char_at(run_start), Some(' ' | '\t')) {
+            match buf.prev_char_offset(run_start) {
+                Some(o) if matches!(buf.char_at(o), Some(' ' | '\t')) => run_start = o,
+                _ => break,
+            }
+        }
+        let mut run_end = offset;
+        while matches!(buf.char_at(run_end), Some(' ' | '\t')) {
+            run_end += c_len(buf, run_end);
+        }
+        return Some(ObjectRange::charwise(run_start, run_end));
+    }
+    if !inner && on_gap {
         // the gap belongs to the anchored sentence's leading run: the `as`
-        // range starts where the previous sentence's terminator ended
-        range_start = term_end;
-        // the whitespace run rides at the FRONT of the anchored range; the
-        // sentence's own trailing run stays outside (oracle: `das` on the
-        // gap of "? And one more. And no…" deletes " And one more." and
-        // keeps BOTH spaces)
-        leading_ws = true;
-        let mut first = range_start;
+        // range starts where the previous sentence's terminator ended —
+        // PROVIDED a next sentence exists AFTER the run (the old
+        // `next < buf.len()` guard mis-tested at the buffer-final sentence:
+        // probe "Aa. Bb.\n" `0lll das` -> "Aa.\n", while a run that ends the
+        // buffer ("Aa. \n") keeps the no-anchor shape).
+        let mut first = term_end;
         while matches!(buf.char_at(first), Some(c) if c.is_whitespace()) {
             first += c_len(buf, first);
         }
-        start = first;
-        term_end = find_term(start, word::next_sentence(buf, start));
+        if first < buf.len() {
+            range_start = term_end;
+            // the whitespace run rides at the FRONT of the anchored range; the
+            // sentence's own trailing run stays outside (oracle: `das` on the
+            // gap of "? And one more. And no…" deletes " And one more." and
+            // keeps BOTH spaces)
+            leading_ws = true;
+            start = first;
+            term_end = find_term(start, word::next_sentence(buf, start));
+        }
     }
     // COUNT semantics (9.1 oracle matrix on "Aa. Bb. Cc. Dd." +
     // "A sentence.  A sentence?  A sentence!"): the boundary ALTERNATES
