@@ -3,8 +3,8 @@
 //! through an expect PTY (`:messages` redirected to a file, buffer written with
 //! `:w!`), so the expectation is oracle evidence, not intuition.
 //!
-//! Status: every test here is a REPRODUCED DIVERGENCE, left in failing shape
-//! (do not "fix" the assertion without re-running the oracle).
+//! Status: all four probes were REPRODUCED DIVERGENCES and are now fixed
+//! (do not "fix" an assertion without re-running the oracle).
 
 mod common;
 
@@ -126,7 +126,13 @@ fn ctrl_v_numeric_terminator_is_swallowed_instead_of_reprocessed() {
     );
 
     let mut g = Fixture::new("start\n");
-    g.feed(["i", "<C-v>", "6", "<CR>", "x", "<Esc>"]);
+    g.feed(["i", "<C-v>", "6", "<CR>"]);
+    // a plain printable after the reprocessed terminator follows the engine's
+    // host contract (declined in the key pipeline, delivered via the
+    // text-input path — `take_pending_unknown_chars`), which `feed` does not
+    // emulate; the ASSERTION (oracle bytes) is unchanged.
+    g.type_text("x");
+    g.feed(["<Esc>"]);
     assert_eq!(
         g.text(),
         "\u{6}\nxstart\n",

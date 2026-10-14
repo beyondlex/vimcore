@@ -433,18 +433,13 @@ impl VimState {
         }
     }
 
-    /// The terminator of a completed `i_CTRL-V` numeric code: vim ungetc's it
-    /// and processes it normally. Esc / `<C-[>` exit insert; a printable is
-    /// left to the host (returned Unknown so the host types it).
+    /// The terminator of a completed `i_CTRL-V` numeric code: vim `ungetc()`s
+    /// it and processes it as a normal insert-mode key (`get_literal`'s
+    /// `vungetc(c)`), so `<C-h>` still backspaces and `<CR>` still breaks the
+    /// line. The pending state was already taken before dispatch, so
+    /// re-dispatching through `insert_key` IS that unget.
     fn finish_quote_terminator(&mut self, ctx: &mut Ctx, key: Key) -> ProcessOutcome {
-        if key == Key::escape() || key == Key::ctrl_char('[') {
-            self.exit_insert(ctx);
-            return ProcessOutcome::Consumed;
-        }
-        if key.printable_char().is_some() {
-            return ProcessOutcome::Unknown;
-        }
-        ProcessOutcome::Consumed
+        self.insert_key(ctx, key)
     }
 
     /// The literal char a quoted key produces: control chords map to their
