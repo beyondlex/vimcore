@@ -100,7 +100,7 @@ clobbered by this call).
 - `src/tck.rs`: `readonly_contract` (step-A shape, buffer as
   `&mut impl VimBufferMut`) and `readonly_pipeline_contract` (step-B
   shape, buffer is `&dyn VimBuffer` — **mutation is impossible by
-  construction**). 41 editing key bindings assert E21 + byte-identical
+  construction**). 50 editing key bindings assert E21 + byte-identical
   buffer + motion/search/marks/yank still working after the rejection;
   10 viewing key bindings assert E21 must **not** be reported.
 - `tests/readonly_pipeline.rs`: RO viewing capabilities, E21 rejection,
@@ -2708,7 +2708,8 @@ start with `no`; the first read-code judgment was a misread, falsified by probes
 23. Visual indent count only recognizes the **leading** form (`3>`); `>3` is likewise
     ignored in vim, so it is consistent — but in `Vj>3` the lingering count becomes the
     next motion's count (same in vim, not a divergence, noted for the record).
-24. `:sort` does not support the `n` (numeric)/`x`/`o`/`b` flags nor `{pattern}` truncation.
+24. `:sort` does not support the `x`/`o`/`b` flags nor `{pattern}` truncation (the `n`
+    numeric flag is implemented: `ex_sort` + `numeric_sort_key`).
 25. `:j`'s count form (`:j 3`) is not implemented (use `:j` on `:,+1j` instead).
 
 ### Unresolved (recorded this round, unchanged)
@@ -2888,13 +2889,11 @@ for oracle evidence, then changed the engine.
     beep inside block-insert sessions).
 12. **`:g`, `:normal`, functions/autocmd are unsupported**, routed to E492 or the rc
     `ignored` collection (the same trade-off as IdeaVim). (`:sort` was implemented in
-    Round 23: `ex_sort`, incl. E475/numeric sort/`u` dedup/`!` reversal.) **The whole
-    `:copy`/`:move` family (`:t`/`:co`/`:m`) is also unimplemented** — the sibling line
-    commands `:d`/`:y`/`:j`/`:pu`/`:s` all exist, so missing these two is an odd gap
-    (carried forward since Round 35; the oracle matrix already lives in the red probes
-    `copy_command_missing`/`move_command_missing`/
-    `move_cursor_lands_on_moved_line_first_non_blank` in `tests/audit6_a.rs` — implementing
-    turns them green).
+    Round 23: `ex_sort`, incl. E475/numeric sort/`u` dedup/`!` reversal.) The
+    `:copy`/`:move` family (`:t`/`:co`/`:m`) is now implemented by `ex_copymove`
+    (`src/cmdline.rs`); its oracle pins are the regression tests
+    `copy_command`/`move_command`/
+    `move_cursor_lands_on_moved_line_first_non_blank` in `tests/audit6_a.rs`.
 13. **`""yy` lands in `"0`**: `""` is the unnamed register, so a yank must write `"0`,
     matching vim; but `""dd` does not enter the numbered ring (vim neither).
 14. ~~after visual `:` runs, `'<`/`'>` were rewritten as "anchor..current cursor"~~

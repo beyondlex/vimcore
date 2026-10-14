@@ -40,8 +40,10 @@ let mut buf = MyBuffer::default();   // implements VimBuffer + VimBufferMut
 let mut host = MyHost::default();    // implements VimHost (viewport/clipboard/undo hooks)
 
 let mut ctx = Ctx { buf: &mut buf, host: &mut host };
-match vim.handle_key(&mut ctx, Key::parse("dd")) {
-    KeyResult::Handled => {}   // engine handled it; state and buffer updated
+// one key per call; `Key::parse` handles a single keystroke
+// (`vimcore::key::parse_keys("dw")` splits a sequence into keys)
+match vim.handle_key(&mut ctx, Key::parse("d")) {
+    KeyResult::Consumed => {}  // engine handled it; state and buffer updated
     KeyResult::Unknown => {}   // engine does not want this key; give it back to the host
 }
 ```
@@ -98,7 +100,7 @@ fn my_buffer_meets_engine_contract() {
     vimcore::tck::engine_smoke_contract(&mut buf, &mut host).unwrap();
 }
 
-// Read-only host: the 41 editing keys must be rejected with E21 and the buffer stay byte-identical
+// Read-only host: the 50 editing keys must be rejected with E21 and the buffer stay byte-identical
 #[test]
 fn my_readonly_view_meets_engine_contract() {
     let buf = MyView::new("alpha\nbeta\ngamma\n");

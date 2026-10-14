@@ -1,9 +1,11 @@
-//! 性能探针：量引擎关键路径的真实耗时（README「开发」节的基准命令）。
+//! Performance probe: measure the real cost of the engine's hot paths
+//! (the benchmark command in the README "Development" section).
 //!
-//! 两类宿主对照：`B` 是朴素 `String` 宿主（`offset_to_line` O(n)——1MB 行
-//! 上的 `w` 显出宿主行查找的成本），`R` 是 ropey 宿主（O(log n)，隔离出
-//! 引擎自身开销）。`refresh_highlights`/`hlsearch_live_update` 的取舍见
-//! NOTES 性能节。
+//! Two host shapes for contrast: `B` is a naive `String` host (its
+//! `offset_to_line` is O(n) — `w` on a 1MB line exposes the host's
+//! line-lookup cost), `R` is a ropey host (O(log n), isolating the
+//! engine's own overhead). See the NOTES performance section for the
+//! `refresh_highlights`/`hlsearch_live_update` trade-off.
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -169,8 +171,8 @@ fn feed<B: VimBufferMut>(vim: &mut VimState, buf: &mut B, h: &mut H, keys: &[Key
 }
 
 fn main() {
-    // ---- 1. 普通 motion：10k 次按键 ----
-    let body = "lorem ipsum dolor sit amet ".repeat(400); // ~11KB 单段长行 + 短行
+    // ---- 1. plain motion: 10k keystrokes ----
+    let body = "lorem ipsum dolor sit amet ".repeat(400); // ~11KB long line + a short line
     let mut buf = B(Rc::new(RefCell::new(format!("{body}\nsecond line here\n"))));
     let mut vim = VimState::new();
     let mut h = H::default();
@@ -183,8 +185,8 @@ fn main() {
         t.elapsed().as_micros() as f64 / 2000.0
     );
 
-    // ---- 2. 大 buffer（1MB）上的 w 移动 ----
-    let big = "word ".repeat(200_000); // 1MB 单行
+    // ---- 2. `w` motion on a large buffer (1MB) ----
+    let big = "word ".repeat(200_000); // one 1MB line
     let mut buf = B(Rc::new(RefCell::new(big)));
     let mut vim = VimState::new();
     let mut h = H::default();
@@ -197,7 +199,7 @@ fn main() {
         t.elapsed().as_micros() as f64 / 200.0
     );
 
-    // ---- 3. 搜索 + hlsearch 常驻后，每次编辑的 republish 成本 ----
+    // ---- 3. search + persistent hlsearch: republish cost per edit ----
     let lines: String = "the quick brown fox jumps over the lazy dog\n".repeat(20_000); // ~900KB
     let mut buf = B(Rc::new(RefCell::new(lines)));
     let mut vim = VimState::new();
@@ -216,8 +218,8 @@ fn main() {
     );
     let matches = h.hl.len();
     let t = Instant::now();
-    // republish_search 的核心成本 = all_matches 全文件正则扫描；
-    // bump 是 crate 内部，这里直接量 20 次等价的搜索扫描
+    // republish_search's core cost = the whole-file regex scan in all_matches;
+    // bump is crate-internal, so measure 20 equivalent search scans directly
     for _ in 0..20 {
         let _ = vimcore::search::all_matches(&vim, &buf, "fox");
     }
@@ -228,7 +230,7 @@ fn main() {
         t.elapsed().as_millis() as f64 / 20.0
     );
 
-    // ---- 4. :%s 全文件替换 ----
+    // ---- 4. :%s whole-file substitute ----
     let lines: String = "foo bar baz\n".repeat(50_000); // ~600KB
     let mut buf = B(Rc::new(RefCell::new(lines)));
     let mut vim = VimState::new();
@@ -242,7 +244,7 @@ fn main() {
     feed(&mut vim, &mut buf, &mut h, &cmd);
     println!(":%s/foo/bar/g (600KB, 50k lines): {:>8.2?}", t.elapsed());
 
-    // ---- 5. gq 重排 200 行段落 ----
+    // ---- 5. gq reflow of a 200-line paragraph ----
     let para =
         "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod\n".repeat(200);
     let mut buf = B(Rc::new(RefCell::new(para)));
@@ -254,7 +256,7 @@ fn main() {
     feed(&mut vim, &mut buf, &mut h, &cmd);
     println!("gqG reflow (200 lines):          {:>8.2?}", t.elapsed());
 
-    // ---- 6. x 删除（10k 行 buffer）----
+    // ---- 6. `x` delete (10k-line buffer) ----
     let mut buf = B(Rc::new(RefCell::new("line of text\n".repeat(10_000))));
     let mut vim = VimState::new();
     let mut h = H::default();
@@ -267,9 +269,10 @@ fn main() {
         t.elapsed().as_micros() as f64 / 100.0
     );
 
-    // ---- 7. n 连跳（900KB、1 万匹配，ropey buffer）----
-    // hlsearch 常驻后连按 n：未命中缓存时每次都是全文件 slice + 正则重扫；
-    // ropey buffer 隔离掉朴素 line-lookup 的宿主成本，反映引擎自身开销
+    // ---- 7. repeated `n` jumps (900KB, 10k matches, ropey buffer) ----
+    // With hlsearch live, each `n` is a whole-file slice + regex rescan when the
+    // match cache misses; the ropey buffer removes the naive line-lookup host
+    // cost, leaving the engine's own overhead
     let lines: String = "the quick brown fox jumps over the lazy dog\n".repeat(20_000); // ~900KB
     let mut buf = R(Rc::new(RefCell::new(ropey::Rope::from(lines))));
     let mut vim = VimState::new();

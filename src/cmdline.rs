@@ -94,7 +94,6 @@ enum Align {
     Left,
 }
 
-/// The return of `parse_range`: the range (`None` = no range prefix typed) + the command with the range stripped.
 /// A parsed `[range]`: the clamped `(first, last)` lines, how many addresses
 /// the user actually TYPED (a bare `:5j` is one address and joins with the
 /// next line; `:2,2j` typed two equal ones and is a no-op — vim), and the

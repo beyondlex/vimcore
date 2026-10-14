@@ -16,9 +16,9 @@
 //! case).
 //!
 //! Of the 161 cases, 10 are known divergences and stay out of the table: `:g`/`:v`/
-//! `:normal` (divergence ledger #12), `:copy`/`:move` (the whole `:t`/`:co`/`:m` family
-//! unimplemented; red probes in `tests/audit6_a.rs`'s `copy_command_missing`/
-//! `move_command_missing`), `:<C-h>d` (backspace on an empty command line — the `-s`
+//! `:normal` (divergence ledger #12), `:copy`/`:move` (the `:t`/`:co`/`:m` family is
+//! implemented by `ex_copymove`; its oracle pins live in `tests/audit6_a.rs`'s
+//! `copy_command`/`move_command`), `:<C-h>d` (backspace on an empty command line — the `-s`
 //! and expect PTY channels give contradictory vim results; see the NOTES open-items
 //! ledger).
 //!

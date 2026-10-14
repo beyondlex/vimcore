@@ -70,14 +70,14 @@ fn line_of(f: &Fixture) -> usize {
 }
 
 // ------------------------------------------------------------- E-A-1 (P2)
-// The whole `:m`/`:move` family is missing: the line-move command falls to
-// E492 with the text unchanged. Sibling line commands (:d/:y/:j/:sort/:pu/:s)
-// are implemented in the engine; the absence of :m is a missing-sibling shape.
+// `:m`/`:move` regression pin (the family was once missing and fell to E492;
+// now implemented by `ex_copymove` in src/cmdline.rs). Sibling line commands
+// (:d/:y/:j/:sort/:pu/:s) share the same range machinery.
 //
 // oracle (om, typeahead): buf [a,b,c,d], keys `:2m0<CR>…`:
 //   text [b,a,c,d], no error, cursor p=1 1 (ex_cmds.c ex_copymove/do_move).
 #[test]
-fn move_command_missing() {
+fn move_command() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2m0");
     assert!(
@@ -98,9 +98,8 @@ fn move_command_missing() {
 }
 
 // ------------------------------------------------------------- E-A-2 (P2)
-// The landing semantics of `:m` (the implementation contract when fixing
-// E-A-1): the cursor lands on the first non-blank of the moved line
-// (begline at the end of do_move).
+// The landing semantics of `:m`: the cursor lands on the first non-blank of
+// the moved line (begline at the end of do_move).
 //
 // oracle (om2): buf ['  x','a','b'], `:1m2<CR>`:
 //   text [a,'  x',b], cursor p=2 3 (line 2 col 3 = the 'x' of the moved line).
@@ -117,13 +116,13 @@ fn move_cursor_lands_on_moved_line_first_non_blank() {
 }
 
 // ------------------------------------------------------------- E-A-3 (P2)
-// The whole `:t`/`:co`/`:copy` family is missing: `:2t0` copies line 2 to the
-// top of the file; the engine returns E492.
+// `:t`/`:co`/`:copy` regression pin: `:2t0` copies line 2 to the top of the
+// file (the family was once missing; now implemented by `ex_copymove`).
 //
 // oracle (ot): buf [a,b,c,d], `:2t0<CR>`:
 //   [b,a,b,c,d], cursor p=1 1 (start of the new copied line).
 #[test]
-fn copy_command_missing() {
+fn copy_command() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2t0");
     assert!(

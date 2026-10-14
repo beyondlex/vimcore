@@ -1,5 +1,7 @@
 # 中文 → 英文 迁移计划
 
+> 本文件刻意保留中文：它是内部执行手册，已列入 Cargo.toml `exclude`，不随 crate 发布。
+
 覆盖 4 个仓库：`vimcore`（底座）、`alacer`、`gpui_vim`、`crossterm_vim`。
 执行手册，不是提案。
 
