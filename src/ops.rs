@@ -59,10 +59,20 @@ pub fn span_from_motion(
     motion: Motion,
     result: MotionResult,
     count: usize,
-    is_change: bool,
+    op: Option<Operator>,
 ) -> OpSpan {
     let start = vim.cursor.offset;
     let start_line = buf.offset_to_line(start);
+    // `w`/`W` under a non-CHANGE operator uses vim's dedicated eol=TRUE walk
+    // (see `span_from_word_operator`); `cw` keeps the historical pipeline
+    // below because the change-side clamps are pinned against `ce` shapes.
+    if let Motion::WordStart { big } = motion {
+        if op != Some(Operator::Change) {
+            return span_from_word_operator(
+                buf, start, start_line, big, count, op == Some(Operator::Delete),
+            );
+        }
+    }
     // a till motion parks the cursor one char short of the match; the
     // operator span reaches the MATCH itself (vim: `dt3` on `a1b2c3d3e`
     // deletes `a1b2c` — through the char in front of the target — while a
@@ -84,7 +94,8 @@ pub fn span_from_motion(
 
     let crossed_lines = target_line != start_line;
 
-    // `w`/`W` operator special cases (each row verified against vim 9.1):
+    // CHANGE `w`/`W` special cases (each row verified against vim 9.1) —
+    // the other operators took the faithful eol=TRUE path above.
     // * landing in column 1 of the target line — from an EMPTY start line vim
     //   promotes the motion to LINEWISE over the covered line (`dw` on an
     //   empty line deletes the line). The promotion needs an empty line, not
@@ -114,9 +125,8 @@ pub fn span_from_motion(
             // lines). For CHANGE + a count of 2+ the span keeps going: `cw`
             // behaves like `ce` (`:h cw`), so `2cw` from 'b' on "ab \n\ncd"
             // changes "b \n\ncd" — through the END of the landing word
-            // (audit B1). A DELETE keeps the clamp (vim 9.1: `d2w` on
-            // "foo x\nbar" leaves the emptied line behind)
-            if count > 1 && is_change {
+            // (audit B1).
+            if count > 1 {
                 // next_word_end reports the INCLUSIVE last char
                 let word_end = word::next_word_end(buf, target, big) + 1;
                 return OpSpan {
@@ -272,6 +282,81 @@ pub fn span_from_motion(
     }
 }
 
+/// Span for `w`/`W` under a non-CHANGE operator — the two vim rules that
+/// make `d2w` shapes agree with the 9.1 oracle matrix:
+/// * the landing comes from `fwd_word` with eol=TRUE (`word::fwd_word_operator`):
+///   the final count iteration stops ON the newline when a word runs off the
+///   line end, or at column 0 when blanks cross a line break;
+/// * the column-0 landing takes vim's `do_pending_operator` end-adjustment
+///   (`end.col == 0` → back up a line; start at/before the first non-blank →
+///   LINWISE over the covered lines, otherwise the span ends at the last
+///   char of the previous line, exclusive of its newline);
+/// * a DELETE additionally takes the cpo-`z` promotion in `op_delete` ("imitate
+///   the strange vi behaviour"): a multi-line charwise span whose residue
+///   after the end is blank and whose start is at/before the first non-blank
+///   becomes linewise. Yank and the rest never promote.
+fn span_from_word_operator(
+    buf: &dyn VimBuffer,
+    start: usize,
+    start_line: usize,
+    big: bool,
+    count: usize,
+    is_delete: bool,
+) -> OpSpan {
+    // a failed walk (cursor already at the last char of the file) cancels
+    // the operator: an empty span deletes nothing and yanks nothing
+    let Some(land) = word::fwd_word_operator(buf, start, big, count) else {
+        return OpSpan { start, end: start, linewise: false };
+    };
+    let land_line = buf.offset_to_line(land);
+    let mut span = if land != start && land == buf.line_start(land_line) && land_line != start_line {
+        // vim's col-0 end adjustment: the end moves back onto line
+        // `land_line - 1`
+        let end_line = land_line - 1;
+        if start <= buf.first_non_blank(start_line) {
+            OpSpan { start: buf.line_start(start_line), end: buf.line_range(end_line).end, linewise: true }
+        } else {
+            OpSpan { start, end: buf.line_end(end_line), linewise: false }
+        }
+    } else {
+        OpSpan { start, end: land, linewise: false }
+    };
+    if is_delete {
+        promote_blank_residue_delete(buf, &mut span);
+    }
+    span
+}
+
+/// vim's `op_delete` "imitate the strange Vi behaviour" block (the cpo-`z`
+/// rule, part of the default `'cpoptions'`): a charwise DELETE that spans
+/// more than one line, whose text from the span end to its line end is blank
+/// and whose start sits at or before the first non-blank of its line, becomes
+/// LINWISE. Yank, change and the other operators never promote.
+pub(crate) fn promote_blank_residue_delete(buf: &dyn VimBuffer, span: &mut OpSpan) {
+    if span.linewise
+        || span.end <= span.start
+        || buf.offset_to_line(span.end) == buf.offset_to_line(span.start)
+    {
+        return;
+    }
+    let start_line = buf.offset_to_line(span.start);
+    if span.start > buf.first_non_blank(start_line) {
+        return;
+    }
+    let end_line = buf.offset_to_line(span.end);
+    // vim tests the residue after the (inclusive) end character; the engine's
+    // end is already exclusive, so the slice from it to the line end is the
+    // same text.
+    let residue = buf.slice(span.end..buf.line_end(end_line));
+    if residue.chars().all(|c| c == ' ' || c == '\t') {
+        *span = OpSpan {
+            start: buf.line_start(start_line),
+            end: buf.line_range(end_line).end,
+            linewise: true,
+        };
+    }
+}
+
 /// Span for a text object.
 pub fn span_from_object(object: ObjectRange) -> OpSpan {
     OpSpan {
@@ -309,14 +394,22 @@ pub fn object_span_count(
     object: objects::TextObject,
     count: usize,
 ) -> Option<OpSpan> {
-    let mut range = objects::range(buf, vim.cursor.offset, object, count)?;
+    // The word family counts INSIDE vim's own walk (`word::current_word`
+    // extends the selection by further word/blank runs), so it takes the
+    // whole count up front and never re-scans from the span's end. A run that
+    // does not exist fails the object — `y3aw` on two words is vim's bell.
+    if let objects::TextObject::Word { .. } = object {
+        let range = objects::range(buf, vim.cursor.offset, object, count)?;
+        let mut span = span_from_object(range);
+        if vim.op == Some(Operator::Delete) && !matches!(vim.mode, Mode::Visual { .. }) {
+            promote_blank_residue_delete(buf, &mut span);
+        }
+        return Some(span);
+    }
+    let mut range = objects::range(buf, vim.cursor.offset, object, 1)?;
     // a count repeats the object by RE-SCANNING from the span's end (vim
-    // 9.1: `v2aw` covers "foo bar ", `v2i"` both quoted strings, `v2i(`
-    // climbs to the enclosing block, `v2ap` the next paragraph — all fall
-    // out of scan-from-end). It even reproduces vim's odd inner-word
-    // counting: `2iw` = "foo " (word + its trailing blank run), `3iw` =
-    // "foo bar" on "foo bar baz". The old engine dropped the count
-    // entirely, so `d2aw` behaved as `daw`.
+    // 9.1: `v2i"` both quoted strings, `v2i(` climbs to the enclosing block,
+    // `v2ap` the next paragraph — all fall out of scan-from-end).
     // Block: a forward-found block consumed the count (the count-th
     // unmatched opener). Sentence: the count steps sentences inside
     // sentence_range — either way the climb below must not re-apply.
@@ -331,13 +424,10 @@ pub fn object_span_count(
         objects::TextObject::Sentence { .. } => true,
         _ => false,
     };
-    // count-beyond detection (audit5 B-13/B-16: `3yap` without a third
-    // paragraph and `y3aw` without a third word both BEEP and select
-    // nothing — testdir assert_beeps). `done` counts SELECTED OBJECTS; the
-    // word-family's line-break bridge (below) extends one object across
-    // the newline and must not count as an extra one. A forward-found
-    // block consumed the whole count inside block_range (the count-th
-    // unmatched opener) — count it as satisfied.
+    // count-beyond detection (audit5 B-13: `3yap` without a third paragraph
+    // BEEPs and selects nothing — testdir assert_beeps). `done` counts
+    // SELECTED OBJECTS. A forward-found block consumed the whole count inside
+    // block_range (the count-th unmatched opener) — count it as satisfied.
     let mut done = if count_consumed { count.max(1) } else { 1usize };
     for _ in 1..if count_consumed { 1 } else { count.max(1) } {
         let mut probe = range.end.min(buf.len());
@@ -356,30 +446,6 @@ pub fn object_span_count(
                 range.end = range.end.max(next.end);
                 done += 1;
             }
-            // an outer-word probe sitting ON a line terminator re-selects
-            // nothing (the raw range floors back INTO the line just
-            // covered): vim continues across the break — newline, any
-            // swallowed empty lines, then the next word with its trailing
-            // blanks (`d2aw` on "ab cd\nef gh" covers " cd\nef "; on
-            // "foo\n\nbar" it empties the buffer — audit B1). The bridge
-            // belongs to the object it extends: `done` does not advance.
-            _ if matches!(object, objects::TextObject::Word { inner: false, .. })
-                && buf.char_at(probe) == Some('\n') =>
-            {
-                match objects::newline_word_span(buf, big_of(object), probe) {
-                    // a bridge that REACHES the next line's word completes an
-                    // object (d2aw's second aw); a whitespace-only tail does
-                    // not (y3aw on 2 words still beeps — audit5 B-16)
-                    Some(next) if next.end > range.end => {
-                        let bridged = buf.slice(range.end..next.end.min(buf.len()));
-                        if bridged.chars().any(|c| !c.is_whitespace()) {
-                            done += 1;
-                        }
-                        range.end = next.end;
-                    }
-                    _ => break,
-                }
-            }
             _ => break,
         }
     }
@@ -387,11 +453,6 @@ pub fn object_span_count(
         return None;
     }
     Some(span_from_object(range))
-}
-
-/// The `big` flag of a word-family text object.
-fn big_of(object: objects::TextObject) -> bool {
-    matches!(object, objects::TextObject::Word { big: true, .. })
 }
 
 /// Span for the current visual selection.

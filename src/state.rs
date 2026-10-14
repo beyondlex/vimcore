@@ -4470,7 +4470,7 @@ impl VimState {
                             motion,
                             result,
                             count,
-                            self.op == Some(Operator::Change),
+                            self.op,
                         ),
                     };
                     // `cw`/`cW` = the `dw` span with the trailing whitespace
@@ -6458,7 +6458,7 @@ impl VimState {
                     motion,
                     result,
                     count,
-                    self.op == Some(Operator::Change),
+                    self.op,
                 );
             self.complete_operator_with_span(ctx, span);
         } else if !self.goto_motion(ctx, motion, count) {

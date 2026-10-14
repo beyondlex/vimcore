@@ -163,6 +163,357 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
     }
 }
 
+/// Operator-pending `w`/`W` — vim's `fwd_word(count, bigword, eol=TRUE)`
+/// (9.1 textobject.c). The LAST count iteration stops one step EARLIER than
+/// the bare motion: on the newline when the word scan runs off the line end,
+/// and on column 0 when the blank skip crosses a line break. That landing IS
+/// the exclusive operator span end — it is why `dw` on the last char of a
+/// word deletes exactly one char and why `d2w` on "  ind1\n  ind2" deletes
+/// "  ind1" charwise (9.1 oracle matrix, see `span_from_motion`).
+/// `None` = the motion fails (started at the last char of the file) and the
+/// operator cancels with a bell.
+pub fn fwd_word_operator(
+    buf: &dyn VimBuffer,
+    offset: usize,
+    big: bool,
+    count: usize,
+) -> Option<usize> {
+    let mut o = offset;
+    for iter in (0..count.max(1)).rev() {
+        let last_iter = iter == 0;
+        let sclass = op_class(buf, o, big);
+        let started_last_line = buf.offset_to_line(o) + 1 >= buf.line_count();
+        let (n, code) = op_inc(buf, o);
+        o = n;
+        match code {
+            Inc::Eof => return None,
+            Inc::Eol | Inc::Crossed if started_last_line => return None,
+            Inc::Eol | Inc::Crossed if last_iter => return Some(o),
+            _ => {}
+        }
+        // past the end of the current run (if we started in one)
+        while op_class(buf, o, big) == sclass {
+            let (n2, code2) = op_inc(buf, o);
+            o = n2;
+            if code2 == Inc::Eof
+                || (matches!(code2, Inc::Eol | Inc::Crossed) && last_iter)
+            {
+                return Some(o);
+            }
+        }
+        // next non-blank; the run stops on a truly EMPTY line's column 0
+        while op_class(buf, o, big) == Class::Blank {
+            let line = buf.offset_to_line(o);
+            if o == buf.line_start(line) && is_empty_line(buf, line) {
+                break;
+            }
+            let (n2, code2) = op_inc(buf, o);
+            o = n2;
+            if code2 == Inc::Eof
+                || (matches!(code2, Inc::Eol | Inc::Crossed) && last_iter)
+            {
+                return Some(o);
+            }
+        }
+    }
+    Some(o)
+}
+
+/// vim's `cls()` for the operator-pending walk: the line-terminating
+/// newline (and past-EOF) reads as BLANK, ending a run.
+fn op_class(buf: &dyn VimBuffer, offset: usize, big: bool) -> Class {
+    match buf.char_at(offset) {
+        Some('\n') | None => Class::Blank,
+        _ => class_at(buf, offset, big).unwrap_or(Class::Blank),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Inc {
+    /// moved to the next char on the same line
+    Within,
+    /// moved ONTO the line's newline (vim's i == 2)
+    Eol,
+    /// crossed the newline, landing on the next line's col 0 (vim's i == 1)
+    Crossed,
+    /// at the end of the file, no move (vim's i == -1)
+    Eof,
+}
+
+fn op_inc(buf: &dyn VimBuffer, offset: usize) -> (usize, Inc) {
+    match buf.char_at(offset) {
+        None => (offset, Inc::Eof),
+        Some('\n') => {
+            let line = buf.offset_to_line(offset);
+            if line + 1 < buf.line_count() {
+                (buf.line_start(line + 1), Inc::Crossed)
+            } else {
+                (offset, Inc::Eof)
+            }
+        }
+        Some(_) => match buf.next_char_offset(offset) {
+            Some(n) => (n, if buf.at_line_end(n) { Inc::Eol } else { Inc::Within }),
+            None => (buf.len(), Inc::Eol),
+        },
+    }
+}
+
+/// vim's `dec()`: back one position. `Within` stays on the line; `Crossed`
+/// lands ON the previous line's terminator (vim's `col == len` eol position,
+/// which `dec` visits before its last character); `Sof` = already at the
+/// first character of the file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dec {
+    Within,
+    Crossed,
+    Sof,
+}
+
+fn op_dec(buf: &dyn VimBuffer, offset: usize) -> (usize, Dec) {
+    let line = buf.offset_to_line(offset);
+    let line_start = buf.line_start(line);
+    if offset > line_start {
+        match buf.prev_char_offset(offset) {
+            Some(p) => (p, Dec::Within),
+            None => (offset, Dec::Sof),
+        }
+    } else if line > 0 {
+        (buf.line_end(line - 1), Dec::Crossed)
+    } else {
+        (offset, Dec::Sof)
+    }
+}
+
+/// vim's `incl()`: `inc`, but a step ONTO a line's terminator is not a stop —
+/// the walk crosses to the next line's column 0 (at the end of the file the
+/// cursor stays parked on the terminator, which is where vim leaves it too).
+fn op_incl(buf: &dyn VimBuffer, offset: usize) -> (usize, Inc) {
+    let (next, code) = op_inc(buf, offset);
+    if code == Inc::Eol {
+        return op_inc(buf, next);
+    }
+    (next, code)
+}
+
+/// vim's `decl()`: `dec`, but a landing on the previous line's terminator is
+/// skipped when that line has content (an EMPTY line is visited at column 0).
+fn op_decl(buf: &dyn VimBuffer, offset: usize) -> usize {
+    let (next, code) = op_dec(buf, offset);
+    if code == Dec::Crossed && next != buf.line_start(buf.offset_to_line(next)) {
+        return op_dec(buf, next).0;
+    }
+    next
+}
+
+/// vim's `back_in_line()`: step back to the start of the class run under the
+/// cursor, stopping at the line's first column.
+fn back_in_line(buf: &dyn VimBuffer, big: bool, pos: &mut usize) {
+    let sclass = op_class(buf, *pos, big);
+    loop {
+        if *pos == buf.line_start(buf.offset_to_line(*pos)) {
+            return;
+        }
+        *pos = op_dec(buf, *pos).0;
+        if op_class(buf, *pos, big) != sclass {
+            *pos = op_inc(buf, *pos).0;
+            return;
+        }
+    }
+}
+
+/// vim's `skip_chars(class, FORWARD)`: walk off a run of `class`, returning
+/// the landing position. `None` = the end of the file was reached mid-walk
+/// (vim's TRUE, which the callers turn into FAIL).
+fn skip_run(buf: &dyn VimBuffer, mut offset: usize, big: bool, class: Class) -> Option<usize> {
+    while op_class(buf, offset, big) == class {
+        let (next, code) = op_inc(buf, offset);
+        if code == Inc::Eof {
+            return None;
+        }
+        offset = next;
+    }
+    Some(offset)
+}
+
+/// vim's `fwd_word(1, bigword, eol = TRUE)` as the text-object walk uses it:
+/// one word forward, the last step allowed to stop ON a line's terminator.
+/// Returns `(position, completed)` — a walk that hits the last character of
+/// the file FAILs but leaves the cursor where it stopped, and `current_word`
+/// reads that position either way.
+fn fwd_word_step(buf: &dyn VimBuffer, offset: usize, big: bool) -> (usize, bool) {
+    let mut o = offset;
+    let sclass = op_class(buf, o, big);
+    let started_last_line = buf.offset_to_line(o) + 1 >= buf.line_count();
+    let (next, code) = op_inc(buf, o);
+    o = next;
+    if code == Inc::Eof || (matches!(code, Inc::Eol | Inc::Crossed) && started_last_line) {
+        return (o, false);
+    }
+    if matches!(code, Inc::Eol | Inc::Crossed) {
+        return (o, true);
+    }
+    if sclass != Class::Blank {
+        while op_class(buf, o, big) == sclass {
+            let (next, code) = op_inc(buf, o);
+            o = next;
+            if code == Inc::Eof || matches!(code, Inc::Eol | Inc::Crossed) {
+                return (o, true);
+            }
+        }
+    }
+    while op_class(buf, o, big) == Class::Blank {
+        let line = buf.offset_to_line(o);
+        // the blank run stops on a truly EMPTY line's column 0
+        if o == buf.line_start(line) && is_empty_line(buf, line) {
+            return (o, true);
+        }
+        let (next, code) = op_inc(buf, o);
+        o = next;
+        if code == Inc::Eof || matches!(code, Inc::Eol | Inc::Crossed) {
+            return (o, true);
+        }
+    }
+    (o, true)
+}
+
+/// vim's `end_word(1, bigword, stop = TRUE, empty = TRUE)`: finish the current
+/// run, or cross the blanks to the end of the next one; a blank run that
+/// reaches an EMPTY line stops there without stepping back. `None` = FAIL
+/// (end of file).
+fn end_word_step(buf: &dyn VimBuffer, offset: usize, big: bool) -> Option<usize> {
+    let mut o = offset;
+    let sclass = op_class(buf, o, big);
+    let (next, code) = op_inc(buf, o);
+    if code == Inc::Eof {
+        return None;
+    }
+    o = next;
+    if op_class(buf, o, big) == sclass && sclass != Class::Blank {
+        // started mid-run: finish it
+        o = skip_run(buf, o, big, sclass)?;
+    } else if sclass == Class::Blank {
+        // stop == TRUE: only a blank start crosses over to the next run
+        while op_class(buf, o, big) == Class::Blank {
+            let line = buf.offset_to_line(o);
+            if o == buf.line_start(line) && is_empty_line(buf, line) {
+                return Some(o);
+            }
+            let (next, code) = op_inc(buf, o);
+            if code == Inc::Eof {
+                return None;
+            }
+            o = next;
+        }
+        let class = op_class(buf, o, big);
+        o = skip_run(buf, o, big, class)?;
+    }
+    // overshot by one character — step back
+    Some(op_dec(buf, o).0)
+}
+
+/// vim's `current_word()`: the `aw`/`iw`/`aW`/`iW` object, walked in vim's
+/// position model where a position may sit ON a line's terminator (that is
+/// what makes a blank run cross a line break, and why the walk can stop on
+/// column 0). `include` selects the outer (`a`) object; `count` extends the
+/// selection by further word/blank runs.
+///
+/// Returns `(start, end, inclusive)`: with `inclusive` the selection ends ON
+/// `end`, otherwise `end` is the first character PAST the selection (possibly
+/// a line's terminator). `None` = the object fails, which cancels the
+/// operator with vim's bell.
+pub fn current_word(
+    buf: &dyn VimBuffer,
+    offset: usize,
+    count: usize,
+    include: bool,
+    big: bool,
+) -> Option<(usize, usize, bool)> {
+    // a cursor past the last byte (the phantom line a `w` walk can leave) is
+    // not a position vim can select from; read it as the line's terminator
+    let mut pos = if buf.char_at(offset).is_some() {
+        offset
+    } else {
+        let line = buf.offset_to_line(offset.min(buf.len()));
+        buf.line_end(line)
+    };
+    let mut inclusive = true;
+    let mut include_white = false;
+    let mut count = count.max(1);
+
+    back_in_line(buf, big, &mut pos);
+    let start_pos = pos;
+
+    if (op_class(buf, pos, big) == Class::Blank) == include {
+        // on a blank with `a`, or on a word with `i`: take the run's end
+        pos = end_word_step(buf, pos, big)?;
+    } else {
+        // on a word with `a`, or on a blank with `i`: take the run's start,
+        // then step back onto it (a landing on column 0 is a single-character
+        // word at the line start — back up to the line's terminator instead)
+        pos = fwd_word_step(buf, pos, big).0;
+        pos = if pos == buf.line_start(buf.offset_to_line(pos)) {
+            op_decl(buf, pos)
+        } else {
+            op_dec(buf, pos).0
+        };
+        if include {
+            include_white = true;
+        }
+    }
+    count -= 1;
+
+    while count > 0 {
+        inclusive = true;
+        let (next, code) = op_incl(buf, pos);
+        if code == Inc::Eof {
+            return None;
+        }
+        pos = next;
+        if include != (op_class(buf, pos, big) == Class::Blank) {
+            let (landed, ok) = fwd_word_step(buf, pos, big);
+            pos = landed;
+            if !ok && count > 1 {
+                return None;
+            }
+            // a landing one past a newline must not grab the next line's first
+            // character: park on the stop and drop the inclusiveness
+            let (back, code) = op_dec(buf, pos);
+            if code == Dec::Sof {
+                inclusive = false;
+            } else {
+                pos = back;
+            }
+        } else {
+            pos = end_word_step(buf, pos, big)?;
+        }
+        count -= 1;
+    }
+
+    let mut start = start_pos;
+    if include_white
+        && (op_class(buf, pos, big) != Class::Blank
+            || (pos == buf.line_start(buf.offset_to_line(pos)) && !inclusive))
+    {
+        // the selection ends on a WORD with no trailing blanks — pull the
+        // START back over the blanks in front of it instead (vim's `daw` on a
+        // sentence's last word)
+        let end_pos = pos;
+        pos = start;
+        let (back, code) = op_dec(buf, pos);
+        if code != Dec::Sof {
+            pos = back;
+            back_in_line(buf, big, &mut pos);
+            if op_class(buf, pos, big) == Class::Blank
+                && pos != buf.line_start(buf.offset_to_line(pos))
+            {
+                start = pos;
+            }
+        }
+        pos = end_pos;
+    }
+    Some((start, pos, inclusive))
+}
+
 /// `e` / `E`: end of the current word, or of the next one when already at a
 /// run end. Returns the offset *of the last character* (inclusive motion) —
 /// the last GRAPHEME start: a run ending on a continuation char (a mark

@@ -321,10 +321,15 @@ fn d2w_landing_column1_empties_line_instead_of_deleting_it() {
 }
 
 #[test]
-fn dw_on_blank_line_with_indented_next_line_is_a_noop() {
-    // vim: no join, no line deletion — the clamped span is empty
+fn dw_on_blank_line_with_indented_next_line_deletes_the_line() {
+    // The landing is column 1 on BOTH shapes of the next line (an indented
+    // line's column 1 is its first blank), so vim's col-0 adjustment fires the
+    // same way either time. 9.1 oracle (probe D1, `-S` + `normal!`):
+    // "foo\n\n  bar" cursor 2,1 `dw` -> LINWISE, reg 'V' "\n", leaving
+    // "foo\n  bar" — the old pin claimed a no-op and was wrong.
     let f = edit("foo\n\n  bar", 1, 0, &["d", "w"]);
-    assert_eq!(f.text(), "foo\n\n  bar");
+    assert_eq!(f.text(), "foo\n  bar");
+    assert_eq!(f.cursor(), 6, "linewise delete parks on the first non-blank");
 }
 
 #[test]
