@@ -406,7 +406,13 @@ pub fn object_span_count(
         }
         return Some(span);
     }
-    let mut range = objects::range(buf, vim.cursor.offset, object, 1)?;
+    // vim hands the count to the object finder itself (`current_block` loops
+    // `findmatch` count times, `current_sentence` feeds it to
+    // findsent_forward), so families with internal count semantics — the
+    // block forward search, the sentence boundary walk — get the whole count
+    // up front. Kinds without internal counting ignore it and are repeated by
+    // the climb below.
+    let mut range = objects::range(buf, vim.cursor.offset, object, count)?;
     // a count repeats the object by RE-SCANNING from the span's end (vim
     // 9.1: `v2i"` both quoted strings, `v2i(` climbs to the enclosing block,
     // `v2ap` the next paragraph — all fall out of scan-from-end).
