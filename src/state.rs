@@ -4724,6 +4724,16 @@ impl VimState {
         let gen_before = self.edit_generation;
         self.begin_edit();
         ops::apply(self, ctx, op, &span, self.register);
+        // vim 9.1: a normal-mode CHARWISE yank parks the cursor on the FIRST
+        // character of the operated range (pos1) — probes: `y0` from col7
+        // lands col1; `yiw` from mid-word lands the word start; forward
+        // motions are unchanged (pos1 == cursor). Linewise yank never moves
+        // (`yy`/`y2j`/`yG` stay put); visual `y` stays at the selection end
+        // (it completes through apply_visual_operator, not here).
+        if op == Operator::Yank && !span.linewise && span.end > span.start {
+            self.cursor.offset = span.start;
+            self.cursor.desired_col = None;
+        }
         // an operator that entered insert mode (cw/ciw/cc) keeps its group
         // open so deletion + typing undo as one step
         if self.insert_session.is_none() {
