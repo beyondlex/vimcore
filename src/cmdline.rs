@@ -703,6 +703,14 @@ impl VimState {
             return KeyResult::Consumed;
         };
         let key = normalize_control_char(key);
+        // vim's `lookfor` (ex_getln.c): any key OUTSIDE the history-browse and
+        // cursor-movement set clears the remembered browse prefix, so the next
+        // <Up>/<Down> re-derives it from the edited line — a <BS> after a
+        // recall searches with the edited text, and <C-b>/<Home> jumps make
+        // the prefix the text BEFORE the cursor.
+        if self.cmdline.stash.is_some() && !Self::key_keeps_history_prefix(&key) {
+            self.cmdline.stash = None;
+        }
         // <C-c> cancels the prompt (vim's interrupt), not just <Esc>
         if key == Key::ctrl_char('c') {
             self.cancel_cmdline(ctx);
@@ -758,6 +766,13 @@ impl VimState {
         // into the command line; a failed evaluation reports E121/E15 and
         // leaves the command line untouched.
         if self.cmdline.register_paste_pending {
+            // cmdline_insert_reg maps CTRL-R CTRL-O to CTRL-R and reads ONE
+            // MORE key, so <C-o>/<C-r> after <C-r> keep the pending state and
+            // the register name (or '=') follows (audit5 — the engine typed
+            // the name as a plain char instead of pasting it).
+            if key == Key::ctrl_char('o') || key == Key::ctrl_char('r') {
+                return KeyResult::Consumed;
+            }
             self.cmdline.register_paste_pending = false;
             if key == Key::ctrl_char('=') || key.printable_char() == Some('=') {
                 self.cmdline.expr_pending = true;
@@ -1065,6 +1080,19 @@ impl VimState {
         }
     }
 
+    /// The keys vim exempts from the `lookfor` clear (ex_getln.c): the
+    /// history steps themselves (arrows and <C-p>/<C-n>) and the plain
+    /// cursor moves <Left>/<Right>.
+    fn key_keeps_history_prefix(key: &Key) -> bool {
+        if key == &Key::ctrl_char('p') || key == &Key::ctrl_char('n') {
+            return true;
+        }
+        matches!(
+            &key.kind,
+            KeyKind::Named(name) if matches!(name.as_str(), "up" | "down" | "left" | "right")
+        )
+    }
+
     /// One <Up>/<Down>/<C-p>/<C-n> history step, shared by the arrow keys
     /// (prefix-filtered, `:h c_<Up>`) and the control chords (no prefix,
     /// `:h c_CTRL-P` — audit A5). The browse prefix lives in the stash
@@ -1077,78 +1105,83 @@ impl VimState {
         use_prefix: bool,
     ) -> KeyResult {
         let name = if older { "up" } else { "down" };
+        // vim saves the line TRUNCATED AT THE EDITING CURSOR as the browse
+        // prefix (`lookfor[cmdpos] = NUL`), so `:z<C-b><Up>` — cursor moved
+        // off the "z" — browses with the EMPTY prefix. An in-progress stash
+        // (set by the first step, cleared by any editing key) survives the
+        // browse itself.
+        self.cmdline.clamp_cursor();
+        let derived = self.cmdline.buffer[..self.cmdline.cursor].to_owned();
+        let saved_prefix = self.cmdline.stash.clone();
         {
-                    let Some(history) = self.cmdline.history.get(&Cmdline::history_key(prompt))
-                    else {
-                        return KeyResult::Consumed;
-                    };
-                    if history.is_empty() {
+            let prefix = if !use_prefix {
+                String::new()
+            } else {
+                saved_prefix.clone().unwrap_or_else(|| derived.clone())
+            };
+            let Some(history) = self.cmdline.history.get(&Cmdline::history_key(prompt))
+            else {
+                return KeyResult::Consumed;
+            };
+            if history.is_empty() {
+                return KeyResult::Consumed;
+            }
+            let matching: Vec<usize> = history
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.starts_with(&prefix))
+                .map(|(i, _)| i)
+                .collect();
+            if matching.is_empty() {
+                ctx.host.bell();
+                return KeyResult::Consumed;
+            }
+            // the step took a prefix: remember it (vim sets lookfor on the
+            // FIRST browse key, <C-p>/<C-n> included)
+            if saved_prefix.is_none() {
+                self.cmdline.stash = Some(derived);
+            }
+            let pos = match self.cmdline.history_pos {
+                None => {
+                    if name == "down" {
                         return KeyResult::Consumed;
                     }
-                    let prefix = if !use_prefix {
-                        String::new()
-                    } else {
-                        // Up/Down recall entries whose BEGINNING matches the
-                        // typed prefix (`:h c_<Up>` — audit G8; the old browse
-                        // always stepped the full history). While browsing, the
-                        // prefix lives in the stash: the buffer shows the
-                        // recalled entry.
-                        match self.cmdline.history_pos {
-                        None => self.cmdline.buffer.clone(),
-                        Some(_) => self.cmdline.stash.clone().unwrap_or_default(),
-                        }
-                    };
-                    let matching: Vec<usize> = history
+                    // first Up lands on the NEWEST matching entry
+                    *matching.last().unwrap()
+                }
+                // stored positions are always in range and history
+                // only grows, so browsing up is just "one earlier"
+                Some(current) => {
+                    let idx = matching
                         .iter()
-                        .enumerate()
-                        .filter(|(_, entry)| entry.starts_with(&prefix))
-                        .map(|(i, _)| i)
-                        .collect();
-                    if matching.is_empty() {
-                        ctx.host.bell();
+                        .position(|&p| p == current)
+                        .unwrap_or(matching.len() - 1);
+                    if name == "up" {
+                        if idx == 0 {
+                            // oldest match: vim's bell
+                            ctx.host.bell();
+                            return KeyResult::Consumed;
+                        }
+                        matching[idx - 1]
+                    } else if idx + 1 < matching.len() {
+                        matching[idx + 1]
+                    } else {
+                        // past the newest match: back to typing — vim
+                        // restores lookfor, i.e. the line as it was when
+                        // the browse began, TRUNCATED AT THE CURSOR
+                        self.cmdline.history_pos = None;
+                        self.cmdline.buffer = self.cmdline.stash.take().unwrap_or_default();
+                        self.cmdline.cursor = self.cmdline.buffer.len();
+                        ctx.host.changed();
                         return KeyResult::Consumed;
                     }
-                    let pos = match self.cmdline.history_pos {
-                        None => {
-                            if name == "down" {
-                                return KeyResult::Consumed;
-                            }
-                            self.cmdline.stash = Some(self.cmdline.buffer.clone());
-                            // first Up lands on the NEWEST matching entry
-                            *matching.last().unwrap()
-                        }
-                        // stored positions are always in range and history
-                        // only grows, so browsing up is just "one earlier"
-                        Some(current) => {
-                            let idx = matching
-                                .iter()
-                                .position(|&p| p == current)
-                                .unwrap_or(matching.len() - 1);
-                            if name == "up" {
-                                if idx == 0 {
-                                    // oldest match: vim's bell
-                                    ctx.host.bell();
-                                    return KeyResult::Consumed;
-                                }
-                                matching[idx - 1]
-                            } else if idx + 1 < matching.len() {
-                                matching[idx + 1]
-                            } else {
-                                // past the newest match: back to typing
-                                self.cmdline.history_pos = None;
-                                self.cmdline.buffer =
-                                    self.cmdline.stash.take().unwrap_or_default();
-                                self.cmdline.cursor = self.cmdline.buffer.len();
-                                ctx.host.changed();
-                                return KeyResult::Consumed;
-                            }
-                        }
-                    };
-                    self.cmdline.history_pos = Some(pos);
-                    self.cmdline.buffer = history[pos].clone();
-                    self.cmdline.cursor = self.cmdline.buffer.len();
-                    ctx.host.changed();
-                    KeyResult::Consumed
+                }
+            };
+            self.cmdline.history_pos = Some(pos);
+            self.cmdline.buffer = history[pos].clone();
+            self.cmdline.cursor = self.cmdline.buffer.len();
+            ctx.host.changed();
+            KeyResult::Consumed
         }
     }
 
