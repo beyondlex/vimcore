@@ -221,10 +221,6 @@ impl Marks {
         }
     }
 
-    pub(crate) fn debug_log_len(&self) -> usize {
-        self.deleted_marks_log.len()
-    }
-
     /// The mark batch the next undo restores (newest non-empty batch —
     /// audit E4).
     pub(crate) fn take_restorable_marks(&mut self) -> Option<Vec<(char, usize)>> {

@@ -100,7 +100,7 @@ fn batch_probe() {
             (c[0], c[1], c[2], c[3], c[4], c[5], c.get(6).unwrap_or(&""));
         eprintln!("RUN {name}");
         let buf = hex_decode(hbuf);
-        let mut f = run_case(pre, keys, &buf, hline.parse().unwrap(), hcol.parse().unwrap());
+        let f = run_case(pre, keys, &buf, hline.parse().unwrap(), hcol.parse().unwrap());
         // flush progress so an engine panic still names its case
         let l = f.buf.offset_to_line(f.vim.cursor.offset);
         let colb = f.vim.cursor.offset - f.buf.line_range(l).start + 1;

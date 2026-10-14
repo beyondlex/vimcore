@@ -1185,7 +1185,7 @@ fn flush_paragraph(paragraph: &mut Vec<String>, indent: &str, width: usize, out:
 /// `"%dd`/`".dd`/`":dd`/`"/dd` all raise E354 and leave the buffer alone
 /// (audit C7 — the prefix itself is legal, the WRITE is not). The veto
 /// lives at the two write funnels so operators and x/X/s share one rule.
-fn veto_readonly_write(vim: &VimState, ctx: &mut Ctx, register: Option<char>) -> bool {
+fn veto_readonly_write(_vim: &VimState, ctx: &mut Ctx, register: Option<char>) -> bool {
     if let Some(r) = register {
         if !crate::registers::is_write_valid(r) {
             ctx.host.status_message("E354: Invalid register name");

@@ -61,10 +61,11 @@ fn m_digit_mark_is_rejected() {
 
 // ---------------------------------------------------------------- search and highlight
 
-/// Probe W5: search skips the match at the cursor (vim: search starts after the cursor)
-/// + an empty `/` + Enter re-searches the last pattern from the current position
-/// forward (with wrap). Engine measured sequence: `/foo<CR>` lands at 8 (skipping
-/// the current match at 0), `n` wraps to 0, an empty `/` + CR from 0 lands at 8 again.
+/// Probe W5: search skips the match at the cursor (vim: search starts after
+/// the cursor) plus an empty `/` + Enter re-searches the last pattern from the
+/// current position forward (with wrap). Engine measured sequence: `/foo<CR>`
+/// lands at 8 (skipping the current match at 0), `n` wraps to 0, an empty `/`
+/// + CR from 0 lands at 8 again.
 #[test]
 fn empty_search_enter_reuses_last_pattern() {
     let mut f = edit("foo bar foo\n", 0, 0, &["/", "f", "o", "o", "<CR>"]);

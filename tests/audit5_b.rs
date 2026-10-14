@@ -49,13 +49,6 @@ mod common;
 
 use common::{edit, Fixture};
 
-fn ex(f: &mut Fixture, line: &str) {
-    let mut keys: Vec<String> = vec![":".to_owned()];
-    keys.extend(line.chars().map(|c| c.to_string()));
-    keys.push("<CR>".to_owned());
-    f.feed(keys);
-}
-
 fn unnamed(f: &Fixture) -> String {
     f.vim
         .registers

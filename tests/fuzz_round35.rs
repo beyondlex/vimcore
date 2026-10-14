@@ -19,7 +19,6 @@ mod common;
 
 use common::Fixture;
 use vimcore::buffer::VimBuffer;
-use vimcore::key::Key;
 use vimcore::state::Ctx;
 
 fn fuzz_xorshift(state: &mut u64) -> u64 {

@@ -734,7 +734,7 @@ fn marks_listing_header_and_layout() {
     );
     let want = format!(" a {:>6} {:>4} a", 1, 0);
     assert!(
-        f.host.statuses.iter().any(|s| *s == want),
+        f.host.statuses.contains(&want),
         "vim 9.1: the mark a row = {:?} (the \" %c %6ld %4d %s\" format, oracle \
          omk); actual statuses = {:?}",
         want,

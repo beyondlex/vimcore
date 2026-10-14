@@ -13,6 +13,8 @@
 //! delivery contract for printable text), the rest go through the Key channel. `+` inside `<t:...>`
 //! means a space.
 
+#![allow(non_snake_case)] // test names encode vim key sequences (C-v, g2, $A)
+
 mod common;
 
 use common::Fixture;

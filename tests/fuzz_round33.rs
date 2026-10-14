@@ -16,7 +16,6 @@ mod common;
 
 use common::Fixture;
 use vimcore::buffer::VimBuffer;
-use vimcore::key::Key;
 use vimcore::state::Ctx;
 
 fn fuzz_xorshift(state: &mut u64) -> u64 {
@@ -142,5 +141,5 @@ fn fuzz_round33_nested_macros_and_registers_hold_invariants() {
 }
 
 fn rand_pick(rng: &mut u64, modulo: u64) -> bool {
-    fuzz_xorshift(rng) % modulo == 0
+    fuzz_xorshift(rng).is_multiple_of(modulo)
 }

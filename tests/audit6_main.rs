@@ -23,7 +23,7 @@ fn e_m1_dot_does_not_repeat_ex_command() {
     // oracle (repeat.txt:24-27 + typeahead re-check): `.` does not repeat Ex commands.
     // "aa bb cc" ×2, `.` after :s/b/X/ — the second line is unchanged
     // (the round-30 old pin re-check still holds).
-    let f = edit("aa bb cc\naa bb cc\n", 0, 0, &["e", "x", "e", "c", "u", "t", "e", " ", "s", "/", "b", "/", "X", "/", "<CR>"]);
+    let _f = edit("aa bb cc\naa bb cc\n", 0, 0, &["e", "x", "e", "c", "u", "t", "e", " ", "s", "/", "b", "/", "X", "/", "<CR>"]);
     // Run the Ex line directly
     let mut f = Fixture::new("aa bb cc\naa bb cc\n");
     f.feed([":", "s", "/", "b", "/", "X", "/", "<CR>", "."]);

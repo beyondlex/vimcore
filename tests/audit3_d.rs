@@ -36,9 +36,10 @@
 //!   `3Rab<C-w>x<Esc>` (oracle W6="xzzz"): the engine also abandons the repeat — agrees;
 //! - macros recorded across modes (type_text's Text step feeding macro_capture), `qA` append, `@@`
 //!   chaining, `:reg` including the "-/"/ special slots: code reading + existing probes agree.
-//! Also noted, minor divergences (not filed): the line format of `:reg` (vim uses "two spaces + type
-//! + two spaces + name + three spaces + content", the engine has its own format with the name first;
-//! see oracle RG for the PTY sampling expression).
+//!
+//! Also noted, minor divergences (not filed): the line format of `:reg` (vim uses "two spaces +
+//! type + two spaces + name + three spaces + content", the engine has its own format with the
+//! name first; see oracle RG for the PTY sampling expression).
 
 mod common;
 

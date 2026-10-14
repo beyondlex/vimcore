@@ -593,7 +593,7 @@ impl Motion {
                         // a remembered offset (`/pat/e+2`) re-applies on
                         // EVERY repeat, like vim (`:h search-offset` — the
                         // field doc promised it; audit F3)
-                        let target = match vim.search.offset.clone() {
+                        let target = match vim.search.offset {
                             Some(off) => {
                                 search::apply_search_offset(vim, buf, &off);
                                 vim.cursor.offset
@@ -809,30 +809,26 @@ impl Motion {
                 // PHASE1/PHASE2 + findmatchlimit produce these shapes; the
                 // closed form here is the observable contract.)
                 let open = if ch == '{' { '}' } else { '{' };
+                let here = vim.cursor.offset;
+                // one walk over the buffer, keeping braces strictly
+                // after (forward) / strictly before (backward) the
+                // cursor, in scan order (backward = reverse)
                 let mut braces: Vec<usize> = Vec::new();
-                {
-                    let here = vim.cursor.offset;
-                    // one walk over the buffer, keeping braces strictly
-                    // after (forward) / strictly before (backward) the
-                    // cursor, in scan order (backward = reverse)
-                    let mut collected: Vec<usize> = Vec::new();
-                    let mut o = 0usize;
-                    while o < buf.len() {
-                        if let Some(c) = buf.char_at(o) {
-                            if (c == '{' || c == '}')
-                                && ((backward && o < here) || (!backward && o > here))
-                            {
-                                collected.push(o);
-                            }
-                            o += c.len_utf8();
-                        } else {
-                            break;
+                let mut o = 0usize;
+                while o < buf.len() {
+                    if let Some(c) = buf.char_at(o) {
+                        if (c == '{' || c == '}')
+                            && ((backward && o < here) || (!backward && o > here))
+                        {
+                            braces.push(o);
                         }
+                        o += c.len_utf8();
+                    } else {
+                        break;
                     }
-                    if backward {
-                        collected.reverse();
-                    }
-                    braces = collected;
+                }
+                if backward {
+                    braces.reverse();
                 }
                 let mut found: Option<usize> = None;
                 if !method {

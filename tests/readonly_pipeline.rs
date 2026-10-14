@@ -697,7 +697,10 @@ fn refresh_highlights_ro_republishes_for_the_new_buffer() {
 
     // no pattern (a fresh engine instance): no-op, does not clear host state
     let mut fresh = RoHost::new();
-    fresh.highlights = vec![1..2];
+    // a one-element highlight vec (the lint reads `1..2` as a range-expansion)
+    #[allow(clippy::single_range_in_vec_init)]
+    let hl_seed = vec![1..2];
+    fresh.highlights = hl_seed;
     let mut vim2 = VimState::new();
     {
         let b: &dyn VimBuffer = &b;

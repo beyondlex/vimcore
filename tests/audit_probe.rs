@@ -1,6 +1,8 @@
 //! Round-31 audit regression: regression tests for the 50 fixes from the round-31 audit.
 //! Every assertion pins semantics that were verified against vim 9.1 (typeahead oracle).
 
+#![allow(non_snake_case)] // test names encode vim key sequences (C-v, g2, $A)
+
 mod common;
 
 use common::{edit, BufferView, Fixture};
@@ -15,7 +17,6 @@ use vimcore::state::{Ctx, VimState};
 /// Audit-only host: a full VimHost implementation whose undo/redo return values
 /// can be faked (used by A1).
 struct AuditHost {
-    text: Rc<RefCell<String>>,
     viewport: (usize, usize),
 }
 
@@ -62,7 +63,6 @@ fn a1_overflow_viewport_no_panic() {
         let shared = Rc::new(RefCell::new("l1\nl2\nl3\n".to_owned()));
         let mut buf = BufferView(shared.clone());
         let mut host = AuditHost {
-            text: shared,
             viewport: (max, max),
         };
         let mut vim = VimState::new();

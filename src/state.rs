@@ -407,7 +407,7 @@ pub struct VimState {
     /// the cursor row so far.
     block_insert: Option<BlockInsert>,
     /// Pending count-repeat of a plain insert session (see [`InsertRepeat`]).
-    pub(crate) insert_repeat: Option<InsertRepeat>,
+    insert_repeat: Option<InsertRepeat>,
 
     /// Jumplist (`C-o`/`C-i`): visited positions, `jump_pos` = index of the
     /// current entry. Jump motions and search execution append the origin
@@ -435,7 +435,6 @@ pub struct VimState {
     /// (oracle: `ma dd u <C-r>` → getpos("'a") = 0,0) and restores them
     /// again on the next undo (getpos = 1,3).
     pending_restore: Option<Vec<(char, usize)>>,
-    pending_recollapse: Option<Vec<(char, usize)>>,
     /// Byte offset of the group's first edit — the undo cursor hint
     /// (audit D9). Set by the edit funnels; None = fall back to the cursor.
     /// The OFFSET itself (not its line start) so a normal-mode edit keeps
@@ -626,7 +625,6 @@ impl VimState {
             pending_visual_cursor: None,
             macro_sync_gen: HashMap::new(),
             pending_restore: None,
-            pending_recollapse: None,
             undo_hint_offset: None,
             replay_error: false,
             expr_prompt_insert_origin: false,
@@ -2063,7 +2061,6 @@ impl VimState {
             .filter(|(name, off)| {
                 name.is_ascii_alphabetic() && *off >= range.start && *off < range.end
             })
-            .map(|(name, off)| (name, off))
             .collect();
         self.marks.log_deleted_marks(destroyed);
         let visual_fold = self.marks.last_visual.and_then(|(lo, hi, kind)| {
@@ -4979,10 +4976,7 @@ impl VimState {
             // `ma dd u <C-r>` → getpos("'a") = 0,0; `…u` → 1,3 restored).
             let batch = match self.pending_restore.take() {
                 Some(b) => b,
-                None => match self.marks.take_restorable_marks() {
-                    Some(b) => b,
-                    None => Vec::new(),
-                },
+                None => self.marks.take_restorable_marks().unwrap_or_default(),
             };
             if !batch.is_empty() {
                 let mut restored = Vec::with_capacity(batch.len());
@@ -6182,7 +6176,7 @@ impl VimState {
                 // rows and the columns that may increment (audit C4 — the
                 // old span was a diagonal charwise slice and whole rows
                 // outside the block got incremented)
-                let block_window = self.visual_selection().and_then(|(a, c, _)| {
+                let block_window = self.visual_selection().and_then(|(_a, _c, _)| {
                     if !matches!(self.mode, Mode::Visual { kind: VisualKind::Block }) {
                         return None;
                     }

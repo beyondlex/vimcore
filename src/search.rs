@@ -268,7 +268,7 @@ pub fn jump_to_match(
                 // walk downward with wraparound past index 0
                 let off = step % len;
                 if off <= start_idx {
-                    (start_idx - off, step >= start_idx + 1)
+                    (start_idx - off, step > start_idx)
                 } else {
                     (start_idx + len - off, true)
                 }

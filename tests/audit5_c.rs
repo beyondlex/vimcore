@@ -9,6 +9,7 @@
 //!   file ends with `:call writefile(...)` + `:wq`; registers sampled via
 //!   getreg/getregtype, cursor via getpos).
 //! * control keys written as raw bytes (\x12=C-r, \x16=C-v, \x19=C-y).
+//!
 //! Sampling traps experienced this round (beware when re-verifying):
 //! * in a `-es -S` script, `setline` and the following `normal` merge into
 //!   **the same undo block** (one u returns to an empty buffer) — undo

@@ -41,9 +41,8 @@ fn open_search_address_consumes_the_rest_of_the_line() {
     assert_eq!(f.vim.cursor_offset(), 4, "lands at the start of the bar line (offset 4)");
     assert!(f.host.statuses.is_empty(), "a hit reports no message");
     f.feed(["n"]);
-    assert_eq!(
-        f.host.statuses.iter().any(|s| s.contains("E486")),
-        false,
+    assert!(
+        !f.host.statuses.iter().any(|s| s.contains("E486")),
         "the pattern is active, so n must not report an E35/E486 class error (wrap or bell when no further match)"
     );
 

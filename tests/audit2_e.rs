@@ -7,6 +7,8 @@
 //! note that it still needs re-checking). The known-divergence ledger (the numbered NOTES.md entries
 //! and the 50 items of the round-31 audit) was excluded item by item.
 
+#![allow(non_snake_case)] // test names encode vim key sequences (C-v, g2, $A)
+
 mod common;
 
 use common::{edit, Fixture};

@@ -40,11 +40,11 @@ fn scratch_probe() {
     show(">> whitespace-only", f.text(), f.cursor(), String::new());
 
     // d$ on empty line: bell?
-    let mut f = edit("\nab\n", 0, 0, &["d", "$"]);
+    let f = edit("\nab\n", 0, 0, &["d", "$"]);
     show("d$ empty line", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // X with count beyond line start: bell?
-    let mut f = edit("ab\n", 0, 1, &["5", "X"]);
+    let f = edit("ab\n", 0, 1, &["5", "X"]);
     show("5X col1", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // J on 3 lines with middle empty
@@ -56,7 +56,7 @@ fn scratch_probe() {
     show("r- on CJK", f.text(), f.cursor(), String::new());
 
     // 3r- crossing EOL: bell, no change
-    let mut f = edit("ab\n", 0, 0, &["3", "r", "-"]);
+    let f = edit("ab\n", 0, 0, &["3", "r", "-"]);
     show("3r- short line", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // ~ count beyond EOL
@@ -105,7 +105,7 @@ fn scratch_probe() {
     show("3>>", f.text(), f.cursor(), String::new());
 
     // << at col 0 with under-indent
-    let mut f = edit("  ab\n", 0, 0, &["<", "<"]);
+    let f = edit("  ab\n", 0, 0, &["<", "<"]);
     show("<< 2sp", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // p with linewise count on MIDDLE line (control)
@@ -113,7 +113,7 @@ fn scratch_probe() {
     show("mid yy 3p", f.text(), f.cursor(), String::new());
 
     // visual v y zero-width on empty buffer, then p
-    let mut f = edit("", 0, 0, &["v", "y", "p"]);
+    let f = edit("", 0, 0, &["v", "y", "p"]);
     show("v y p empty", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // "ayy then "Ayy then "ap
@@ -141,7 +141,7 @@ fn scratch_probe() {
     show("2J", f.text(), f.cursor(), String::new());
 
     // 4J short buffer
-    let mut f = edit("a\nb\n", 0, 0, &["9", "J"]);
+    let f = edit("a\nb\n", 0, 0, &["9", "J"]);
     show("9J short", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // D count register shape count=1: "-?
@@ -157,7 +157,7 @@ fn scratch_probe() {
     show("r<CR> \"-p", f.text(), f.cursor(), String::new());
 
     // J bell count
-    let mut f = edit("ab\n", 0, 0, &["3", "J"]);
+    let f = edit("ab\n", 0, 0, &["3", "J"]);
     show("3J last line", f.text(), f.cursor(), format!("bells={}", f.host.bells));
 
     // S on last line count clamp

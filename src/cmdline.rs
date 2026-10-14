@@ -1475,10 +1475,8 @@ impl VimState {
                 }
                 return;
             }
-            line if (line == "reg" || line == "registers")
-                == false
-                && (line.strip_prefix("reg ").is_some()
-                    || line.strip_prefix("registers ").is_some()) =>
+            line if line.strip_prefix("reg ").is_some()
+                || line.strip_prefix("registers ").is_some() =>
             {
                 ctx.host.status_message("Type Name Content");
                 let names = line.split_once(' ').unwrap().1;
@@ -1902,9 +1900,9 @@ impl VimState {
             return is_ma(name).then_some(ModifiableArg::Toggle);
         }
         if let Some(name) = arg.strip_prefix("no") {
-            return is_ma(name).then(|| ModifiableArg::Set(false));
+            return is_ma(name).then_some(ModifiableArg::Set(false));
         }
-        is_ma(arg).then(|| ModifiableArg::Set(true))
+        is_ma(arg).then_some(ModifiableArg::Set(true))
     }
 
     /// Whether `line` — one Ex command, range prefix already stripped —
@@ -2050,7 +2048,7 @@ impl VimState {
         let after = &rest[word_end..];
         if substitute {
             let mut chars = after.char_indices();
-            let mut delim = match chars.next() {
+            let delim = match chars.next() {
                 Some((_, '!')) => chars.next().map(|(_, c)| c),
                 Some((_, c)) => Some(c),
                 None => None,
@@ -2061,7 +2059,6 @@ impl VimState {
                 if d.is_alphanumeric() || d.is_whitespace() || d == '\\' {
                     return None;
                 }
-                delim = Some(d);
                 let mut count = 0usize;
                 let mut i = 0usize;
                 let bytes = after.as_bytes();
@@ -2119,7 +2116,7 @@ impl VimState {
     fn split_address_offsets(part: &str) -> (&str, &str) {
         let mut chars = part.char_indices();
         match chars.next() {
-            Some((_, c)) if c == '\'' => {
+            Some((_, '\'')) => {
                 // ' + ONE FULL char (`:'中d` must not split mid-char — the
                 // round12 panic shape)
                 let name_len = part[1..].chars().next().map_or(0, char::len_utf8);
@@ -2506,11 +2503,7 @@ impl VimState {
         // quote+name, THREE spaces, content with the linewise tail shown as
         // ^J. The old layout put the name first.
         const MAX_TEXT: usize = 50;
-        let flat = if reg.kind == crate::registers::RegisterKind::Linewise {
-            reg.text.replace('\n', "^J")
-        } else {
-            reg.text.replace('\n', "^J")
-        };
+        let flat = reg.text.replace('\n', "^J");
         let mut shown: String = flat.chars().take(MAX_TEXT).collect();
         if flat.chars().count() > MAX_TEXT {
             shown.push('…');
@@ -2695,17 +2688,12 @@ impl VimState {
         ctx: &Ctx,
         line: &'a str,
     ) -> Result<ParsedRange<'a>, String> {
-        enum Base {
-            /// `%` is unusable as a per-address base (handled by the caller).
-            Unusable,
-            Line(usize),
-        }
         fn base_line(
             spec: &str,
             anchor: Option<usize>,
             vim: &VimState,
             ctx: &Ctx,
-        ) -> Result<Base, String> {
+        ) -> Result<usize, String> {
             // One address part folds LEFT TO RIGHT over concatenated
             // segments: vim's get_address loops `while (*cmd=='/'||*cmd=='?')`
             // after a number (ex_docmd.c), so `2/foo/` is TWO addresses in
@@ -2833,7 +2821,7 @@ impl VimState {
                     );
                 if c == '/' || c == '?' || reuse {
                     let (backward, consumed) = if reuse {
-                        let backward = rest[1..].chars().next() == Some('?');
+                        let backward = rest[1..].starts_with('?');
                         (backward, 2)
                     } else {
                         let backward = c == '?';
@@ -2903,7 +2891,7 @@ impl VimState {
                 }
                 return Err("E16: Invalid range".to_owned());
             }
-            Ok(Base::Line(current.unwrap_or(cursor_line)))
+            Ok(current.unwrap_or(cursor_line))
         }
         fn with_offset(base: usize, spec: &str) -> Result<usize, String> {
             // Offset tokens accumulate after the base. A sign DIRECTLY
@@ -3015,7 +3003,7 @@ impl VimState {
             return Ok((Some((0, last)), 1, rest.trim_start()));
         }
         let last = ctx.buf.line_count().saturating_sub(1);
-        let cursor_line = ctx.buf.offset_to_line(vim.cursor.offset);
+        let _cursor_line = ctx.buf.offset_to_line(vim.cursor.offset);
         // vim keeps only the LAST TWO addresses of a multi-address range
         // (9.1 probe: `:1,2,3d` on ['a','b','c','d'] deletes lines 2-3).
         let mut addresses: Vec<usize> = Vec::new();
@@ -3042,15 +3030,10 @@ impl VimState {
             // (`:2,/pat/d` searches from line 2, not the cursor — vim's
             // get_address "When search follows another address, start from
             // there")
-            let value = match base_line(
-                base_str,
-                addresses.last().copied(),
-                vim,
-                ctx,
-            )? {
-                Base::Line(base) => with_offset(base, off_str)?,
-                Base::Unusable => unreachable!("% is handled above"),
-            };
+            let value = with_offset(
+                base_line(base_str, addresses.last().copied(), vim, ctx)?,
+                off_str,
+            )?;
             // An out-of-buffer address is legal at parse time: the BARE
             // address parks on the last line silently (vim 9.1 probes: bare
             // `:4`/`:99999999` on a 3-line file → line 3, no message — the
@@ -4438,6 +4421,10 @@ impl VimState {
     /// right / left by one `'shiftwidth'` each (repeated `>`/`<` chars = the
     /// shift AMOUNT, a numeric count re-anchors the range like `:d`). The
     /// cursor lands on the last shifted line's first non-blank.
+    // range + shift direction + shift amount + count + line flags are all
+    // distinct parse results; bundling them into a struct would only move
+    // the same fields to another definition.
+    #[allow(clippy::too_many_arguments)]
     fn ex_shift(
         &mut self,
         ctx: &mut Ctx,

@@ -27,9 +27,8 @@
 mod common;
 
 use common::edit;
-use vimcore::VimBuffer;
 
-/// 1. (P1) Putting an empty linewise register loses a line.
+/// [1] (P1) Putting an empty linewise register loses a line.
 /// oracle: on an empty file (1 empty line) `yyp` -> line("$")==2; `yy3p` -> 4;
 /// `yyP` -> 2.
 /// engine: the `p`/`P` branch consumes the `\n` the register carries as the
@@ -51,7 +50,7 @@ fn f1_empty_linewise_put_on_empty_buffer_loses_line() {
     assert_eq!(f.text(), "\n\n\n\n", "yy 3p on an empty buffer should give four empty lines");
 }
 
-/// 2. (P1) When `p` pastes below a last line without a trailing newline, it
+/// [2] (P1) When `p` pastes below a last line without a trailing newline, it
 /// strips the trailing `\n` of a newline-terminated register text and uses it as
 /// the separator, so the last pasted line loses the file-ending newline.
 /// oracle: on a file "a\n", `ddp` + `:wq` -> file bytes `\na\n`; `dd3p` ->
@@ -66,7 +65,7 @@ fn f2_put_below_noel_line_drops_final_newline() {
     assert_eq!(f.text(), "\na\na\na\n", "dd 3p should give [\"\",a,a,a]");
 }
 
-/// 3. (P1) The `]p` put position is `line_range(cur).end.min(len)` -- when the
+/// [3] (P1) The `]p` put position is `line_range(cur).end.min(len)` -- when the
 /// last line has no trailing newline that point is the very end of the buffer,
 /// so the pasted text is appended inside the line.
 /// oracle: on a noeol file [ab, cd], `yy j ]p` -> [ab, cd, ab].
@@ -81,7 +80,7 @@ fn f3_bracket_p_below_noel_line_glues() {
     assert_eq!(f.text(), "ab\ncd\nab\n", "]p should open a new line below the last line and paste ab there");
 }
 
-/// 4. (P1) Repeating a linewise register by a count uses `text.repeat(count)` --
+/// [4] (P1) Repeating a linewise register by a count uses `text.repeat(count)` --
 /// linewise text yanked from a noeol last line carries no `\n` of its own, so
 /// after the repetition the lines glue together horizontally.
 /// oracle: on a noeol file "abc", `yy3p` -> [abc,abc,abc,abc].
@@ -95,7 +94,7 @@ fn f4_linewise_count_repeat_glues_without_separators() {
     assert_eq!(f.text(), "abc\nabc\nabc\nabc\n", "3p should paste three separate lines");
 }
 
-/// 5. (P2) The case operators go through Rust's full Unicode mapping; vim 9.1
+/// [5] (P2) The case operators go through Rust's full Unicode mapping; vim 9.1
 /// uses the simple mapping and leaves characters without a simple mapping
 /// unchanged:
 ///   `~` on ﬁ (U+FB01) -> vim keeps "ﬁx" unchanged, engine gives "FIx";
@@ -115,7 +114,7 @@ fn f5_case_operators_full_vs_simple_unicode() {
     assert_eq!(f.text(), "\u{01f0}x", "~ must not split ǰ into J + a combining mark");
 }
 
-/// 6. (P2) the `gP` linewise paste cursor: vim puts it "after the pasted text",
+/// [6] (P2) the `gP` linewise paste cursor: vim puts it "after the pasted text",
 /// i.e. on the line following the pasted block (oracle: on [aaa,bbb,ccc],
 /// `jyyGgP` -> cursor line 4; a 2-line block -> line 5).
 /// The engine puts it on the first line of the pasted block (line 3, 1-based).
@@ -127,7 +126,7 @@ fn f6_gp_linewise_cursor_after_block() {
     assert_eq!(f.line(), 3, "the gP cursor should land on the line after the pasted block (0-based 3)");
 }
 
-/// 7. (P2) the `"{reg}` prefix is not accepted in operator-pending state.
+/// [7] (P2) the `"{reg}` prefix is not accepted in operator-pending state.
 /// oracle: on "foo bar", `d"aw<Esc>` -> the operator is cancelled by `"` (bell),
 /// then `a` enters insert mode and `w` is typed -> buffer "fwoo bar", register a
 /// stays empty.
@@ -141,7 +140,7 @@ fn f7_register_prefix_rejected_under_operator() {
     // assertion pins the observable essence of the oracle: the buffer is not
     // deleted, register a is not written (so "ap cannot paste any deleted
     // content), and the bell rings.
-    let mut f = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
+    let f = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
     assert_eq!(f.text(), "foo bar", "d\"aw must not be executed as a delete");
     assert!(f.host.bells >= 1, "meeting \" in operator-pending state should ring the bell: {:?}", f.host.bells);
     let mut f2 = edit("foo bar", 0, 0, &["d", "\"", "a", "w", "<Esc>"]);
@@ -149,7 +148,7 @@ fn f7_register_prefix_rejected_under_operator() {
     assert_eq!(f2.text(), "foo bar", "register a must not be written (\"ap pastes no deleted content)");
 }
 
-/// 8. (P2) read-only registers must not be written through the `"{reg}` prefix.
+/// [8] (P2) read-only registers must not be written through the `"{reg}` prefix.
 /// oracle (verified one by one):
 ///   `"%dd` -> refused, buffer stays "abc" (1 line);
 ///   `":dd`, `".dd`, `"/dd` -> refused the same way (after `.dd`, getreg('.') is
@@ -162,7 +161,7 @@ fn f8_readonly_registers_reject_prefix_write() {
     assert_eq!(f.text(), "abc\n", "\"%dd must be refused, buffer unchanged");
 }
 
-/// 9. (P3) the content of the unnamed register after `"Add`.
+/// [9] (P3) the content of the unnamed register after `"Add`.
 /// oracle: on [ab,cd,ef], `"ayy` `j` `"Add` -> getreg('"') == "ef\n" (the newly
 /// deleted piece), register a == "ab\ncd\n" (merged). The engine points the
 /// unnamed register at the whole merged result, so `p` pastes two lines.
@@ -178,7 +177,7 @@ fn f9_uppercase_append_unnamed_gets_new_piece() {
     );
 }
 
-/// 10. (P2) the `"=` expression register is missing.
+/// [10] (P2) the `"=` expression register is missing.
 /// oracle: on "ab", `"=2+3<CR>p` -> vim pops the `=` prompt line, evaluates 2+3,
 /// and p pastes "5" -> buffer "a5b". The engine has no expression register, so
 /// `p` lands on nothing (bell) and the buffer is unchanged.

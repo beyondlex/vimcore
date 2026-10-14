@@ -460,8 +460,8 @@ fn sentence_range(
         for _ in 1..count {
             sent = word::next_sentence(buf, sent);
         }
-        let r = find_term(sent, word::next_sentence(buf, sent)).min(buf.len());
-        r
+        
+        find_term(sent, word::next_sentence(buf, sent)).min(buf.len())
     };
     let _ = term_end;
     if !inner {
@@ -502,16 +502,6 @@ fn sentence_range(
         return Some(ObjectRange::charwise(trimmed, count_end.max(trimmed)));
     }
     Some(ObjectRange::charwise(trimmed, term_end.max(trimmed)))
-}
-
-/// First terminator at/after `start` (its end), falling back to the next
-/// sentence's start — the single-sentence inner end.
-fn term_end_of(start: usize, buf: &dyn VimBuffer) -> usize {
-    let next = word::next_sentence(buf, start);
-    (start..next)
-        .find(|&o| matches!(buf.char_at(o), Some('.' | '!' | '?')))
-        .map(|o| o + buf.char_at(o).map_or(1, |c| c.len_utf8()))
-        .unwrap_or(next)
 }
 
 fn paragraph_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRange> {

@@ -858,7 +858,7 @@ impl VimState {
             (old_width / sw + 1) * sw
         } else {
             let q = old_width / sw;
-            if old_width % sw != 0 {
+            if !old_width.is_multiple_of(sw) {
                 q * sw
             } else {
                 q.saturating_sub(1) * sw
