@@ -1,7 +1,7 @@
 [package]
 name = "vimcore"
 description = "A host-agnostic Vim engine: modes, motions, operators, text objects, registers, search and marks."
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Lex"]
@@ -9,8 +9,9 @@ repository = "https://github.com/beyondlex/vimcore"
 readme = "README.md"
 keywords = ["vim", "editor", "engine", "modal", "tui"]
 categories = ["text-processing", "command-line-interface"]
-# in-repo Chinese-to-English migration plan; working conventions only, not published with the crate
-exclude = ["I18N_PLAN.md"]
+# in-repo Chinese-to-English migration plan and its guard rails; working
+# conventions only, not published with the crate
+exclude = ["I18N_PLAN.md", ".cjk-allow", "tools/", ".github/"]
 
 [dependencies]
 regex = "1"

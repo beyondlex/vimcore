@@ -1,0 +1,67 @@
+# CJK characters are allowed only in the files listed below.
+#
+# Format: <path>   # <reason>     (the reason is mandatory -- "temporary" is not one)
+#
+# vimcore is an English-only codebase: comments, doc comments, assert messages,
+# panic text, docs and commit messages are English. The single legitimate
+# exception is test data that *measures* multibyte / wide-character behavior:
+# swapping a CJK char for "abc" keeps the test green while silently destroying
+# the coverage. That is the one risk that would cause real damage, so those
+# fixtures stay -- see I18N_PLAN.md section 1.1 ("L4 is a minefield").
+#
+# Enforced by tools/check_cjk.sh (and the `cjk` CI workflow). A new file that
+# genuinely needs CJK must be appended here with a reason.
+
+.cjk-allow                            # this list itself: the reasons quote the very fixture characters they justify
+I18N_PLAN.md                          # four-repo migration handbook, deliberately kept in Chinese; excluded from the crate via Cargo.toml `exclude`
+NOTES.md                              # vim 9.1 oracle audit ledger; CJK is the probed subject in behavior tables (`中文abc` x `w`/`dw`/`diw`, display-column padding)
+
+src/cmdline.rs                        # `:'中d` must not split mid-char; `:ce`/`:le`/`:ri` pad by DISPLAY width (CJK counts 2)
+src/insert_mode.rs                    # Tab at display column on a `中文` line (expandtab ts=4): pads by display width, not byte column
+src/motions.rs                        # `$`/`g_` must not land inside a wide last char (`中文` + `$` sits on 文)
+src/objects.rs                        # sentence object anchoring across CJK prose (`dis` on "Hi. 你好 ok")
+src/ops.rs                            # last line without a trailing newline -- end-1 sits inside `中`; `gJ` swaps `\n` for a space
+src/state.rs                          # marks must not strand mid-`中` after `gJ` swaps the newline for a space
+src/tck.rs                            # reference buffer: trailing multibyte insertion, CJK + combining-mark fixtures
+
+tests/audit2_scratch.rs               # `~` case toggle on `中`: cursor must stay on the wide char (display col 2)
+tests/audit5_b.rs                     # `f`/`t`/`;` column semantics with a CJK search target (`f最;`)
+tests/audit6_a.rs                     # `:le 8` padding on a `中文` line: display width, verified with `:w!` + od
+tests/audit7_b.rs                     # mixed CJK/ASCII multiline buffer for Ex-command range probes
+tests/audit8_a.rs                     # `*` word search on a CJK word (`中文 中文`)
+tests/audit9_b.rs                     # blockwise visual `<C-v> j l x` over wide chars: `l` advances 2 cells
+tests/audit_probe.rs                  # `:ce 10` centering on CJK: padding by display width
+tests/engine.rs                       # yank `三四` then repeated put: every cursor must land on a char boundary
+tests/fuzz_round7.rs                  # CJK in the fuzz character pool
+tests/fuzz_round8.rs                  # CJK in the fuzz character pool
+tests/fuzz_round9.rs                  # CJK in the fuzz character pool
+tests/fuzz_round10.rs                 # CJK in the fuzz character pool
+tests/fuzz_round11.rs                 # CJK in the fuzz character pool
+tests/fuzz_round12.rs                 # `:'中d` and `:,'中d` -- the Ex range scanner must not split mid-char
+tests/fuzz_round13.rs                 # `/中<CR>` search target: match acceptance on a wide char
+tests/fuzz_round14.rs                 # `?中<CR>` backward search target
+tests/fuzz_round15.rs                 # `?中<CR>` backward search target
+tests/fuzz_round16.rs                 # `/中` + `?中` in the key-sequence pool mixed with search options
+tests/fuzz_round17.rs                 # `?中<CR>` in the key pool alongside `:marks`/`:reg` dumps
+tests/fuzz_round19.rs                 # CJK multiline buffer for range/undo probes
+tests/fuzz_round20.rs                 # char pool of CJK + emoji + combining marks for replace-mode fuzz
+tests/fuzz_round21.rs                 # CJK in both the substitute-string alphabet and the pattern alphabet
+tests/fuzz_round23.rs                 # CJK targets for IME replace and `f`/`t` over mixed wide/narrow lines
+tests/fuzz_round24.rs                 # CJK + combining marks + ideographic space (U+3000) width probe
+tests/fuzz_round26.rs                 # CJK multiline buffer for macro/register fuzz
+tests/fuzz_round33.rs                 # macro recording/replay over CJK lines
+tests/fuzz_round35.rs                 # mixed CJK/ASCII tab-indented lines for `<C-t>`/`<C-d>` probes
+tests/fuzz_round36.rs                 # CJK + halfwidth katakana in the insert-mode key pool
+tests/parity_round2.rs                # `w`/`e`/`b` over repeated wide chars (`中中 中中 ...`)
+tests/parity_round3.rs                # Fixture `col` is a BYTE offset: 3 lands on 文; `r中` replaces a whole wide char
+tests/parity_round5.rs               # `floor_to_char_boundary` on "中文": offsets 1/2 floor to 0, 4/5 floor to 3
+tests/parity_round7.rs                # host callback must not receive an offset inside a char after matching `中`
+tests/parity_round8.rs                # mixed CJK/ASCII buffer: byte vs display column mapping
+tests/parity_round9.rs               # Tab at the end of a `中文` line (expandtab ts=4): pads by display column
+tests/parity_round12.rs               # `:'中d` once cut 中 mid-byte and panicked in split_at
+tests/parity_round13.rs               # `f`/`t` landing on a wide char in a multiline CJK buffer
+tests/probe_round30.rs                # `R` overwriting `中` (3 bytes) and `J` joining CJK lines
+tests/probe_round35.rs                # `vl<Esc>:marks` on a `中文缓冲`: the row renderer must not panic
+tests/readonly_pipeline.rs            # read-only pipeline over a CJK multiline buffer (`refresh_highlights_ro`)
+tests/review_regressions.rs           # `$`/`g_` used to return line_end-1 bytes, which is INSIDE 文
+tests/scratch_b.rs                    # `r-` replacing a wide char: one replacement unit, not one byte

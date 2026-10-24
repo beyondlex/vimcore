@@ -5,8 +5,40 @@ of each round's semantic fixes lives in `NOTES.md` (organized by round,
 each round with its own audit summary), which is authoritative before a
 release.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version numbers match `Cargo.toml`.
+
+## [0.2.2] - 2026-10-24
+
+Repository-wide Chinese-to-English migration. **No API change**: every public
+type, signature and behavior is identical to 0.2.1. Only comments, docs,
+assert messages and git commit messages changed, so hosts upgrade with no code
+edit.
+
+### Added
+
+- **`.cjk-allow` + `tools/check_cjk.sh`** (wired into a `cjk` CI workflow):
+  fails when CJK text appears outside a per-file whitelist with a mandatory
+  reason. Without this the migration would silently regress on the next
+  Chinese comment.
+
+### Changed
+
+- All source comments, doc comments, assert messages and panic text are English;
+  so are `NOTES.md`, `AGENTS.md`, `README.md`, `PLAN_READONLY.md` and this file.
+- Git history rewritten to English messages. SHA values changed; the tree of
+  every commit is byte-identical to before, so a tree diff against the
+  pre-migration history shows no content change.
+- `I18N_PLAN.md`, `.cjk-allow` and `tools/` are excluded from the published
+  crate (`Cargo.toml` `exclude`): development artifacts, not API surface.
+
+### Notes
+
+- CJK test fixtures (~290 lines) are deliberately preserved. They measure
+  wide-char display width and multibyte char-boundary behavior; substituting
+  ASCII keeps the assertions green while destroying the coverage. The rule is
+  recorded in `I18N_PLAN.md` section 1.1 and enforced file-by-file by
+  `.cjk-allow`.
 
 ## [0.2.1] - 2026-10-13
 
