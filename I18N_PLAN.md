@@ -810,3 +810,93 @@ origin/main` → 分叉消除，版本回到 0.1.2，`cargo test` 97 全绿，
   （crossterm 39/39、gpui 168/168，零丢失）。
 - alacer 的翻译 agent 越界新增了两处英文键位文档（help.rs/KEYBINDINGS.md，
   非迁移内容），已在提交前 revert，保持提交纯翻译。
+
+---
+
+## 10. 收尾记录（2026-10-24）
+
+§9 遗留的三件事全部处理完毕。本节是凭证。
+
+### 10.1 复核：Phase A/B 仍然达标
+
+- `git ls-remote origin`：只有 `refs/heads/main` + `refs/tags/v0.2.0`，无旧分支残留
+- `main` 链中 subject 含中文 **0 条**；body 提及 CJK 的 9 条是 §9.2 偏差 2 允许的
+  fixture 字形引用
+- 工作树 748 行含中文：本文件 378 + `*.rs` 294（comment 69 / assert 43 / string 178 /
+  其他 4，逐条核实全是 L4 数据或字形引用）+ NOTES.md 17 + 分散 59
+- 结论：**除本文件外，待翻译散文 0 行**
+
+### 10.2 新增防回潮机制（原计划的缺口）
+
+§5 之前只有「翻译 + 重写」两个动作，没有「防止回潮」。alacer 早有 `.cjk-allow`，
+vimcore 一直空着——历史清干净了，但下一个中文注释随时能进 main。
+
+| 文件 | 作用 |
+|---|---|
+| `.cjk-allow` | 51 条，逐文件 + 强制理由。第 1 条是它自己（理由里要引用 fixture 字形） |
+| `tools/check_cjk.sh` | `git grep -P` 扫 CJK，白名单外命中即 exit 1 并打印行号；带 `--untracked`，`git add` 之前就能拦住 |
+| `.github/workflows/cjk.yml` | push / pull_request 各跑一次（仓库第一个 workflow） |
+
+验证：临时写一个含中文注释的文件 → exit 1 并定位到行；删除后 → `cjk: ok`。
+
+### 10.3 发布 0.2.2（关闭 §9.2 偏差 5）
+
+§8 的结论是「crates.io 不可变，唯一覆盖手段是发新版」。已执行：
+
+| | 含中文行 | 文件数 |
+|---|---|---|
+| crates.io 0.2.1（已发布，永久） | 8,658 | 93 |
+| **0.2.2（已发布）** | **311** | 49 |
+
+降幅 96.4%；剩余 26 行「连续汉字」全部是 fixture（`"中文测试\n多字节行\n"` 这类）。
+
+`Cargo.toml` 的 `exclude` 从 1 项扩到 4 项：`I18N_PLAN.md`、`.cjk-allow`、
+`tools/`、`.github/`。打包 109 文件，`cargo publish` 一次通过。
+
+### 10.4 本地旧对象清理（§9.1 的「未跑 gc」）
+
+清理前 `git rev-list --all` = 464，比实际可达多 **207 条**（09-20 ~ 10-08 的旧中文
+历史）；`git fsck --unreachable` 报 71 个不可达 commit。
+
+**根因不是「gc 没跑」，而是一个残留的 linked worktree：**
+
+```
+$ git worktree list
+/Users/lex/code/github/vimcore  4ac50ce [main]
+/private/tmp/vimcore-head       f07f05d (detached HEAD) prunable
+```
+
+`.git/worktrees/vimcore-head/HEAD` 钉在 `f07f05d`（旧中文历史）上，目录早已不存在。
+worktree HEAD 本身就是 ref，所以这 207 条对 `rev-list --all` 可达、对 `gc` 保留，
+而 `git for-each-ref` **看不到它**——本次排查在这里被骗了两轮，记下来。
+
+处置：`git worktree prune` → `git gc --prune=now`。
+
+结果：`rev-list --all` 464 → **257**，`cat-file -e f07f05d` 失败，fsck 零不可达。
+
+回滚材料：`~/vimcore-pre-i18n.bundle`（10-14 重写前全引用）、
+`~/vimcore-backup-2026-10-24.bundle`（10-24 清理前全引用）。
+
+### 10.5 下游依赖核查
+
+| 项目 | 声明 | 锁定 | 耦合 |
+|---|---|---|---|
+| `../alacer` | `vimcore = "0.2"` | 0.2.1 → 可升 0.2.2 | crates.io registry |
+| `../gpui_vim` | `vimcore = "0.1"` | 0.1.30 | crates.io registry |
+
+两者都是 registry 依赖、不读 git 历史，历史重写对它们零影响；`gpui_vim` 里那行
+`[patch.crates-io] vimcore = { path = "../vimcore" }` 是注释掉的。
+
+**遗留**：`gpui_vim` 声明 `^0.1`，拿不到 0.2.x（包括英文化后的源码）。升级要过
+0.2 的源码级 break（write primitives 签名 + `MergeVimBuffer`），属独立迁移任务，
+本次未做。
+
+### 10.6 验收
+
+| 项 | 结果 |
+|---|---|
+| `cargo test` | 1196 通过 / 0 失败（79 个测试二进制） |
+| `cargo clippy --all-targets -- -D warnings` | 零警告 |
+| `tools/check_cjk.sh` | `cjk: ok -- 51 files whitelisted, no unlisted CJK` |
+| `git fsck --full` | 干净 |
+| 远端 `main` | `4ac50ce` |
