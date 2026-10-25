@@ -8,6 +8,41 @@ release.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version numbers match `Cargo.toml`.
 
+## [0.3.0] - 2026-10-26
+
+The M1 engine prerequisites: shared session globals for multi-panel hosts,
+the host-command Ex registry, and the MACRO_HOST_UNDO capability flag.
+
+### Added
+
+- **`SharedGlobals` + `VimState::share_globals(&SharedGlobals)` /
+  `VimState::shared_globals()`**: several engine instances (one panel each
+  — a merge view's editable Result plus read-only panes) can share ONE
+  register file and macro table, matching vim's split of session-global
+  registers and per-buffer undo. Undo, marks, jumps and search state stay
+  per instance. `VimState::registers_snapshot()` copies the register file
+  for render paths that must not hold the lock.
+- **`VimState::register_ex(name, aliases, completion, handler)` +
+  `VimState::ex_completions(line)`** (module `vimcore::ex`): host-registered
+  Ex commands dispatch inside the engine's `:` pipeline BEFORE the
+  built-in table — the engine hands the handler the parsed range, `!`
+  flag and argument, and a `false` return fails the command like a
+  built-in error. Name matching follows vim's boundary rule (`w` claims
+  `:w` but not `:write`; a glued `s/a/b/` reaches a registration named
+  `s` with its separator kept). See `src/ex.rs` for the exact rules.
+- **`VimHost::capabilities() -> HostCapabilities`** (all flags default
+  off) with the first flag **`macro_host_undo`**: `u`/`<C-r>` inside a
+  macro or `.` replay now asks the host only when the host declared the
+  flag; an undeclared host gets the plain "nothing to undo" bell without
+  a host call. Direct (non-replay) undo is ungated.
+
+### Changed (breaking)
+
+- **`VimState::registers` is now `Arc<Mutex<Registers>>`** (was
+  `Registers`). External readers lock it — `registers_snapshot()` copies
+  for render paths — and internal engine code goes through private
+  accessors. Everything else about the register semantics is unchanged.
+
 ## [0.2.3] - 2026-10-26
 
 Undo groups now close with a deterministic engine signal instead of every
