@@ -222,7 +222,7 @@ fn ro_pipeline_keeps_motions_search_marks_and_yank() {
     feed_ro(&mut vim, &buf, &mut host, &["\"", "+", "y", "y"]);
     assert_eq!(host.clipboard.as_deref(), Some("beta\n"));
     assert_eq!(
-        vim.registers.get('+').map(|r| r.text.clone()).unwrap_or_default(),
+        vim.registers.lock().unwrap().get('+').cloned().map(|r| r.text.clone()).unwrap_or_default(),
         "beta\n"
     );
     // scrolling

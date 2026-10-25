@@ -51,7 +51,7 @@ use common::{edit, Fixture};
 
 fn unnamed(f: &Fixture) -> String {
     f.vim
-        .registers
+        .registers.lock().unwrap()
         .get('"')
         .map(|r| r.text.clone())
         .unwrap_or_default()

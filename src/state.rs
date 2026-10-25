@@ -27,6 +27,7 @@ use crate::tables::{mapping_class_for, CmdKind, CommandTables, NormalCmd, Phase,
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 /// Buffer + host pair threaded through all engine calls.
 pub struct Ctx<'a> {
@@ -247,7 +248,11 @@ pub(crate) enum QuotePending {
     /// Waiting for the next key — control keys inserted literally
     Single,
     /// Decimal (up to 3 digits) / octal (3 digits)
-    Radix { base: u32, max_digits: usize, buffer: String },
+    Radix {
+        base: u32,
+        max_digits: usize,
+        buffer: String,
+    },
     /// Hexadecimal (2/4/8 digits)
     Hex { max_digits: usize, buffer: String },
 }
@@ -341,7 +346,9 @@ pub struct VimState {
     /// Macro registers (`q`/`@`). Stored as recorded steps (not register
     /// text): the notation round-trip through `Key::parse` is lossy for
     /// named keys, and typed text never flows through the key pipeline.
-    macros: HashMap<char, Vec<RecordedStep>>,
+    /// Shared-capable: multiple engine instances in one session (one panel
+    /// each) can share one macro table through [`VimState::share_globals`].
+    macros: Arc<Mutex<HashMap<char, Vec<RecordedStep>>>>,
     /// Active `q` recording: the register and the steps captured so far.
     macro_capture: Option<(char, Vec<RecordedStep>)>,
     /// Last register executed with `@` (for `@@`).
@@ -482,7 +489,11 @@ pub struct VimState {
     pub(crate) insert_did_ai: bool,
 
     pub options: Options,
-    pub registers: Registers,
+    /// The register file. Shared-capable: multiple engine instances in one
+    /// session (one panel each) can share one file through
+    /// [`VimState::share_globals`] — vim semantics keep registers
+    /// session-global while undo stays per instance.
+    pub registers: Arc<Mutex<Registers>>,
     pub marks: Marks,
     pub search: SearchState,
     pub cmdline: Cmdline,
@@ -566,6 +577,37 @@ impl Default for VimState {
     }
 }
 
+/// Session-level globals shared across engine instances.
+///
+/// A multi-panel host (a merge view's three panes, several editors in one
+/// window) gives every [`VimState`] its own buffer and undo history but ONE
+/// handle to these — matching vim, where registers and macros are
+/// session-global while undo is per buffer. Construct once, hand clones to
+/// each instance via [`VimState::share_globals`]:
+///
+/// ```no_run
+/// let globals = vimcore::state::SharedGlobals::new();
+/// let mut left = vimcore::state::VimState::new();
+/// let mut right = vimcore::state::VimState::new();
+/// left.share_globals(&globals);
+/// right.share_globals(&globals);
+/// // yy in `left`, p in `right` — same register file
+/// ```
+///
+/// Unshared instances (the default) keep private globals; nothing changes
+/// for single-engine hosts.
+#[derive(Clone, Default)]
+pub struct SharedGlobals {
+    registers: Arc<Mutex<Registers>>,
+    macros: Arc<Mutex<HashMap<char, Vec<RecordedStep>>>>,
+}
+
+impl SharedGlobals {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl VimState {
     pub fn new() -> Self {
         VimState {
@@ -598,7 +640,7 @@ impl VimState {
             replay_records: false,
             replay_texts: VecDeque::new(),
             recording_suppressed: false,
-            macros: HashMap::new(),
+            macros: Arc::new(Mutex::new(HashMap::new())),
             macro_capture: None,
             last_macro_played: None,
             ex_depth: 0,
@@ -635,7 +677,7 @@ impl VimState {
             insert_change_pos: None,
             insert_did_ai: false,
             options: Options::default(),
-            registers: Registers::default(),
+            registers: Arc::new(Mutex::new(Registers::default())),
             marks: Marks::default(),
             search: SearchState::default(),
             cmdline: Cmdline::default(),
@@ -656,6 +698,46 @@ impl VimState {
     }
 
     // ---- read API for hosts ------------------------------------------------
+
+    /// Lock the register file. The field is an `Arc<Mutex<…>>` so several
+    /// engine instances can share one file (see [`Self::share_globals`]);
+    /// this helper is the crate's one spelling for taking the lock.
+    pub(crate) fn regs(&self) -> std::sync::MutexGuard<'_, Registers> {
+        self.registers.lock().unwrap()
+    }
+
+    /// Lock the macro table (see [`Self::regs`] for why it is a mutex).
+    pub(crate) fn macro_table(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<char, Vec<RecordedStep>>> {
+        self.macros.lock().unwrap()
+    }
+
+    /// Join this instance to a shared-globals session: registers and macros
+    /// become one file/table with every other instance sharing `globals`.
+    /// Undo, marks, jumps and search state stay per instance (vim
+    /// semantics). Existing content in this instance's registers/macros is
+    /// REPLACED by the session's (share early, at construction time).
+    pub fn share_globals(&mut self, globals: &SharedGlobals) {
+        self.registers = Arc::clone(&globals.registers);
+        self.macros = Arc::clone(&globals.macros);
+    }
+
+    /// The session handle this instance currently belongs to. Hand the
+    /// result to another instance's [`Self::share_globals`] to put both on
+    /// one file.
+    pub fn shared_globals(&self) -> SharedGlobals {
+        SharedGlobals {
+            registers: Arc::clone(&self.registers),
+            macros: Arc::clone(&self.macros),
+        }
+    }
+
+    /// A snapshot clone of the register file (status UIs that must not hold
+    /// the lock while rendering).
+    pub fn registers_snapshot(&self) -> Registers {
+        self.regs().clone()
+    }
 
     pub fn mode(&self) -> Mode {
         self.mode
@@ -769,7 +851,7 @@ impl VimState {
     /// Number of recorded steps in a macro register (0 when unset). Status
     /// UI / test observability: macros live as step lists, not text.
     pub fn macro_len(&self, reg: char) -> usize {
-        self.macros.get(&reg).map_or(0, Vec::len)
+        self.macro_table().get(&reg).map_or(0, Vec::len)
     }
 
     /// True while a visual-block `I`/`A`/`c` session is gathering text for
@@ -1322,9 +1404,7 @@ impl VimState {
                         if let KeyKind::Char(c) = k.kind {
                             let upper = c.to_ascii_uppercase();
                             if upper.is_ascii_alphabetic() {
-                                if let Some(b) =
-                                    char::from_u32(upper as u32 - 'A' as u32 + 1)
-                                {
+                                if let Some(b) = char::from_u32(upper as u32 - 'A' as u32 + 1) {
                                     out.push(b);
                                 }
                             }
@@ -1366,8 +1446,7 @@ impl VimState {
     /// all report E21 under `:set nomodifiable`, while `y`, `yy`, `m{a}` and
     /// `:q` stay legal).
     pub(crate) fn report_readonly(&mut self, ctx: &mut Ctx) {
-        ctx.host
-            .status_message(E21_MODIFIABLE_OFF);
+        ctx.host.status_message(E21_MODIFIABLE_OFF);
         self.fail_replay(ctx);
     }
 
@@ -1532,9 +1611,7 @@ impl VimState {
                 // sat before (`:5d` from line 1 must undo ONTO line 5 —
                 // audit D9/oracle Y1; normal-mode commands already edit at
                 // the cursor, so their shape is unchanged)
-                let hint = self
-                    .undo_hint_offset
-                    .unwrap_or(self.cursor.offset);
+                let hint = self.undo_hint_offset.unwrap_or(self.cursor.offset);
                 let hint = crate::buffer::floor_to_char_boundary(ctx.buf, hint);
                 ctx.host.begin_undo_group(id, hint);
             }
@@ -1631,10 +1708,7 @@ impl VimState {
                 while i > 0 && bytes[i - 1].is_ascii_hexdigit() {
                     i -= 1;
                 }
-                if i >= 2
-                    && matches!(bytes[i - 1], b'x' | b'X')
-                    && bytes[i - 2] == b'0'
-                {
+                if i >= 2 && matches!(bytes[i - 1], b'x' | b'X') && bytes[i - 2] == b'0' {
                     i
                 } else {
                     match (cur..text.len()).find(|&i| bytes[i].is_ascii_digit()) {
@@ -1650,14 +1724,10 @@ impl VimState {
                         // floating point (oracle: `.` of `1.5` + C-a →
                         // `2.5` — audit B2; the old forward scan landed on
                         // the `5` and produced `1.6`)
-                        if i >= 2
-                            && bytes[i - 1] == b'.'
-                            && bytes[i - 2].is_ascii_digit()
-                        {
+                        if i >= 2 && bytes[i - 1] == b'.' && bytes[i - 2].is_ascii_digit() {
                             let mut fstart = i - 2;
                             while fstart > 0
-                                && (bytes[fstart - 1].is_ascii_digit()
-                                    || bytes[fstart - 1] == b'.')
+                                && (bytes[fstart - 1].is_ascii_digit() || bytes[fstart - 1] == b'.')
                             {
                                 fstart -= 1;
                             }
@@ -1668,23 +1738,16 @@ impl VimState {
                             let float_text = &text[fstart..fend];
                             if let Ok(v) = float_text.parse::<f64>() {
                                 let result = v + delta as f64;
-                                let formatted =
-                                    if result == result.trunc() && result.abs() < 1e15 {
-                                        format!("{:.1}", result)
-                                    } else {
-                                        format!("{result}")
-                                    };
+                                let formatted = if result == result.trunc() && result.abs() < 1e15 {
+                                    format!("{:.1}", result)
+                                } else {
+                                    format!("{result}")
+                                };
                                 self.begin_edit();
-                                self.edit_replace(
-                                    ctx,
-                                    start + fstart..start + fend,
-                                    &formatted,
-                                );
+                                self.edit_replace(ctx, start + fstart..start + fend, &formatted);
                                 self.end_edit(ctx);
-                                self.cursor.offset = clamp_cursor(
-                                    ctx.buf,
-                                    start + fstart + formatted.len() - 1,
-                                );
+                                self.cursor.offset =
+                                    clamp_cursor(ctx.buf, start + fstart + formatted.len() - 1);
                                 self.cursor.desired_col = None;
                                 return true;
                             }
@@ -2077,7 +2140,9 @@ impl VimState {
             let lo = crate::buffer::floor_to_char_boundary(ctx.buf, lo);
             let hi = crate::buffer::floor_to_char_boundary(ctx.buf, hi);
             let line = ctx.buf.offset_to_line(lo);
-            let dies_whole = lo >= range.start && hi <= range.end && hi > lo
+            let dies_whole = lo >= range.start
+                && hi <= range.end
+                && hi > lo
                 && ctx.buf.line_range(line).end <= range.end;
             dies_whole.then(|| {
                 let ls = ctx.buf.line_start(line);
@@ -2091,10 +2156,12 @@ impl VimState {
         }
         self.marks.adjust_delete(range.clone());
         if let Some((rel_lo, rel_hi, kind)) = visual_fold {
-            let line = ctx.buf.offset_to_line(crate::buffer::floor_to_char_boundary(
-                ctx.buf,
-                range.start.min(ctx.buf.len()),
-            ));
+            let line = ctx
+                .buf
+                .offset_to_line(crate::buffer::floor_to_char_boundary(
+                    ctx.buf,
+                    range.start.min(ctx.buf.len()),
+                ));
             let ls = ctx.buf.line_start(line);
             let content = ctx.buf.line_end(line) - ls;
             let new_lo = ls + rel_lo.min(content);
@@ -2393,10 +2460,10 @@ impl VimState {
         // itself, and `@` replay must run the jump as-is.
         if kind == InsertKind::LastInsertExit {
             let n = self.recording.len();
-            let is_key = |s: Option<&RecordedStep>, c: char| {
-                matches!(s, Some(RecordedStep::Key(k)) if *k == Key::char(c))
-            };
-            if n >= 2 && is_key(self.recording.get(n - 2), 'g') && is_key(self.recording.get(n - 1), 'i')
+            let is_key = |s: Option<&RecordedStep>, c: char| matches!(s, Some(RecordedStep::Key(k)) if *k == Key::char(c));
+            if n >= 2
+                && is_key(self.recording.get(n - 2), 'g')
+                && is_key(self.recording.get(n - 1), 'i')
             {
                 self.recording.pop();
                 self.recording.pop();
@@ -2619,7 +2686,7 @@ impl VimState {
         // sessions (oracle: after `ihi<Esc>i<Esc>`, `string(@.)` = '' — audit D7a)
         let text = std::mem::take(&mut self.insert_session_text);
         let typed_anything = !text.is_empty();
-        self.registers.store_last_insert(text);
+        self.regs().store_last_insert(text);
         // count-repeat insert (`3ifoo<Esc>`): replicate the typed text while
         // the session's undo group is open and BEFORE the exit cursor
         // step-back, so the cursor lands one left of the LAST copy (vim).
@@ -2764,7 +2831,8 @@ impl VimState {
                 // == first row) and past the appended text for `A` (audit D11
                 // `.`-redo row offset was a symptom of the row, not the col).
                 if block.park_on_edge {
-                    self.cursor.offset = crate::buffer::clamp_cursor(ctx.buf, block.first_line_edge);
+                    self.cursor.offset =
+                        crate::buffer::clamp_cursor(ctx.buf, block.first_line_edge);
                 } else {
                     let at = crate::buffer::floor_to_char_boundary(
                         ctx.buf,
@@ -3220,8 +3288,12 @@ impl VimState {
             .map(|r| ctx.buf.slice(r.clone()))
             .collect::<Vec<_>>()
             .join("\n");
-        self.registers
-            .store_delete(register, text, crate::registers::RegisterKind::Blockwise, false);
+        self.regs().store_delete(
+            register,
+            text,
+            crate::registers::RegisterKind::Blockwise,
+            false,
+        );
     }
 
     fn apply_block_operator(&mut self, ctx: &mut Ctx, op: Operator) {
@@ -3249,8 +3321,7 @@ impl VimState {
             // linewise delete and wiped the whole buffer)
             Operator::DeleteToEnd => {
                 let rows: Vec<std::ops::Range<usize>> = (block.first_line
-                    ..=block.first_line + block.rows.len()
-                        - 1)
+                    ..=block.first_line + block.rows.len() - 1)
                     .map(|line| {
                         let col = block.col_lo;
                         let from = crate::buffer::offset_for_display_column(ctx.buf, line, col);
@@ -3263,7 +3334,7 @@ impl VimState {
                     .collect::<Vec<_>>()
                     .join("\n");
                 crate::registers::sync_clipboard_host(ctx.host, self.register, &text);
-                self.registers.store_delete(
+                self.regs().store_delete(
                     self.register,
                     text,
                     crate::registers::RegisterKind::Blockwise,
@@ -3274,8 +3345,7 @@ impl VimState {
                 self.end_edit(ctx);
                 self.bump(ctx);
                 self.reset_pending();
-                self.cursor.offset =
-                    clamp_cursor(ctx.buf, adjusted.first().copied().unwrap_or(0));
+                self.cursor.offset = clamp_cursor(ctx.buf, adjusted.first().copied().unwrap_or(0));
                 self.cursor.desired_col = None;
                 self.finish_visual_op(ctx);
             }
@@ -3309,7 +3379,7 @@ impl VimState {
                     .collect::<Vec<_>>()
                     .join("\n");
                 crate::registers::sync_clipboard_host(ctx.host, self.register, &block_text);
-                self.registers.store_yank(
+                self.regs().store_yank(
                     self.register,
                     block_text,
                     crate::registers::RegisterKind::Blockwise,
@@ -3337,8 +3407,12 @@ impl VimState {
                     .collect::<Vec<_>>()
                     .join("\n");
                 crate::registers::sync_clipboard_host(ctx.host, self.register, &text);
-                self.registers
-                    .store_delete(self.register, text, crate::registers::RegisterKind::Blockwise, false);
+                self.regs().store_delete(
+                    self.register,
+                    text,
+                    crate::registers::RegisterKind::Blockwise,
+                    false,
+                );
                 self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &ranges);
                 self.bump(ctx);
@@ -3349,9 +3423,8 @@ impl VimState {
                 self.cursor.offset = clamp_cursor(ctx.buf, adjusted[0]);
                 let typing_line = ctx.buf.offset_to_line(self.cursor.offset);
                 let mut rows: Vec<(usize, usize)> = Vec::new();
-                for (i, line) in (block.first_line
-                    ..=block.first_line + block.rows.len() - 1)
-                    .enumerate()
+                for (i, line) in
+                    (block.first_line..=block.first_line + block.rows.len() - 1).enumerate()
                 {
                     if line == typing_line {
                         continue;
@@ -3555,7 +3628,13 @@ impl VimState {
             let last_row_line = block.first_line + block.rows.len() - 1;
             (block.first_line..=last_row_line)
                 .map(|line| {
-                    ops::block_row_range(ctx.buf, line, block.col_lo, block.col_hi, self.options.tabstop)
+                    ops::block_row_range(
+                        ctx.buf,
+                        line,
+                        block.col_lo,
+                        block.col_hi,
+                        self.options.tabstop,
+                    )
                 })
                 .collect()
         };
@@ -3695,16 +3774,15 @@ impl VimState {
             let (lo, end) = if matches!(kind, crate::mode::VisualKind::Line) {
                 let first = ctx.buf.offset_to_line(lo);
                 let last = ctx.buf.offset_to_line(hi);
-                (
-                    ctx.buf.line_start(first),
-                    ctx.buf.line_range(last).end,
-                )
+                (ctx.buf.line_start(first), ctx.buf.line_range(last).end)
             } else {
                 (lo, ctx.buf.next_char_offset(hi).unwrap_or(hi))
             };
             self.marks.last_visual = Some((lo, end, kind));
-            self.marks.last_visual_cursor =
-                Some(crate::buffer::floor_to_char_boundary(ctx.buf, self.cursor.offset));
+            self.marks.last_visual_cursor = Some(crate::buffer::floor_to_char_boundary(
+                ctx.buf,
+                self.cursor.offset,
+            ));
         }
     }
 
@@ -4324,14 +4402,14 @@ impl VimState {
         if kind == CmdKind::Normal(NormalCmd::RecordMacro) && self.macro_capture.is_some() {
             if let Some((reg, mut keys)) = self.macro_capture.take() {
                 keys.pop(); // drop the stopping `q` (captured by the hook)
-                // the macro IS the register (audit D4b): the text lands in
-                // `"a..` so `"ap` pastes it and any register write replaces
-                // the macro
+                            // the macro IS the register (audit D4b): the text lands in
+                            // `"a..` so `"ap` pastes it and any register write replaces
+                            // the macro
                 let text = Self::macro_steps_to_text(&keys);
-                self.registers
-                    .store_named_plain(reg, text);
-                self.macro_sync_gen.insert(reg, self.registers.write_gen);
-                self.macros.insert(reg, keys);
+                self.regs().store_named_plain(reg, text);
+                let gen = self.regs().write_gen;
+                self.macro_sync_gen.insert(reg, gen);
+                self.macro_table().insert(reg, keys);
                 // vim: the recording register counts as "used", so `@@`
                 // replays it right after recording
                 self.last_macro_played = Some(reg);
@@ -4437,14 +4515,21 @@ impl VimState {
                         // the follow-up keys leaked in as plain commands)
                         if matches!(motion, Motion::Right)
                             && self.cursor.offset < ctx.buf.len()
-                            && ctx.buf.char_at(self.cursor.offset).is_some_and(|c| c != '\n')
+                            && ctx
+                                .buf
+                                .char_at(self.cursor.offset)
+                                .is_some_and(|c| c != '\n')
                         {
                             let at = self.cursor.offset;
-                            let end = crate::buffer::next_grapheme_offset(ctx.buf, at)
-                                .unwrap_or(at + 1);
+                            let end =
+                                crate::buffer::next_grapheme_offset(ctx.buf, at).unwrap_or(at + 1);
                             self.complete_operator_with_span(
                                 ctx,
-                                ops::OpSpan { start: at, end, linewise: false },
+                                ops::OpSpan {
+                                    start: at,
+                                    end,
+                                    linewise: false,
+                                },
                             );
                             return ProcessOutcome::Consumed;
                         }
@@ -4471,14 +4556,7 @@ impl VimState {
                                 return ProcessOutcome::Consumed;
                             }
                         },
-                        _ => ops::span_from_motion(
-                            self,
-                            ctx.buf,
-                            motion,
-                            result,
-                            count,
-                            self.op,
-                        ),
+                        _ => ops::span_from_motion(self, ctx.buf, motion, result, count, self.op),
                     };
                     // `cw`/`cW` = the `dw` span with the trailing whitespace
                     // excluded (all probed against vim 9.1): `cw` on "ab cd"
@@ -4489,7 +4567,8 @@ impl VimState {
                     // rules entirely — `cw` on "b" wiped "b\nc".
                     if is_cw && !span.linewise && span.end > span.start {
                         let covered = ctx.buf.slice(span.start..span.end);
-                        let trimmed = covered.trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
+                        let trimmed =
+                            covered.trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
                         span.end = span.start + trimmed.len();
                     }
                     self.complete_operator_with_span(ctx, span);
@@ -4531,7 +4610,8 @@ impl VimState {
                 match self.mode {
                     Mode::Visual { .. } => {
                         // extend the selection to the object
-                        let Some(span) = ops::object_span_count(self, ctx.buf, object, count) else {
+                        let Some(span) = ops::object_span_count(self, ctx.buf, object, count)
+                        else {
                             self.note_bell(ctx);
                             return ProcessOutcome::Consumed;
                         };
@@ -4557,7 +4637,8 @@ impl VimState {
                         self.marks.active_visual = Some((span.start, span.end));
                     }
                     _ if self.op.is_some() => {
-                        let Some(span) = ops::object_span_count(self, ctx.buf, object, count) else {
+                        let Some(span) = ops::object_span_count(self, ctx.buf, object, count)
+                        else {
                             self.note_bell(ctx);
                             self.reset_pending();
                             return ProcessOutcome::Consumed;
@@ -4821,9 +4902,8 @@ impl VimState {
     /// digits, ending in `p`/`P`. Anything else (a yank into `"1`, a named
     /// register, a delete) is left alone — vim only walks the ring for puts.
     fn bump_redo_register(steps: &mut [RecordedStep]) -> bool {
-        let plain_key = |k: &RecordedStep, f: &dyn Fn(&Key) -> bool| {
-            matches!(k, RecordedStep::Key(k) if f(k))
-        };
+        let plain_key =
+            |k: &RecordedStep, f: &dyn Fn(&Key) -> bool| matches!(k, RecordedStep::Key(k) if f(k));
         let plain_digit = |k: &Key| {
             k.modifiers.is_plain() && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit())
         };
@@ -4927,7 +5007,13 @@ impl VimState {
     /// C (ChangeToEnd) deliberately does NOT take the whole-line branch: it
     /// keeps the cursor line alive for typing (probe: `C` at col 0 types on
     /// the EMPTIED line, `2C` at col 0 → ['new','cccc','dddd']).
-    fn delete_to_end_span(ctx: &Ctx, line: usize, count: usize, last: usize, span_start: usize) -> usize {
+    fn delete_to_end_span(
+        ctx: &Ctx,
+        line: usize,
+        count: usize,
+        last: usize,
+        span_start: usize,
+    ) -> usize {
         if count >= 2 && span_start == ctx.buf.line_start(line) {
             return ctx.buf.line_range(last).end;
         }
@@ -5020,8 +5106,10 @@ impl VimState {
                 let _ = restored;
             }
         }
-        self.cursor.offset =
-            clamp_cursor(ctx.buf, crate::buffer::floor_to_char_boundary(ctx.buf, offset));
+        self.cursor.offset = clamp_cursor(
+            ctx.buf,
+            crate::buffer::floor_to_char_boundary(ctx.buf, offset),
+        );
         self.cursor.desired_col = None;
         // the host swap shrank/grew the text under the published highlights:
         // recompute them from the restored text (fuzz round 20 seed 5 — the
@@ -5201,7 +5289,7 @@ impl VimState {
             NormalCmd::PasteIndent { below } => {
                 let count = self.take_total_count();
                 let register = self.register.unwrap_or(crate::registers::UNNAMED);
-                let Some(data) = self.registers.get_for_paste(register, ctx.host) else {
+                let Some(data) = self.regs().get_for_paste(register, ctx.host) else {
                     self.note_bell(ctx);
                     return;
                 };
@@ -5258,8 +5346,7 @@ impl VimState {
                 // the first pasted line onto the current one (`yy j ]p` on
                 // noeol "ab\ncd" = "ab\ncdab\n" — audit C3). Open the
                 // separator line like `put_ex` does.
-                let has_newline =
-                    ctx.buf.line_range(cur_line).end > ctx.buf.line_end(cur_line);
+                let has_newline = ctx.buf.line_range(cur_line).end > ctx.buf.line_end(cur_line);
                 let (insert_at, text, cursor_at) = if below && !has_newline {
                     let at = ctx.buf.len();
                     (at, format!("\n{text}"), at + 1)
@@ -5267,31 +5354,30 @@ impl VimState {
                     let at = ctx.buf.line_range(cur_line).end.min(ctx.buf.len());
                     (at, text, at)
                 } else {
-                    (ctx.buf.line_start(cur_line), text, ctx.buf.line_start(cur_line))
+                    (
+                        ctx.buf.line_start(cur_line),
+                        text,
+                        ctx.buf.line_start(cur_line),
+                    )
                 };
                 let gen = self.edit_generation;
                 self.begin_edit();
                 self.edit_insert(ctx, insert_at, &text);
                 self.end_edit(ctx);
-                self.cursor.offset =
-                    ctx.buf.first_non_blank(ctx.buf.offset_to_line(cursor_at));
+                self.cursor.offset = ctx.buf.first_non_blank(ctx.buf.offset_to_line(cursor_at));
                 self.cursor.desired_col = None;
                 self.bump_if_edited(ctx, gen);
             }
             // ga: `<a> 97,  Hex 61,  Octal 141` style char info (`:h ga`,
             // audit J2)
-            NormalCmd::CharInfo => {
-                match ctx.buf.char_at(self.cursor.offset) {
-                    Some(c) => {
-                        let dec = c as u32;
-                        ctx.host.status_message(&format!(
-                            "{c}  {dec},  Hex {:x},  Octal {:o}",
-                            dec, dec
-                        ));
-                    }
-                    None => ctx.host.bell(),
+            NormalCmd::CharInfo => match ctx.buf.char_at(self.cursor.offset) {
+                Some(c) => {
+                    let dec = c as u32;
+                    ctx.host
+                        .status_message(&format!("{c}  {dec},  Hex {:x},  Octal {:o}", dec, dec));
                 }
-            }
+                None => ctx.host.bell(),
+            },
             // g8: the char's UTF-8 bytes as `<c3 a9>` (`:h g8`, audit J3)
             NormalCmd::ByteInfo => {
                 let at = self.cursor.offset;
@@ -5299,10 +5385,8 @@ impl VimState {
                     Some(c) => {
                         let mut buf = [0u8; 4];
                         let bytes = c.encode_utf8(&mut buf).as_bytes();
-                        let hexes: Vec<String> =
-                            bytes.iter().map(|b| format!("{b:02x}")).collect();
-                        ctx.host
-                            .status_message(&format!("<{}>", hexes.join(" ")));
+                        let hexes: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                        ctx.host.status_message(&format!("<{}>", hexes.join(" ")));
                     }
                     None => ctx.host.bell(),
                 }
@@ -5377,9 +5461,7 @@ impl VimState {
                     // with the plain "nothing to undo" bell (the host's undo
                     // often lives in view state a replayed key never reaches,
                     // and macros must behave the same across hosts).
-                    let stepped = if self.replaying
-                        && !ctx.host.capabilities().macro_host_undo
-                    {
+                    let stepped = if self.replaying && !ctx.host.capabilities().macro_host_undo {
                         false
                     } else {
                         self.history_step(ctx, undo)
@@ -5469,8 +5551,9 @@ impl VimState {
                     let mut i = 0usize;
                     while i < steps.len() {
                         match &steps[i] {
-                            RecordedStep::Key(k) if k.modifiers.is_plain()
-                                && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit()) =>
+                            RecordedStep::Key(k)
+                                if k.modifiers.is_plain()
+                                    && matches!(k.kind, KeyKind::Char(c) if c.is_ascii_digit()) =>
                             {
                                 i += 1;
                             }
@@ -5675,15 +5758,12 @@ impl VimState {
                     // (`V$j<Esc>gv` re-lands on the carried column; block
                     // lands on its last row's cursor end). Floored onto the
                     // current text.
-                    let stored = self
-                        .marks
-                        .last_visual_cursor
-                        .map(|c| {
-                            crate::buffer::clamp_cursor(
-                                ctx.buf,
-                                crate::buffer::floor_to_char_boundary(ctx.buf, c),
-                            )
-                        });
+                    let stored = self.marks.last_visual_cursor.map(|c| {
+                        crate::buffer::clamp_cursor(
+                            ctx.buf,
+                            crate::buffer::floor_to_char_boundary(ctx.buf, c),
+                        )
+                    });
                     if matches!(kind, crate::mode::VisualKind::Char) {
                         // vim's gv re-selects CHARWISE as a REVERSE
                         // selection: cursor on the start, anchor on the end
@@ -5700,8 +5780,11 @@ impl VimState {
                         self.cursor.offset = stored.unwrap_or_else(|| {
                             crate::buffer::clamp_cursor(
                                 ctx.buf,
-                                crate::buffer::floor_to_char_boundary(ctx.buf, hi.saturating_sub(1))
-                                    .min(ctx.buf.len()),
+                                crate::buffer::floor_to_char_boundary(
+                                    ctx.buf,
+                                    hi.saturating_sub(1),
+                                )
+                                .min(ctx.buf.len()),
                             )
                         });
                     }
@@ -5735,23 +5818,18 @@ impl VimState {
             // g&: `:%s{sep}pat{sep}rep{sep}{flags}` — the stored command's
             // RANGE is dropped and its FLAGS kept (opposite of `&`, audit
             // E10)
-            NormalCmd::RepeatSubstituteGlobal => {
-                match self.cmdline.last_substitute.clone() {
-                    Some(last) => {
-                        let replay =
-                            Self::substitute_dropping_range_pub(&last);
-                        let whole =
-                            (0usize, ctx.buf.line_count().saturating_sub(1));
-                        self.execute_substitute_ranged(ctx, &replay, whole)
-                    }
-                    None => {
-                        ctx.host.status_message(
-                            "E33: No previous substitute regular expression",
-                        );
-                        self.note_bell(ctx);
-                    }
+            NormalCmd::RepeatSubstituteGlobal => match self.cmdline.last_substitute.clone() {
+                Some(last) => {
+                    let replay = Self::substitute_dropping_range_pub(&last);
+                    let whole = (0usize, ctx.buf.line_count().saturating_sub(1));
+                    self.execute_substitute_ranged(ctx, &replay, whole)
                 }
-            }
+                None => {
+                    ctx.host
+                        .status_message("E33: No previous substitute regular expression");
+                    self.note_bell(ctx);
+                }
+            },
             NormalCmd::RepeatSubstitute => match self.cmdline.last_substitute.clone() {
                 Some(last) => {
                     let last = Self::strip_substitute_flags_for_repeat(&last);
@@ -5792,7 +5870,7 @@ impl VimState {
             crate::mode::VisualKind::Block,
         ));
         self.pending_visual_cursor = Some(self.cursor.offset);
-        let Some(data) = self.registers.get_for_paste(register, ctx.host) else {
+        let Some(data) = self.regs().get_for_paste(register, ctx.host) else {
             self.note_bell(ctx);
             return;
         };
@@ -5805,7 +5883,11 @@ impl VimState {
         // Rows sliced BEFORE the deletions.
         // keep_registers (P): the replaced block goes to the blackhole —
         // nothing recorded, the paste source survives
-        self.store_block_rows(ctx, &block.rows, if keep_registers { Some('_') } else { None });
+        self.store_block_rows(
+            ctx,
+            &block.rows,
+            if keep_registers { Some('_') } else { None },
+        );
         self.begin_edit();
         let cursor_to = block.rows.first().map(|r| r.start).unwrap_or(0);
         match data.kind {
@@ -5934,9 +6016,8 @@ impl VimState {
                     self.visual_anchor = Some(crate::buffer::offset_for_display_column(
                         ctx.buf, c_line, a_col,
                     ));
-                    self.cursor.offset = crate::buffer::offset_for_display_column(
-                        ctx.buf, a_line, c_col,
-                    );
+                    self.cursor.offset =
+                        crate::buffer::offset_for_display_column(ctx.buf, a_line, c_col);
                     // the anchor lands CLAMPED on a short row — its virtual
                     // column must survive in the field or the next span read
                     // re-derives a narrower block (audit E1 case C)
@@ -6011,9 +6092,9 @@ impl VimState {
                         // the line-kind visual cursor is clamped ON the last
                         // char — the oracle's landing (start of that line)
                         // is the line's own start
-                        crate::mode::VisualKind::Line => {
-                            ctx.buf.line_start(ctx.buf.offset_to_line(self.cursor.offset))
-                        }
+                        crate::mode::VisualKind::Line => ctx
+                            .buf
+                            .line_start(ctx.buf.offset_to_line(self.cursor.offset)),
                         _ => crate::buffer::next_grapheme_offset(ctx.buf, hi).unwrap_or(hi),
                     }
                 } else {
@@ -6049,7 +6130,7 @@ impl VimState {
                 let Some(span) = ops::span_from_visual(self, ctx.buf) else {
                     return;
                 };
-                let Some(stashed) = self.registers.get_for_paste(register, ctx.host) else {
+                let Some(stashed) = self.regs().get_for_paste(register, ctx.host) else {
                     self.note_bell(ctx);
                     return;
                 };
@@ -6074,8 +6155,7 @@ impl VimState {
                         };
                         let at = ctx.buf.line_start(ctx.buf.offset_to_line(span.start));
                         self.edit_insert(ctx, at, &text);
-                        self.cursor.offset =
-                            ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
+                        self.cursor.offset = ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
                     } else {
                         let at = span.start.min(ctx.buf.len());
                         self.edit_insert(ctx, at, &repeated);
@@ -6116,10 +6196,10 @@ impl VimState {
                     _ => crate::mode::VisualKind::Char,
                 };
                 self.pending_visual_marks = Some((span.start, span.end, kind));
-        self.pending_visual_cursor = Some(self.cursor.offset);
+                self.pending_visual_cursor = Some(self.cursor.offset);
                 // an unset register: vim reports E353 and leaves the
                 // selection INTACT — delete-then-nothing would lose it
-                let Some(stashed) = self.registers.get_for_paste(register, ctx.host) else {
+                let Some(stashed) = self.regs().get_for_paste(register, ctx.host) else {
                     self.note_bell(ctx);
                     return;
                 };
@@ -6167,8 +6247,7 @@ impl VimState {
                         // glued the following line onto the pasted text)
                         let at = span.start.min(ctx.buf.len());
                         self.edit_insert(ctx, at, &format!("{repeated}\n"));
-                        self.cursor.offset =
-                            ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
+                        self.cursor.offset = ctx.buf.first_non_blank(ctx.buf.offset_to_line(at));
                     } else {
                         // The insert position takes the delete region's true
                         // start, not cursor.offset: delete_span parks the
@@ -6206,11 +6285,21 @@ impl VimState {
                 // old span was a diagonal charwise slice and whole rows
                 // outside the block got incremented)
                 let block_window = self.visual_selection().and_then(|(_a, _c, _)| {
-                    if !matches!(self.mode, Mode::Visual { kind: VisualKind::Block }) {
+                    if !matches!(
+                        self.mode,
+                        Mode::Visual {
+                            kind: VisualKind::Block
+                        }
+                    ) {
                         return None;
                     }
                     let block = ops::span_from_visual_block(self, ctx.buf)?;
-                    Some((block.first_line, block.rows.len(), block.col_lo, block.col_hi))
+                    Some((
+                        block.first_line,
+                        block.rows.len(),
+                        block.col_lo,
+                        block.col_hi,
+                    ))
                 });
                 // BLOCK mode iterates the block's own rows (the diagonal
                 // charwise span says nothing useful here)
@@ -6255,19 +6344,12 @@ impl VimState {
                                 break;
                             }
                             if col >= col_lo
-                                && ctx
-                                    .buf
-                                    .char_at(probe)
-                                    .is_some_and(|c| c.is_ascii_digit())
+                                && ctx.buf.char_at(probe).is_some_and(|c| c.is_ascii_digit())
                             {
                                 found = Some(probe);
                                 break;
                             }
-                            probe += ctx
-                                .buf
-                                .char_at(probe)
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(1);
+                            probe += ctx.buf.char_at(probe).map(|c| c.len_utf8()).unwrap_or(1);
                         }
                         if let Some(at) = found {
                             self.cursor.offset = at;
@@ -6337,7 +6419,7 @@ impl VimState {
                     _ => crate::mode::VisualKind::Char,
                 };
                 self.pending_visual_marks = Some((line_span.start, line_span.end, kind));
-        self.pending_visual_cursor = Some(self.cursor.offset);
+                self.pending_visual_cursor = Some(self.cursor.offset);
                 let count = self.take_total_count();
                 let gen_before = self.edit_generation;
                 self.begin_edit();
@@ -6471,14 +6553,7 @@ impl VimState {
                 self.reset_pending();
                 return false;
             }
-            let span = ops::span_from_motion(
-                    self,
-                    ctx.buf,
-                    motion,
-                    result,
-                    count,
-                    self.op,
-                );
+            let span = ops::span_from_motion(self, ctx.buf, motion, result, count, self.op);
             self.complete_operator_with_span(ctx, span);
         } else if !self.goto_motion(ctx, motion, count) {
             self.fail_replay(ctx);
@@ -6596,7 +6671,7 @@ impl VimState {
                 // in the lowercase slot on stop
                 let slot = if c == '"' { c } else { c.to_ascii_lowercase() };
                 let seed = if c.is_ascii_uppercase() {
-                    self.macros.get(&slot).cloned().unwrap_or_default()
+                    self.macro_table().get(&slot).cloned().unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -6637,23 +6712,24 @@ impl VimState {
                 // survive the round trip).
                 if let Some(r) = reg {
                     if r.is_ascii_lowercase() {
-                        let gen = self.registers.write_gen;
+                        let gen = self.regs().write_gen;
                         let synced = self.macro_sync_gen.get(&r) == Some(&gen);
                         if !synced {
-                            match self.registers.named_text(r) {
+                            let named = self.regs().named_text(r);
+                            match named {
                                 Some(data) => {
                                     let steps = Self::macro_text_to_steps(&data);
-                                    self.macros.insert(r, steps);
+                                    self.macro_table().insert(r, steps);
                                     self.macro_sync_gen.insert(r, gen);
                                 }
                                 None => {
-                                    self.macros.remove(&r);
+                                    self.macro_table().remove(&r);
                                 }
                             }
                         }
                     }
                 }
-                match reg.and_then(|r| self.macros.get(&r).map(|keys| (r, keys.clone()))) {
+                match reg.and_then(|r| self.macro_table().get(&r).map(|keys| (r, keys.clone()))) {
                     Some((r, keys)) => {
                         // remember the RESOLVED register: for `@@` the pressed
                         // key is '@' itself, which is not a stored macro
@@ -6679,8 +6755,7 @@ impl VimState {
                 // bell (`:h mark-motions`: "E20: Mark 'a not set" — same text
                 // the Ex range parser reports for `:'a`).
                 if self.marks.resolve(c, ctx.buf).is_none() {
-                    ctx.host
-                        .status_message(&format!("E20: Mark '{c} not set"));
+                    ctx.host.status_message(&format!("E20: Mark '{c} not set"));
                 }
                 if !self.char_arg_motion_jump(ctx, Motion::MarkJump { linewise }) {
                     return ProcessOutcome::Consumed;
@@ -6728,7 +6803,7 @@ impl VimState {
 
     /// Debug-only: register text.
     pub fn debug_reg(&self, name: char) -> Option<String> {
-        self.registers.named_text(name)
+        self.regs().named_text(name)
     }
 
     /// Debug-only: quote state.
@@ -6740,5 +6815,4 @@ impl VimState {
     pub fn debug_mark(&self, name: char) -> Option<usize> {
         self.marks.get(name)
     }
-
 }

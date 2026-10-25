@@ -221,7 +221,7 @@ fn linewise_put_keeps_trailing_empty_lines() {
     // p past the end of the buffer (last line without a newline): ["a",""]
     let mut f2 = Fixture::new("z");
     f2.vim
-        .registers
+        .registers.lock().unwrap()
         .store_yank(None, "a\n\n".into(), RegisterKind::Linewise);
     f2.feed(["p"]);
     // the byte text of ["z","a",""] gets a final newline appended per 'fixendofline': "z\na\n\n"

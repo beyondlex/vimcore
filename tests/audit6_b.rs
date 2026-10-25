@@ -44,7 +44,7 @@ fn hex_encode(s: &str) -> String {
 }
 
 fn reg_payload(f: &Fixture) -> String {
-    match f.vim.registers.get('"') {
+    match f.vim.registers.lock().unwrap().get('"') {
         None => "-".to_owned(),
         Some(r) => {
             let kind = match r.kind {

@@ -94,7 +94,7 @@ fn ring_shift_clears_recorded_numbered_registers() {
     let mut f = Fixture::new("hello\nworld\n");
     f.feed(["q", "2", "x", "q"]); // "2 = 'x' (recording also executes)
     assert_eq!(
-        f.vim.registers.get('2').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('2').cloned().map(|r| r.text.clone()),
         Some("x".to_owned()),
         "shape self-check: q2 lands in the numbered register"
     );
@@ -135,7 +135,7 @@ fn uppercase_append_charwise_then_blockwise_stays_charwise() {
     f.feed_raw(Key::ctrl_char('v'));
     f.feed(["j"]); // block 2×1: 'a'/'c'
     f.feed(["\"", "A", "y"]); // append the block
-    let r = f.vim.registers.get('a');
+    let r = f.vim.registers.lock().unwrap().get('a').cloned();
     assert_eq!(
         r.as_ref().map(|r| r.text.clone()),
         Some("fooa\nc".to_owned()),
@@ -156,7 +156,7 @@ fn uppercase_append_blockwise_then_charwise_keeps_rows() {
     f.feed(["\"", "a", "y"]); // a = block
     f.feed(["v", "i", "w"]); // select 'ab' (charwise)
     f.feed(["\"", "A", "y"]); // append unnamed (charwise 'ab')
-    let r = f.vim.registers.get('a');
+    let r = f.vim.registers.lock().unwrap().get('a').cloned();
     assert_eq!(
         r.map(|r| (r.text.clone(), r.kind)),
         Some(("a\nc\nab".to_owned(), RegisterKind::Blockwise)),
@@ -447,7 +447,7 @@ fn falsified_change_writes_small_delete_register() {
     f.type_text("X");
     f.feed(["<Esc>"]);
     assert_eq!(
-        f.vim.registers.get('-').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('-').cloned().map(|r| r.text.clone()),
         Some("ab".to_owned()),
         "vim 9.1: cw's deleted text goes into \"- (cw does not include trailing whitespace)"
     );
@@ -459,7 +459,7 @@ fn falsified_consecutive_small_deletes_overwrite_dash() {
     let mut f = Fixture::new("aa bb cc\n");
     f.feed(["d", "w", "d", "w"]);
     assert_eq!(
-        f.vim.registers.get('-').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('-').cloned().map(|r| r.text.clone()),
         Some("bb ".to_owned()),
         "vim 9.1: the second dw overwrites \"- (not concatenated)"
     );
@@ -514,7 +514,7 @@ fn falsified_put_leaves_register_untouched() {
     f.feed(["w", "p"]);
     f.feed(["p"]);
     assert_eq!(
-        f.vim.registers.get(UNNAMED).map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get(UNNAMED).map(|r| r.text.clone()),
         Some("xy".to_owned()),
         "vim 9.1: pasting does not write the register"
     );

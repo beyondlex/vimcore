@@ -125,7 +125,7 @@ fn r36_3_self_replaying_macro_terminates_with_a_bounded_queue() {
 fn r36_4_recursive_at_command_stops_at_e169() {
     let mut f = Fixture::new("foo\nbar\n");
     f.vim
-        .registers
+        .registers.lock().unwrap()
         .store_named_plain('b', "@b".to_owned());
     f.feed([":", "@", "b", "<CR>"]);
     assert!(
@@ -153,9 +153,9 @@ fn r36_4_recursive_at_command_stops_at_e169() {
 #[test]
 fn r36_5_shallow_at_nesting_still_runs() {
     let mut f = Fixture::new("l1\nl2\nl3\n");
-    f.vim.registers.store_named_plain('b', "2".to_owned());
+    f.vim.registers.lock().unwrap().store_named_plain('b', "2".to_owned());
     f.vim
-        .registers
+        .registers.lock().unwrap()
         .store_named_plain('a', "@b\n3".to_owned());
     f.feed([":", "@", "a", "<CR>"]);
     assert!(

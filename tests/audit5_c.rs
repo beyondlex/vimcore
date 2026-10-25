@@ -91,12 +91,12 @@ fn regone_named_delete_via_percent_writes_register_one() {
     let mut f = Fixture::new("(12)3\n");
     f.feed(["\"", "a", "d", "%"]);
     assert_eq!(
-        f.vim.registers.get('1').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('1').cloned().map(|r| r.text.clone()),
         Some("(12)".to_owned()),
         "vim 9.1: \"ad% writes both \"a and the numbered ring \"1 (use_reg_one)"
     );
     assert_eq!(
-        f.vim.registers.get('-'),
+        f.vim.registers.lock().unwrap().get('-'),
         None,
         "vim 9.1: a use_reg_one delete with a named register does not write \"-"
     );
@@ -112,12 +112,12 @@ fn regone_unnamed_delete_via_percent_writes_both_one_and_small() {
     let mut f = Fixture::new("(12)3\n");
     f.feed(["d", "%"]);
     assert_eq!(
-        f.vim.registers.get('1').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('1').cloned().map(|r| r.text.clone()),
         Some("(12)".to_owned()),
         "vim 9.1: d% writes the numbered ring \"1"
     );
     assert_eq!(
-        f.vim.registers.get('-').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('-').cloned().map(|r| r.text.clone()),
         Some("(12)".to_owned()),
         "vim 9.1: d% also writes the small-delete register \"- (both the shift \
          block and the small-delete block fire)"
@@ -136,12 +136,12 @@ fn regone_search_delete_writes_register_one() {
     f.feed(["a", "b", "c", "<CR>"]);
     assert_eq!(f.text(), "abc\n", "shape self-check: d/pat deletes up to the match");
     assert_eq!(
-        f.vim.registers.get('1').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('1').cloned().map(|r| r.text.clone()),
         Some("abc ".to_owned()),
         "vim 9.1: d/pat writes \"1 via use_reg_one"
     );
     assert_eq!(
-        f.vim.registers.get('-').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('-').cloned().map(|r| r.text.clone()),
         Some("abc ".to_owned()),
         "vim 9.1: d/pat also writes \"-"
     );
@@ -161,12 +161,12 @@ fn regone_brace_delete_writes_register_one() {
     f.feed(["d", "}"]);
     assert_eq!(f.text(), "one \n\nzzz\n", "shape self-check: d}} only deletes to the paragraph end");
     assert_eq!(
-        f.vim.registers.get('1').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('1').cloned().map(|r| r.text.clone()),
         Some("two".to_owned()),
         "vim 9.1: single-line d}} writes \"1 via use_reg_one"
     );
     assert_eq!(
-        f.vim.registers.get('-').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('-').cloned().map(|r| r.text.clone()),
         Some("two".to_owned()),
         "vim 9.1: single-line d}} also writes \"-"
     );
@@ -321,7 +321,7 @@ fn multiline_charwise_put_cursor_lands_on_first_char() {
     let mut f = Fixture::new("b\nc\nhello\n");
     f.feed(["g", "g", "v", "j", "y"]); // charwise 'b\nc'
     assert_eq!(
-        f.vim.registers.get('"').map(|r| (r.text.clone(), r.kind)),
+        f.vim.registers.lock().unwrap().get('"').cloned().map(|r| (r.text.clone(), r.kind)),
         Some(("b\nc".to_owned(), RegisterKind::Charwise)),
         "shape self-check: a cross-line visual yank yields a charwise multiline register"
     );
@@ -427,12 +427,12 @@ fn visual_capital_p_keeps_the_put_register() {
     f.feed(["0", "v", "i", "w", "P"]); // paste 'def' over 'abc'
     assert_eq!(f.text(), "def def\n", "shape self-check: P pastes the yanked 'def'");
     assert_eq!(
-        f.vim.registers.get('"').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone()),
         Some("def".to_owned()),
         "vim 9.1: visual P does not swap — unnamed keeps the paste source"
     );
     assert_eq!(
-        f.vim.registers.get('-'),
+        f.vim.registers.lock().unwrap().get('-'),
         None,
         "vim 9.1: visual P's replaced text goes to the blackhole; \"- is not set"
     );
@@ -463,7 +463,7 @@ fn block_visual_capital_p_keeps_registers() {
         "shape self-check: block P pastes 'XY' over two rows (the first line, outside the block, stays as-is)"
     );
     assert_eq!(
-        f.vim.registers.get('"').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone()),
         Some("XY".to_owned()),
         "vim 9.1: blockwise visual P does not swap — unnamed keeps the paste source"
     );
@@ -609,7 +609,7 @@ fn undo_restores_the_visual_selection_for_gv() {
     // draft's 'abcd' was a typo (report text did not match the writefile
     // output). The engine agrees; this probe turns into a regression pin.
     assert_eq!(
-        f.vim.registers.get('"').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone()),
         Some("abc".to_owned()),
         "oracle 'abc': after dd+u, gv reselects the original span on the restored text"
     );

@@ -2456,7 +2456,7 @@ fn gv_after_linewise_delete_still_targets_the_surviving_line() {
 // ---- round 28: empty linewise delete leaves registers alone (vim 9.1 PTY probe) ---
 
 fn unnamed(f: &Fixture) -> Option<String> {
-    f.vim.registers.get('"').map(|r| r.text.clone())
+    f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone())
 }
 
 #[test]
@@ -2478,7 +2478,7 @@ fn empty_linewise_delete_leaves_registers_alone() {
         f.feed(keys.iter().copied());
         assert_eq!(f.text(), "");
         assert_eq!(unnamed(&f), None, "keys {keys:?} must not write unnamed");
-        assert_eq!(f.vim.registers.get('1').map(|r| r.text.clone()), None);
+        assert_eq!(f.vim.registers.lock().unwrap().get('1').cloned().map(|r| r.text.clone()), None);
     }
 }
 
@@ -2493,7 +2493,7 @@ fn empty_linewise_yank_stores_an_empty_line() {
     let mut f = Fixture::new("");
     f.feed(["y", "y"]);
     assert_eq!(unnamed(&f), Some(String::new()));
-    assert_eq!(f.vim.registers.get('0').map(|r| r.text.clone()), Some(String::new()));
+    assert_eq!(f.vim.registers.lock().unwrap().get('0').cloned().map(|r| r.text.clone()), Some(String::new()));
     f.feed(["p"]);
     assert_eq!(f.text(), "\n\n", "empty-buffer yy+p opens one empty line (vim lines=1→2)");
 }
@@ -2595,7 +2595,7 @@ fn block_dollar_yank_register_is_unpadded() {
     // vim 9.1 probe (:reg): a $ block yank's register holds unpadded whole-row text
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "$", "y"]);
-    let reg = f.vim.registers.get('"').expect("unnamed set");
+    let reg = f.vim.registers.lock().unwrap().get('"').cloned().expect("unnamed set");
     assert_eq!(reg.text, "long line here\nabc");
     assert_eq!(reg.kind, vimcore::registers::RegisterKind::Blockwise);
 }
@@ -2609,10 +2609,10 @@ fn block_delete_stores_the_block_for_paste() {
     // wrote no register at all.
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "l", "d"]);
-    let reg = f.vim.registers.get('"').expect("unnamed set");
+    let reg = f.vim.registers.lock().unwrap().get('"').cloned().expect("unnamed set");
     assert_eq!(reg.text, "lon\nabc");
     assert_eq!(reg.kind, vimcore::registers::RegisterKind::Blockwise);
-    assert_eq!(f.vim.registers.get('0'), None, "delete must not enter \"0");
+    assert_eq!(f.vim.registers.lock().unwrap().get('0'), None, "delete must not enter \"0");
     // p pastes it back
     f.feed(["g", "g", "0", "p"]);
     assert_eq!(f.text(), "glon line here\n abc\ndef\n");
@@ -2643,7 +2643,7 @@ fn block_yank_keeps_rows_unpadded() {
     // padding is a put-side concern).
     let mut f = Fixture::at("long line here\nabc\ndef\n", 0, 0);
     f.feed(["<C-v>", "j", "l", "l", "y"]);
-    let reg = f.vim.registers.get('"').expect("unnamed set");
+    let reg = f.vim.registers.lock().unwrap().get('"').cloned().expect("unnamed set");
     assert_eq!(reg.text, "lon\nabc");
 }
 
@@ -2672,7 +2672,7 @@ fn visual_put_leaves_the_explicit_paste_register_alone() {
     f.feed(["w", "v", "i", "w", "\"", "a", "p"]);
     assert_eq!(f.text(), "aaa aaa\n");
     assert_eq!(
-        f.vim.registers.get('a').map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get('a').cloned().map(|r| r.text.clone()),
         Some("aaa".to_owned()),
         "the source register must not be overwritten by the deleted text"
     );

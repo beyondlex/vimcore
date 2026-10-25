@@ -112,12 +112,12 @@ fn till_finds_within_line_still_works() {
 fn uppercase_register_appends() {
     let mut f = Fixture::at("one\ntwo\nthree\n", 0, 0);
     f.feed(["\"", "a", "y", "y", "j", "\"", "A", "y", "y"]);
-    let reg = f.vim.registers.get('a').cloned().expect("register a");
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().expect("register a");
     assert_eq!(reg.text, "one\ntwo\n");
     assert_eq!(reg.kind, RegisterKind::Linewise);
     // unnamed points at the merged whole (vim: the unnamed register is an alias of
     // the last written register)
-    let unnamed = f.vim.registers.get(UNNAMED).cloned().unwrap();
+    let unnamed = f.vim.registers.lock().unwrap().get(UNNAMED).cloned().unwrap();
     assert_eq!(unnamed.text, "one\ntwo\n");
 }
 
@@ -125,7 +125,7 @@ fn uppercase_register_appends() {
 fn uppercase_charwise_append() {
     let mut f = Fixture::at("abcd", 0, 0);
     f.feed(["\"", "a", "y", "l", "l", "\"", "A", "y", "l"]);
-    let reg = f.vim.registers.get('a').cloned().unwrap();
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().unwrap();
     assert_eq!(reg.text, "ab", "charwise append should concatenate into the same register");
     assert_eq!(reg.kind, RegisterKind::Charwise);
 }
@@ -374,11 +374,11 @@ fn yank_register_roundtrip_intact() {
     let mut f = Fixture::at("hello", 0, 0);
     f.feed(["y", "y"]);
     assert_eq!(
-        f.vim.registers.get(YANK).map(|r| r.text.clone()),
+        f.vim.registers.lock().unwrap().get(YANK).map(|r| r.text.clone()),
         Some("hello".into())
     );
     assert_eq!(
-        f.vim.registers.get(CLIPBOARD),
+        f.vim.registers.lock().unwrap().get(CLIPBOARD),
         None,
         "an explicit yank must not touch the + register"
     );

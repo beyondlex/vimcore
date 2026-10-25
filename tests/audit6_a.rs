@@ -295,7 +295,7 @@ fn k_mark_command_missing() {
 fn at_register_executes_ex() {
     let mut f = Fixture::new("a\nb\nc\n");
     f.vim
-        .registers
+        .registers.lock().unwrap()
         .store_yank(Some('a'), "1,2d\n".into(), vimcore::registers::RegisterKind::Linewise);
     ex(&mut f, "@a");
     assert!(
@@ -530,7 +530,7 @@ fn delete_reports_fewer_lines() {
 fn put_reports_more_lines() {
     let mut f = Fixture::new("a\n");
     f.vim
-        .registers
+        .registers.lock().unwrap()
         .store_yank(Some('a'), "x\ny\nz\n".into(), vimcore::registers::RegisterKind::Linewise);
     ex(&mut f, "pu a");
     assert!(
@@ -551,7 +551,7 @@ fn put_reports_more_lines() {
 fn yank_reports_lines_yanked() {
     let mut f = Fixture::new("a\nb\nc\nd\n");
     ex(&mut f, "2y 7");
-    let got = f.vim.registers.get('"').map(|r| r.text.clone());
+    let got = f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone());
     assert_eq!(
         got.as_deref(),
         Some("b\nc\nd\n"),
@@ -635,7 +635,7 @@ fn yank_count_zero_is_e939() {
     );
     assert!(
         f.vim
-            .registers
+            .registers.lock().unwrap()
             .get('0')
             .map(|r| r.text.is_empty())
             .unwrap_or(true),
@@ -788,7 +788,7 @@ fn global_command_still_e492_recorded_divergence() {
 fn backward_search_address_with_offset() {
     let mut f = Fixture::at("a\nb\nc\n", 2, 0);
     ex(&mut f, "?a?+1y b");
-    let got = f.vim.registers.get('b').map(|r| r.text.clone());
+    let got = f.vim.registers.lock().unwrap().get('b').cloned().map(|r| r.text.clone());
     assert_eq!(
         got.as_deref(),
         Some("b\n"),

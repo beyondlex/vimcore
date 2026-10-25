@@ -91,7 +91,10 @@ fn run_macro_with_undo(declares_undo: bool) -> GateHost {
 #[test]
 fn undeclared_host_is_not_asked_to_undo_during_replay() {
     let host = run_macro_with_undo(false);
-    assert_eq!(host.undo_calls, 1, "only the recording-phase u asks the host");
+    assert_eq!(
+        host.undo_calls, 1,
+        "only the recording-phase u asks the host"
+    );
     assert!(host.bells >= 1, "the replayed u bells");
     assert_eq!(
         host.text.borrow().as_str(),

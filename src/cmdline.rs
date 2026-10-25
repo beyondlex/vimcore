@@ -509,8 +509,7 @@ impl VimState {
                 // 9.1 oracle, audit F4; the old path ignored the offset)
                 let end = match self.search.offset {
                     Some(off) => {
-                        let anchored =
-                            search::offset_target(self, ctx.buf, &off).unwrap_or(target);
+                        let anchored = search::offset_target(self, ctx.buf, &off).unwrap_or(target);
                         if matches!(off.anchor, search::OffsetAnchor::End) {
                             anchored + 1
                         } else {
@@ -593,8 +592,10 @@ impl VimState {
                 self.cursor.desired_col = None;
                 // the live `'<`/`'>` range follows the extended selection
                 if let Some(anchor) = self.visual_anchor {
-                    let (lo, hi) =
-                        (anchor.min(self.cursor.offset), anchor.max(self.cursor.offset));
+                    let (lo, hi) = (
+                        anchor.min(self.cursor.offset),
+                        anchor.max(self.cursor.offset),
+                    );
                     let end = crate::buffer::next_grapheme_offset(ctx.buf, hi).unwrap_or(hi);
                     self.marks.active_visual = Some((lo, end));
                 }
@@ -780,7 +781,8 @@ impl VimState {
                 return KeyResult::Consumed;
             }
             if let Some(name) = key.printable_char() {
-                if let Some(data) = self.registers.get_for_paste(name, ctx.host) {
+                let pasted = self.regs().get_for_paste(name, ctx.host);
+                if let Some(data) = pasted {
                     self.cmdline.insert_str(&data.text);
                     if self.options.incsearch && matches!(prompt, '/' | '?') {
                         let pattern = self.cmdline.buffer.clone();
@@ -813,9 +815,8 @@ impl VimState {
                         if expr.is_empty() {
                             ctx.host.status_message("E15: Invalid expression: ''");
                         } else {
-                            ctx.host.status_message(&format!(
-                                "E121: Undefined variable: {expr}"
-                            ));
+                            ctx.host
+                                .status_message(&format!("E121: Undefined variable: {expr}"));
                         }
                     }
                 }
@@ -956,8 +957,7 @@ impl VimState {
                             match &self.cmdline.last_expression {
                                 Some(last) => entry = last.clone(),
                                 None => {
-                                    ctx.host
-                                        .status_message("E15: Invalid expression: ^@");
+                                    ctx.host.status_message("E15: Invalid expression: ^@");
                                     self.fail_replay(ctx);
                                     return KeyResult::Consumed;
                                 }
@@ -974,7 +974,7 @@ impl VimState {
                                     self.mode = Mode::Insert;
                                     self.insert_text_at_cursor(ctx, &text);
                                 } else {
-                                    self.registers.store_expression(text);
+                                    self.regs().store_expression(text);
                                     // the `"=` prefix stays SELECTED for the
                                     // next command: the following `p` reads
                                     // the `=` register, like vim
@@ -1009,7 +1009,7 @@ impl VimState {
                         if !entry.is_empty() {
                             self.cmdline.last_command = Some(entry.clone());
                             // sync the `": register too (audit D3)
-                            self.registers.store_last_command(entry.clone());
+                            self.regs().store_last_command(entry.clone());
                         }
                         let gen_before = self.edit_generation;
                         self.execute_ex(ctx, &entry);
@@ -1119,8 +1119,7 @@ impl VimState {
             } else {
                 saved_prefix.clone().unwrap_or_else(|| derived.clone())
             };
-            let Some(history) = self.cmdline.history.get(&Cmdline::history_key(prompt))
-            else {
+            let Some(history) = self.cmdline.history.get(&Cmdline::history_key(prompt)) else {
                 return KeyResult::Consumed;
             };
             if history.is_empty() {
@@ -1450,8 +1449,8 @@ impl VimState {
             // `nohlsearch` — the old list stopped at `nohls` and E492'd on
             // the trained-muscle `:nohlse` (round17)
             "noh" | "nohl" | "nohls" | "nohlse" | "nohlsea" | "nohlsear" | "nohlsearc"
-            | "nohlsearch" | "noh!" | "nohl!" | "nohls!" | "nohlse!" | "nohlsea!"
-            | "nohlsear!" | "nohlsearc!" | "nohlsearch!" => {
+            | "nohlsearch" | "noh!" | "nohl!" | "nohls!" | "nohlse!" | "nohlsea!" | "nohlsear!"
+            | "nohlsearc!" | "nohlsearch!" => {
                 search::clear_highlights(self, ctx);
                 return;
             }
@@ -1503,7 +1502,7 @@ impl VimState {
             // old exact-match arm E492'd on any argument)
             line if line == "reg" || line == "registers" => {
                 ctx.host.status_message("Type Name Content");
-                for (name, reg) in self.registers.items() {
+                for (name, reg) in self.regs().items() {
                     ctx.host.status_message(&Self::register_line(name, &reg));
                 }
                 return;
@@ -1515,7 +1514,7 @@ impl VimState {
                 let names = line.split_once(' ').unwrap().1;
                 for name in names.split_whitespace() {
                     for c in name.chars() {
-                        if let Some(reg) = self.registers.get(c) {
+                        if let Some(reg) = self.regs().get(c) {
                             ctx.host.status_message(&Self::register_line(c, reg));
                         }
                     }
@@ -1655,7 +1654,9 @@ impl VimState {
         }
         // :{range}>[count] / :{range}<[count] — Ex shift (ex_operators)
         if let Some((right, amount, count_str, flags)) = Self::parse_shift(line) {
-            self.ex_shift(ctx, raw_range, right, amount, &count_str, &flags, &full_line);
+            self.ex_shift(
+                ctx, raw_range, right, amount, &count_str, &flags, &full_line,
+            );
             return;
         }
         // :@{reg} — execute a register's content as Ex command lines
@@ -1679,13 +1680,13 @@ impl VimState {
                     .iter()
                     .find_map(|cmd| Self::boundary_cmd(line, cmd))
                     .map(|rest| (Align::Left, rest))
-        }) {
+            })
+        {
             let (how, rest) = rest;
-            let (first, last) =
-                raw_range.unwrap_or_else(|| {
-                    let cur = ctx.buf.offset_to_line(self.cursor.offset);
-                    (cur, cur)
-                });
+            let (first, last) = raw_range.unwrap_or_else(|| {
+                let cur = ctx.buf.offset_to_line(self.cursor.offset);
+                (cur, cur)
+            });
             self.ex_align(ctx, (first, last), how, rest.trim(), &full_line);
             return;
         }
@@ -1701,7 +1702,10 @@ impl VimState {
             // it as a count and dropped it, pasting the unnamed register)
             let register = match arg.split_whitespace().next() {
                 None => None,
-                Some(tok) if tok.chars().count() == 1 && !tok.chars().next().unwrap().is_ascii_digit() => {
+                Some(tok)
+                    if tok.chars().count() == 1
+                        && !tok.chars().next().unwrap().is_ascii_digit() =>
+                {
                     match Self::parse_reg_count(arg) {
                         Ok((reg, _)) => reg,
                         Err(token) => {
@@ -1730,11 +1734,10 @@ impl VimState {
             .iter()
             .find_map(|cmd| Self::boundary_cmd(line, cmd))
         {
-            let (first, last) =
-                raw_range.unwrap_or_else(|| {
-                    let cur = ctx.buf.offset_to_line(self.cursor.offset);
-                    (cur, cur)
-                });
+            let (first, last) = raw_range.unwrap_or_else(|| {
+                let cur = ctx.buf.offset_to_line(self.cursor.offset);
+                (cur, cur)
+            });
             self.ex_retab(ctx, (first, last), rest.trim(), &full_line);
             return;
         }
@@ -1800,8 +1803,7 @@ impl VimState {
         // The bare forms route through the normal `:d` path below.
         if let Some((rest, print_flags)) = Self::delete_print_form(line) {
             if rest.starts_with('!') {
-                ctx.host
-                    .status_message("E477: No ! allowed");
+                ctx.host.status_message("E477: No ! allowed");
                 self.fail_replay(ctx);
                 return;
             }
@@ -1837,8 +1839,7 @@ impl VimState {
         {
             // `:d!` is not a thing in vim — E477, nothing deleted (probe 9.1)
             if rest.starts_with('!') {
-                ctx.host
-                    .status_message("E477: No ! allowed");
+                ctx.host.status_message("E477: No ! allowed");
                 self.fail_replay(ctx);
                 return;
             }
@@ -1866,8 +1867,7 @@ impl VimState {
         {
             // `:y!` is E477 like `:d!` (probe 9.1)
             if rest.starts_with('!') {
-                ctx.host
-                    .status_message("E477: No ! allowed");
+                ctx.host.status_message("E477: No ! allowed");
                 self.fail_replay(ctx);
                 return;
             }
@@ -1968,8 +1968,9 @@ impl VimState {
             return false;
         }
         if SUBSTITUTE_SPELLINGS.iter().any(|cmd| {
-            line.strip_prefix(cmd)
-                .is_some_and(|r| r.is_empty() || !r.chars().next().is_some_and(char::is_alphanumeric))
+            line.strip_prefix(cmd).is_some_and(|r| {
+                r.is_empty() || !r.chars().next().is_some_and(char::is_alphanumeric)
+            })
         }) {
             return true;
         }
@@ -1989,10 +1990,11 @@ impl VimState {
             PUT_SPELLINGS,
             RETAB_SPELLINGS,
         ];
-        if edit_tables
-            .iter()
-            .any(|table| table.iter().any(|cmd| Self::boundary_cmd_count(line, cmd).is_some()))
-        {
+        if edit_tables.iter().any(|table| {
+            table
+                .iter()
+                .any(|cmd| Self::boundary_cmd_count(line, cmd).is_some())
+        }) {
             return true;
         }
         // `:dl`/`:dp`/`:dell`… — `:delete` + print flags
@@ -2001,7 +2003,11 @@ impl VimState {
         }
         if [CENTER_SPELLINGS, RIGHT_SPELLINGS, LEFT_SPELLINGS]
             .iter()
-            .any(|table| table.iter().any(|cmd| Self::boundary_cmd(line, cmd).is_some()))
+            .any(|table| {
+                table
+                    .iter()
+                    .any(|cmd| Self::boundary_cmd(line, cmd).is_some())
+            })
         {
             return true;
         }
@@ -2009,8 +2015,12 @@ impl VimState {
             return true;
         }
         // :co[py] — the long spelling of `:t`
-        if line.strip_prefix("co").is_some_and(|r| r.is_empty() || r.starts_with(' '))
-            || line.strip_prefix("copy").is_some_and(|r| r.is_empty() || r.starts_with(' '))
+        if line
+            .strip_prefix("co")
+            .is_some_and(|r| r.is_empty() || r.starts_with(' '))
+            || line
+                .strip_prefix("copy")
+                .is_some_and(|r| r.is_empty() || r.starts_with(' '))
         {
             return true;
         }
@@ -2030,7 +2040,10 @@ impl VimState {
         let buf_last = buf.line_count().saturating_sub(1);
         let last = last.min(buf_last);
         let first = if count >= 1 { last } else { first.min(last) };
-        (first, last.saturating_add(count.saturating_sub(1)).min(buf_last))
+        (
+            first,
+            last.saturating_add(count.saturating_sub(1)).min(buf_last),
+        )
     }
 
     /// `cmd` at the line start with a command boundary (end, space, `!`).
@@ -2115,9 +2128,9 @@ impl VimState {
                                 })
                                 .unwrap_or(tail.len());
                             let rest2 = &tail[flags_end..];
-                            return rest2.starts_with('|').then_some(
-                                word_end + i + c.len_utf8() + flags_end,
-                            );
+                            return rest2
+                                .starts_with('|')
+                                .then_some(word_end + i + c.len_utf8() + flags_end);
                         }
                     }
                     i += c.len_utf8();
@@ -2447,7 +2460,12 @@ impl VimState {
         while let Some(c) = chars.next() {
             match c {
                 // `&` is the whole match; `\&` the literal ampersand
-                '&' => push_text(&mut out, caps.get(0).map(|m| m.as_str()).unwrap_or(""), &mut range_case, &mut one_case),
+                '&' => push_text(
+                    &mut out,
+                    caps.get(0).map(|m| m.as_str()).unwrap_or(""),
+                    &mut range_case,
+                    &mut one_case,
+                ),
                 // `~` inserts the previous replacement verbatim (no
                 // re-expansion — the stored template's specials stay
                 // literal, matching vim's "previous replace string")
@@ -2459,7 +2477,9 @@ impl VimState {
                 }
                 '\\' => match chars.next() {
                     None => out.push('\\'),
-                    Some(e) if e == sep => push_text(&mut out, &e.to_string(), &mut range_case, &mut one_case),
+                    Some(e) if e == sep => {
+                        push_text(&mut out, &e.to_string(), &mut range_case, &mut one_case)
+                    }
                     Some('\\') => out.push('\\'),
                     Some('&') => out.push('&'),
                     Some('~') => out.push('~'),
@@ -2477,7 +2497,12 @@ impl VimState {
                     }
                     Some(d @ '0'..='9') => {
                         let n = d as usize - '0' as usize;
-                        push_text(&mut out, group_text(caps, n), &mut range_case, &mut one_case);
+                        push_text(
+                            &mut out,
+                            group_text(caps, n),
+                            &mut range_case,
+                            &mut one_case,
+                        );
                     }
                     // unknown escape: keep it verbatim (vim errors; the
                     // engine stays permissive like the old unescaper)
@@ -2634,8 +2659,7 @@ impl VimState {
         } else if delta != 0 && self.cursor.offset > ctx.buf.line_start(first) {
             self.cursor.offset = (self.cursor.offset as isize + delta).max(0) as usize;
         }
-        self.cursor.offset =
-            crate::buffer::floor_to_char_boundary(ctx.buf, self.cursor.offset);
+        self.cursor.offset = crate::buffer::floor_to_char_boundary(ctx.buf, self.cursor.offset);
         self.cursor.desired_col = None;
     }
 
@@ -2643,16 +2667,11 @@ impl VimState {
     /// optionally filtered to argument names (`:marks a` — audit G9). Kept
     /// out of `execute_ex` so the argument form and the bare form share one
     /// row set.
-    fn list_marks(
-        &mut self,
-        ctx: &mut Ctx,
-        listed: &[(char, usize)],
-        filter: Option<&str>,
-    ) {
+    fn list_marks(&mut self, ctx: &mut Ctx, listed: &[(char, usize)], filter: Option<&str>) {
         // The filter is vim's raw argument, treated as a SET of mark-name
         // characters (`:marks az` asks for `a` and `z`; `vim_strchr(arg, c)`).
-        let names: Option<Vec<char>> = filter
-            .map(|s| s.split_whitespace().flat_map(|t| t.chars()).collect());
+        let names: Option<Vec<char>> =
+            filter.map(|s| s.split_whitespace().flat_map(|t| t.chars()).collect());
         let wants = |name: char| names.as_ref().is_none_or(|f| f.contains(&name));
         // Collect rows FIRST: vim's show_one_mark prints the title row
         // LAZILY, only once a mark has matched (mark.c). A filter that
@@ -2742,8 +2761,18 @@ impl VimState {
                     name.is_ascii_alphanumeric()
                         || matches!(
                             name,
-                            '"' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | '.' | '^'
-                                | '\'' | '`'
+                            '"' | '<'
+                                | '>'
+                                | '['
+                                | ']'
+                                | '('
+                                | ')'
+                                | '{'
+                                | '}'
+                                | '.'
+                                | '^'
+                                | '\''
+                                | '`'
                         )
                 };
                 if !valid(name) {
@@ -2768,24 +2797,32 @@ impl VimState {
             // One search segment: the first match line strictly AFTER the
             // anchor (BEFORE for `?`), wrapping like vim's searchit; the
             // anchor is the previous segment's line, or the cursor line.
-            let search_line = |pattern: &str, backward: bool, from: usize| -> Result<usize, String> {
-                let matches = crate::search::all_matches(vim, ctx.buf, pattern);
-                if matches.is_empty() {
-                    return Err(format!("E486: Pattern not found: {pattern}"));
-                }
-                let mut lines: Vec<usize> = matches
-                    .iter()
-                    .map(|m| ctx.buf.offset_to_line(m.start))
-                    .collect();
-                lines.dedup();
-                Ok(if backward {
-                    lines.iter().rev().find(|l| **l < from).copied()
-                        .unwrap_or(*lines.last().unwrap())
-                } else {
-                    lines.iter().find(|l| **l > from).copied()
-                        .unwrap_or(*lines.first().unwrap())
-                })
-            };
+            let search_line =
+                |pattern: &str, backward: bool, from: usize| -> Result<usize, String> {
+                    let matches = crate::search::all_matches(vim, ctx.buf, pattern);
+                    if matches.is_empty() {
+                        return Err(format!("E486: Pattern not found: {pattern}"));
+                    }
+                    let mut lines: Vec<usize> = matches
+                        .iter()
+                        .map(|m| ctx.buf.offset_to_line(m.start))
+                        .collect();
+                    lines.dedup();
+                    Ok(if backward {
+                        lines
+                            .iter()
+                            .rev()
+                            .find(|l| **l < from)
+                            .copied()
+                            .unwrap_or(*lines.last().unwrap())
+                    } else {
+                        lines
+                            .iter()
+                            .find(|l| **l > from)
+                            .copied()
+                            .unwrap_or(*lines.first().unwrap())
+                    })
+                };
             let mut rest = spec;
             let mut current: Option<usize> = None;
             loop {
@@ -2848,10 +2885,7 @@ impl VimState {
                     }
                 }
                 let reuse = c == '\\'
-                    && matches!(
-                        rest[1..].chars().next(),
-                        Some('/') | Some('?') | Some('&')
-                    );
+                    && matches!(rest[1..].chars().next(), Some('/') | Some('?') | Some('&'));
                 if c == '/' || c == '?' || reuse {
                     let (backward, consumed) = if reuse {
                         let backward = rest[1..].starts_with('?');
@@ -2888,11 +2922,7 @@ impl VimState {
                         // simplification)
                         match vim.search.pattern.clone() {
                             Some(p) => inner = p,
-                            None => {
-                                return Err(
-                                    "E35: No previous regular expression".to_owned()
-                                )
-                            }
+                            None => return Err("E35: No previous regular expression".to_owned()),
                         }
                     } else if inner.ends_with(c) {
                         inner.truncate(inner.len() - c.len_utf8());
@@ -2900,11 +2930,7 @@ impl VimState {
                     if inner.is_empty() {
                         match vim.search.pattern.clone() {
                             Some(p) => inner = p,
-                            None => {
-                                return Err(
-                                    "E35: No previous regular expression".to_owned()
-                                )
-                            }
+                            None => return Err("E35: No previous regular expression".to_owned()),
                         }
                     }
                     let from = current.or(anchor).unwrap_or(cursor_line);
@@ -3229,7 +3255,11 @@ impl VimState {
                     if text_width >= width {
                         trimmed.to_owned()
                     } else {
-                        format!("{}{}", Self::align_padding(width - text_width, self), trimmed)
+                        format!(
+                            "{}{}",
+                            Self::align_padding(width - text_width, self),
+                            trimmed
+                        )
                     }
                 }
                 Align::Center => {
@@ -3268,9 +3298,15 @@ impl VimState {
     /// and always anchored at the cursor). The cursor parks on the first
     /// non-blank of the LAST pasted line (`:h :put` — audit G5; the range
     /// form has its own cursor rule, unlike plain `p`).
-    fn ex_put(&mut self, ctx: &mut Ctx, range: Option<(usize, usize)>, register: Option<char>, below: bool) {
+    fn ex_put(
+        &mut self,
+        ctx: &mut Ctx,
+        range: Option<(usize, usize)>,
+        register: Option<char>,
+        below: bool,
+    ) {
         let name = register.unwrap_or(crate::registers::UNNAMED);
-        if self.registers.get_for_paste(name, ctx.host).is_none() {
+        if self.regs().get_for_paste(name, ctx.host).is_none() {
             ctx.host.status_message("E353: Nothing in register");
             self.fail_replay(ctx);
             return;
@@ -3307,7 +3343,7 @@ impl VimState {
         // lines reports "N more lines" (charwise pastes never report) —
         // audit E-A-18
         if self
-            .registers
+            .regs()
             .get(name)
             .is_some_and(|r| r.kind == crate::registers::RegisterKind::Linewise)
         {
@@ -3375,14 +3411,30 @@ impl VimState {
                     continue;
                 }
                 if !run.is_empty() {
-                    changed |= Self::retab_run(&mut out, &run, old_ts, new_ts, force_spaces, include_space_runs, run_start_col);
+                    changed |= Self::retab_run(
+                        &mut out,
+                        &run,
+                        old_ts,
+                        new_ts,
+                        force_spaces,
+                        include_space_runs,
+                        run_start_col,
+                    );
                     run.clear();
                 }
                 run_start_col += crate::buffer::char_display_width(c);
                 out.push(c);
             }
             if !run.is_empty() {
-                changed |= Self::retab_run(&mut out, &run, old_ts, new_ts, force_spaces, include_space_runs, run_start_col);
+                changed |= Self::retab_run(
+                    &mut out,
+                    &run,
+                    old_ts,
+                    new_ts,
+                    force_spaces,
+                    include_space_runs,
+                    run_start_col,
+                );
             }
             any_change |= changed;
             lines.push(out);
@@ -3597,7 +3649,10 @@ impl VimState {
         let first_line = ctx.buf.offset_to_line(span.start);
         let last_line = crate::ops::last_line_of_span(ctx.buf, span);
         let start = ctx.buf.line_start(first_line);
-        let end = ctx.buf.line_range(last_line.min(ctx.buf.line_count() - 1)).end;
+        let end = ctx
+            .buf
+            .line_range(last_line.min(ctx.buf.line_count() - 1))
+            .end;
         let input = ctx.buf.slice(start..end);
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -3788,9 +3843,7 @@ impl VimState {
             // accepts `:2y 77777777777777777777` and clamps to the buffer
             // end (test_excmd Test_address_line_overflow; audit5 A-18 —
             // the usize parse overflow turned it into E488 garbage)
-            let count = digits
-                .parse::<usize>()
-                .unwrap_or(usize::MAX);
+            let count = digits.parse::<usize>().unwrap_or(usize::MAX);
             if !rest.is_empty() {
                 return Err(rest.to_owned());
             }
@@ -3976,11 +4029,9 @@ impl VimState {
         let mag = n.abs();
         if mag > REPORT {
             if n > 0 {
-                ctx.host
-                    .status_message(&format!("{mag} more lines"));
+                ctx.host.status_message(&format!("{mag} more lines"));
             } else {
-                ctx.host
-                    .status_message(&format!("{mag} fewer lines"));
+                ctx.host.status_message(&format!("{mag} fewer lines"));
             }
         }
     }
@@ -4062,12 +4113,8 @@ impl VimState {
     /// printed line's first non-blank (ex_print).
     fn print_range(&mut self, ctx: &mut Ctx, first: usize, last: usize, number: bool, list: bool) {
         for line_no in first..=last {
-            let text = Self::render_print_line(
-                &ctx.buf.line_content(line_no),
-                line_no,
-                number,
-                list,
-            );
+            let text =
+                Self::render_print_line(&ctx.buf.line_content(line_no), line_no, number, list);
             ctx.host.status_message(&text);
         }
         self.cursor.offset = ctx.buf.first_non_blank(last);
@@ -4131,7 +4178,6 @@ impl VimState {
         Some((right, amount, digits.to_owned(), after.to_owned()))
     }
 
-
     /// `:k{mark}` / `:ma[rk] {mark}` — set a mark at the range's last line,
     /// first non-blank (ex_mark). The cursor is left where it was.
     fn ex_mark(&mut self, ctx: &mut Ctx, range: Option<(usize, usize)>, arg: &str, _line: &str) {
@@ -4168,7 +4214,7 @@ impl VimState {
     /// (last-executed) register.
     fn ex_at(&mut self, ctx: &mut Ctx, range: Option<(usize, usize)>, rest: &str, _line: &str) {
         let name = rest.chars().next().unwrap_or('@');
-        let content = match self.registers.get(name) {
+        let content = match self.regs().get(name) {
             Some(r) if !r.text.is_empty() => r.text.clone(),
             _ => {
                 ctx.host.bell();
@@ -4414,7 +4460,11 @@ impl VimState {
             }
         } else {
             lines.drain(first..=last);
-            let idx = if dest0 <= first { dest0 } else { dest0 - block_len };
+            let idx = if dest0 <= first {
+                dest0
+            } else {
+                dest0 - block_len
+            };
             let idx = idx.min(lines.len());
             for (i, b) in block.into_iter().enumerate() {
                 lines.insert(idx + i, b);
@@ -4445,8 +4495,7 @@ impl VimState {
         if copy {
             self.msgmore(ctx, block_len as isize);
         } else if block_len > 2 {
-            ctx.host
-                .status_message(&format!("{block_len} lines moved"));
+            ctx.host.status_message(&format!("{block_len} lines moved"));
         }
     }
 
@@ -4858,7 +4907,8 @@ impl VimState {
                 return true;
             }
             if n >= i32::MAX as i64 {
-                ctx.host.status_message(&format!("E1510: Value too large: {n}"));
+                ctx.host
+                    .status_message(&format!("E1510: Value too large: {n}"));
                 self.fail_replay(ctx);
                 return true;
             }

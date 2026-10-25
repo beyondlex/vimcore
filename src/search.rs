@@ -185,7 +185,7 @@ pub fn set_pattern_inner(
     vim.search.last_matches = matches;
     vim.search.matches_generation = Some(vim.edit_generation);
     // vim mirrors every search into `@/` (`<C-r>/` in insert, `:reg`)
-    vim.registers.store_search(pattern);
+    vim.regs().store_search(pattern);
     if vim.options.hlsearch {
         host.set_search_highlights(&vim.search.last_matches, None);
     } else {
@@ -284,7 +284,11 @@ pub fn jump_to_match(
             let landing = offset
                 .and_then(|off| offset_target(vim, buf, &off))
                 .unwrap_or(m.start);
-            let advances = if forward { landing > origin } else { landing < origin };
+            let advances = if forward {
+                landing > origin
+            } else {
+                landing < origin
+            };
             if !advances && !wrapped {
                 continue;
             }

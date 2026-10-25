@@ -228,7 +228,7 @@ fn substitute_newline_pattern_joins_lines() {
 fn second_address_search_anchors_at_first_address() {
     let mut f = Fixture::at("foo 1\nfoo 2\nfoo 3\n", 0, 0);
     ex(&mut f, "2/foo/y a");
-    let got = f.vim.registers.get('a').map(|r| r.text.clone());
+    let got = f.vim.registers.lock().unwrap().get('a').cloned().map(|r| r.text.clone());
     assert_eq!(
         got.as_deref(),
         Some("foo 3\n"),
@@ -527,7 +527,7 @@ fn cmdline_ctrl_w_deletes_alnum_word_only() {
 fn huge_yank_count_clamps_silently() {
     let mut f = Fixture::new("l0\nl1\nl2\nl3\nl4\n");
     ex(&mut f, "2y 77777777777777777777");
-    let got = f.vim.registers.get('"').map(|r| r.text.clone());
+    let got = f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone());
     assert_eq!(
         got.as_deref(),
         Some("l1\nl2\nl3\nl4\n"),

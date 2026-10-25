@@ -194,7 +194,7 @@ fn ex_delete_stores_into_named_register() {
     let mut f = Fixture::new("one\ntwo\nthree\n");
     f.feed([":", "1", ",", "2", "d", " ", "a", "\n"]);
     assert_eq!(f.buf.slice(0..f.buf.len()), "three\n");
-    let reg = f.vim.registers.get('a').expect("register a should have content");
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().expect("register a should have content");
     assert_eq!(reg.text, "one\ntwo\n");
     assert!(matches!(
         reg.kind,
@@ -215,7 +215,7 @@ fn ex_delete_count_semantics_unchanged() {
         ":2d 3 deletes 3 lines starting from line 2"
     );
     // the deleted multi-line text lands in "1 (the numbered ring)
-    let reg = f.vim.registers.get('1').expect("a multi-line delete should go into \"1");
+    let reg = f.vim.registers.lock().unwrap().get('1').cloned().expect("a multi-line delete should go into \"1");
     assert_eq!(reg.text, "two\nthree\nfour\n");
 }
 

@@ -77,7 +77,7 @@ fn b_skips_whitespace_only_line_upward() {
 fn ye_at_last_word_end_yanks_word_only() {
     // the old implementation returned buf.len(), so ye swallowed the trailing newline → "c\n"
     let mut f = edit("abc\n", 0, 2, &["y", "e"]);
-    let unnamed = f.vim.registers.get('"').map(|r| r.text.clone());
+    let unnamed = f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone());
     assert_eq!(unnamed.as_deref(), Some("c"));
     f.feed(["p"]);
     assert_eq!(f.text(), "abcc\n");
@@ -124,7 +124,7 @@ fn daw_on_whitespace_takes_blank_run_plus_next_word() {
 #[test]
 fn yaw_on_whitespace_yanks_blank_run_plus_next_word() {
     let f = edit("foo   bar\n", 0, 4, &["y", "a", "w"]);
-    let unnamed = f.vim.registers.get('"').map(|r| r.text.clone());
+    let unnamed = f.vim.registers.lock().unwrap().get('"').cloned().map(|r| r.text.clone());
     assert_eq!(unnamed.as_deref(), Some("   bar"));
 }
 
@@ -233,7 +233,7 @@ fn substitute_replay_honors_explicit_range() {
 fn substitute_updates_search_state() {
     // after :s, @/ holds the substitute pattern and n searches with it (vim)
     let mut f = edit("axa\nbxb\n", 0, 0, &[":", "s", "/", "x", "/", "Y", "/", "\r"]);
-    let slash = f.vim.registers.get('/').map(|r| r.text.clone());
+    let slash = f.vim.registers.lock().unwrap().get('/').cloned().map(|r| r.text.clone());
     assert_eq!(slash.as_deref(), Some("x"));
     f.feed(["n"]);
     assert_eq!(f.cursor(), 5); // the second x
@@ -256,7 +256,7 @@ fn join_equal_two_address_range_is_noop() {
 fn delete_blackhole_register_stays_empty() {
     // :d _ does not enter "1 (vim blackhole)
     let f = edit("a\nb\nc\n", 0, 0, &[":", "2", "d", " ", "_", "\r"]);
-    assert_eq!(f.vim.registers.get('1'), None);
+    assert_eq!(f.vim.registers.lock().unwrap().get('1'), None);
     assert_eq!(lines(&f), vec!["a\n", "c\n"]);
 }
 
@@ -271,7 +271,7 @@ fn delete_explicit_count_one_anchors_at_last_line() {
 #[test]
 fn yank_explicit_count_one_takes_last_line_only() {
     let f = edit("a\nb\nc\n", 0, 0, &[":", "1", ",", "2", "y", " ", "1", "\r"]);
-    let zero = f.vim.registers.get('0').map(|r| r.text.clone());
+    let zero = f.vim.registers.lock().unwrap().get('0').cloned().map(|r| r.text.clone());
     assert_eq!(zero.as_deref(), Some("b\n"));
 }
 

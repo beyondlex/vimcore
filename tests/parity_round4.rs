@@ -263,7 +263,7 @@ fn empty_span_delete_keeps_previous_register() {
     f.type_text("Z");
     f.feed(["<Esc>"]);
     assert_eq!(f.text(), "keepme\na(Z)b\n");
-    let reg = f.vim.registers.get('"').expect("unnamed set");
+    let reg = f.vim.registers.lock().unwrap().get('"').cloned().expect("unnamed set");
     assert_eq!(reg.text, "keepme\n", "empty ci( kept the previous yank");
 }
 

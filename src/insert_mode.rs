@@ -42,7 +42,8 @@ impl VimState {
                     self.begin_cmdline('=');
                     return ProcessOutcome::Consumed;
                 }
-                if let Some(data) = self.registers.get_for_paste(name, ctx.host) {
+                let pasted = self.regs().get_for_paste(name, ctx.host);
+                if let Some(data) = pasted {
                     // `".` stores REAL BACKSPACES (\x08, audit D7c) — the
                     // replay must EXECUTE them, not paste the marker byte.
                     // The LITERAL forms (C-r C-r/C-o/C-p) insert the raw text
@@ -67,7 +68,8 @@ impl VimState {
             self.insert_quote = Some(QuotePending::Single);
             return ProcessOutcome::Consumed;
         }
-        if self.insert_quote.is_none() && self.insert_digraph_first.is_none()
+        if self.insert_quote.is_none()
+            && self.insert_digraph_first.is_none()
             && key == Key::ctrl_char('k')
         {
             self.insert_digraph_first = Some('\0');
@@ -82,18 +84,24 @@ impl VimState {
                     if let Some(c) = key.printable_char() {
                         match c {
                             'u' => {
-                                self.insert_quote =
-                                    Some(QuotePending::Hex { max_digits: 4, buffer: String::new() });
+                                self.insert_quote = Some(QuotePending::Hex {
+                                    max_digits: 4,
+                                    buffer: String::new(),
+                                });
                                 return ProcessOutcome::Consumed;
                             }
                             'U' => {
-                                self.insert_quote =
-                                    Some(QuotePending::Hex { max_digits: 8, buffer: String::new() });
+                                self.insert_quote = Some(QuotePending::Hex {
+                                    max_digits: 8,
+                                    buffer: String::new(),
+                                });
                                 return ProcessOutcome::Consumed;
                             }
                             'x' | 'X' => {
-                                self.insert_quote =
-                                    Some(QuotePending::Hex { max_digits: 2, buffer: String::new() });
+                                self.insert_quote = Some(QuotePending::Hex {
+                                    max_digits: 2,
+                                    buffer: String::new(),
+                                });
                                 return ProcessOutcome::Consumed;
                             }
                             'o' | 'O' => {
@@ -118,7 +126,7 @@ impl VimState {
                     self.insert_quote_step(ctx, state, key)
                 }
                 state => self.insert_quote_step(ctx, state, key),
-            }
+            };
         }
         if self.insert_digraph_first.is_some() {
             let Some(c) = key.printable_char() else {
@@ -141,7 +149,6 @@ impl VimState {
             self.exit_insert(ctx);
             return ProcessOutcome::Consumed;
         }
-
 
         // <C-h> = Backspace (vim binds them identically in insert). Only the
         // RAW `\x08` byte reached the backspace path before; gpui-style hosts
@@ -300,7 +307,7 @@ impl VimState {
                 }
                 KeyKind::Char('a') => {
                     let text = self
-                        .registers
+                        .regs()
                         .get_for_paste(crate::registers::LAST_INSERT, ctx.host)
                         .map(|d| d.text)
                         .unwrap_or_default();
@@ -310,7 +317,7 @@ impl VimState {
                 // <C-@> = <C-a> + leave insert (`:h i_CTRL-@`, audit D6)
                 KeyKind::Char('@') => {
                     let text = self
-                        .registers
+                        .regs()
                         .get_for_paste(crate::registers::LAST_INSERT, ctx.host)
                         .map(|d| d.text)
                         .unwrap_or_default();
@@ -350,7 +357,12 @@ impl VimState {
     /// inserted first). The i==0 case ("no number entered") inserts the
     /// terminator character itself, and a completed code (max digits)
     /// consumes the last digit.
-    fn insert_quote_step(&mut self, ctx: &mut Ctx, state: QuotePending, key: Key) -> ProcessOutcome {
+    fn insert_quote_step(
+        &mut self,
+        ctx: &mut Ctx,
+        state: QuotePending,
+        key: Key,
+    ) -> ProcessOutcome {
         match state {
             QuotePending::Single => {
                 let c = self.quote_key_char(key);
@@ -766,8 +778,7 @@ impl VimState {
             self.edit_replace(ctx, range.clone(), &out);
             // entries inside the span are consumed (their originals are back
             // in the buffer); entries past it shift by the length delta
-            self.replace_overwritten
-                .retain(|(p, _)| !range.contains(p));
+            self.replace_overwritten.retain(|(p, _)| !range.contains(p));
             for (p, _) in &mut self.replace_overwritten {
                 if *p >= range.end {
                     *p = (*p as isize + delta).max(0) as usize;
@@ -949,12 +960,8 @@ impl VimState {
         if col >= width {
             return;
         }
-        let o = crate::buffer::offset_for_display_column_with(
-            ctx.buf,
-            src,
-            col,
-            self.options.tabstop,
-        );
+        let o =
+            crate::buffer::offset_for_display_column_with(ctx.buf, src, col, self.options.tabstop);
         if o >= end {
             return;
         }

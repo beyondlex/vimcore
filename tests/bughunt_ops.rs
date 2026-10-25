@@ -19,7 +19,10 @@ fn unnamed(f: &Fixture) -> (String, RegisterKind) {
     let r = f
         .vim
         .registers
+        .lock()
+        .unwrap()
         .get('"')
+        .cloned()
         .expect("unnamed register should exist");
     (r.text.clone(), r.kind)
 }
@@ -395,7 +398,10 @@ fn named_yank_then_paste_duplicates_the_line() {
     let r = f
         .vim
         .registers
+        .lock()
+        .unwrap()
         .get('b')
+        .cloned()
         .expect("register b should exist");
     assert_eq!(r.text, "xxx\n".to_owned());
     assert_eq!(r.kind, RegisterKind::Linewise);

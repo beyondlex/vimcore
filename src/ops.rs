@@ -69,7 +69,12 @@ pub fn span_from_motion(
     if let Motion::WordStart { big } = motion {
         if op != Some(Operator::Change) {
             return span_from_word_operator(
-                buf, start, start_line, big, count, op == Some(Operator::Delete),
+                buf,
+                start,
+                start_line,
+                big,
+                count,
+                op == Some(Operator::Delete),
             );
         }
     }
@@ -306,20 +311,37 @@ fn span_from_word_operator(
     // a failed walk (cursor already at the last char of the file) cancels
     // the operator: an empty span deletes nothing and yanks nothing
     let Some(land) = word::fwd_word_operator(buf, start, big, count) else {
-        return OpSpan { start, end: start, linewise: false };
+        return OpSpan {
+            start,
+            end: start,
+            linewise: false,
+        };
     };
     let land_line = buf.offset_to_line(land);
-    let mut span = if land != start && land == buf.line_start(land_line) && land_line != start_line {
+    let mut span = if land != start && land == buf.line_start(land_line) && land_line != start_line
+    {
         // vim's col-0 end adjustment: the end moves back onto line
         // `land_line - 1`
         let end_line = land_line - 1;
         if start <= buf.first_non_blank(start_line) {
-            OpSpan { start: buf.line_start(start_line), end: buf.line_range(end_line).end, linewise: true }
+            OpSpan {
+                start: buf.line_start(start_line),
+                end: buf.line_range(end_line).end,
+                linewise: true,
+            }
         } else {
-            OpSpan { start, end: buf.line_end(end_line), linewise: false }
+            OpSpan {
+                start,
+                end: buf.line_end(end_line),
+                linewise: false,
+            }
         }
     } else {
-        OpSpan { start, end: land, linewise: false }
+        OpSpan {
+            start,
+            end: land,
+            linewise: false,
+        }
     };
     if is_delete {
         promote_blank_residue_delete(buf, &mut span);
@@ -424,8 +446,7 @@ pub fn object_span_count(
         // count-th unmatched opener); a block the cursor is INSIDE —
         // including ON its open bracket — must still climb
         objects::TextObject::Block { open, .. } => {
-            range.start > vim.cursor.offset
-                && buf.char_at(vim.cursor.offset) != Some(*open)
+            range.start > vim.cursor.offset && buf.char_at(vim.cursor.offset) != Some(*open)
         }
         objects::TextObject::Sentence { .. } => true,
         _ => false,
@@ -441,7 +462,10 @@ pub fn object_span_count(
         // re-selects the same block (zero progress). Step over the closer so
         // the rescan sees the ENCLOSING block — vim's `v2i(` climbs one
         // level (9.1 probe: `v2i(` inside the inner pair yanks "1 + (2)")
-        if let objects::TextObject::Block { inner: true, close, .. } = object {
+        if let objects::TextObject::Block {
+            inner: true, close, ..
+        } = object
+        {
             if buf.char_at(probe) == Some(close) {
                 probe += close.len_utf8();
             }
@@ -482,8 +506,7 @@ pub fn span_from_visual(vim: &VimState, buf: &dyn VimBuffer) -> Option<OpSpan> {
             // the orphan mark behind)
             let end = match buf.char_at(hi) {
                 Some(c) if c != '\n' && crate::buffer::char_display_width(c) > 0 => {
-                    crate::buffer::next_grapheme_offset(buf, hi)
-                        .unwrap_or(hi + c.len_utf8())
+                    crate::buffer::next_grapheme_offset(buf, hi).unwrap_or(hi + c.len_utf8())
                 }
                 _ => hi + buf.char_at(hi).map(|c| c.len_utf8()).unwrap_or(0),
             };
@@ -522,7 +545,7 @@ pub fn delete_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: O
     let text = ctx.buf.slice(span.start..span.end);
     crate::registers::sync_clipboard_host(ctx.host, register, &text);
     let use_reg_one = std::mem::take(&mut vim.use_reg_one);
-    vim.registers
+    vim.regs()
         .store_delete(register, text, register_kind(span), use_reg_one);
     vim.edit_delete(ctx, span.start..span.end);
 
@@ -600,7 +623,9 @@ pub fn block_row_range(
             let mut hi = hi;
             while hi < end {
                 match buf.char_at(hi) {
-                    Some(c) if c == '\u{200D}' || crate::buffer::char_display_width(c) == 0 => hi += c.len_utf8(),
+                    Some(c) if c == '\u{200D}' || crate::buffer::char_display_width(c) == 0 => {
+                        hi += c.len_utf8()
+                    }
                     _ => break,
                 }
             }
@@ -639,7 +664,11 @@ pub fn span_from_visual_block(
         let a_col = vim
             .block_anchor_vcol
             .unwrap_or_else(|| crate::buffer::display_column_with(buf, anchor, ts))
-            .min(crate::buffer::display_column_with(buf, buf.line_end(a_row), ts));
+            .min(crate::buffer::display_column_with(
+                buf,
+                buf.line_end(a_row),
+                ts,
+            ));
         let col_lo = a_col;
         let rows = (first_line..=last_line)
             .map(|line| block_row_range(buf, line, col_lo, usize::MAX, vim.options.tabstop))
@@ -666,11 +695,19 @@ pub fn span_from_visual_block(
     let a_col = vim
         .block_anchor_vcol
         .unwrap_or_else(|| crate::buffer::display_column_with(buf, anchor, ts))
-        .min(crate::buffer::display_column_with(buf, buf.line_end(a_row), ts));
+        .min(crate::buffer::display_column_with(
+            buf,
+            buf.line_end(a_row),
+            ts,
+        ));
     let c_col = vim
         .block_cursor_col
         .unwrap_or_else(|| crate::buffer::display_column_with(buf, cursor, ts))
-        .min(crate::buffer::display_column_with(buf, buf.line_end(c_row), ts));
+        .min(crate::buffer::display_column_with(
+            buf,
+            buf.line_end(c_row),
+            ts,
+        ));
     // No special case for an anchor ON a tab: vim's block left edge is the
     // anchor's DISPLAY column (the tab's START), and the right edge is the
     // cursor char's display column — the same [min, max] model as every other
@@ -704,8 +741,7 @@ pub fn yank_span(vim: &mut VimState, ctx: &mut Ctx, span: &OpSpan, register: Opt
     }
     let text = ctx.buf.slice(span.start..span.end);
     crate::registers::sync_clipboard_host(ctx.host, register, &text);
-    vim.registers
-        .store_yank(register, text, register_kind(span));
+    vim.regs().store_yank(register, text, register_kind(span));
 }
 
 /// Apply an operator to a span (operator-pending and visual paths).
@@ -740,7 +776,9 @@ pub fn apply(
     if span.end > span.start || span.linewise {
         let mark_end = if span.linewise {
             let e = ctx.buf.line_range(last_line_of_span(ctx.buf, span)).end;
-            ctx.buf.prev_char_offset(e.saturating_sub(1)).unwrap_or(span.start)
+            ctx.buf
+                .prev_char_offset(e.saturating_sub(1))
+                .unwrap_or(span.start)
         } else {
             ctx.buf.prev_char_offset(span.end).unwrap_or(span.end - 1)
         };
@@ -1265,12 +1303,7 @@ fn veto_readonly_write(_vim: &VimState, ctx: &mut Ctx, register: Option<char>) -
 
 /// `p` / `P`: paste a register. An unset register reports vim's feedback
 /// (bell — vim shows E353: Nothing in register) instead of a silent no-op.
-pub fn put(    vim: &mut VimState,
-    ctx: &mut Ctx,
-    register: char,
-    count: usize,
-    after: bool,
-) {
+pub fn put(vim: &mut VimState, ctx: &mut Ctx, register: char, count: usize, after: bool) {
     put_ex(vim, ctx, register, count, after, false)
 }
 
@@ -1286,7 +1319,7 @@ pub fn put_ex(
     after: bool,
     leave_after: bool,
 ) {
-    let Some(data) = vim.registers.get_for_paste(register, ctx.host) else {
+    let Some(data) = vim.regs().get_for_paste(register, ctx.host) else {
         // vim's do_put reports `E353: Nothing in register %s` (register.c
         // do_put) — the unnamed register shows as `"`. The old code rang the
         // bell silently, so the status bar never carried the message.
@@ -1369,10 +1402,7 @@ pub fn put_ex(
             } else {
                 ""
             };
-            (
-                ctx.buf.line_start(line),
-                format!("{stripped}\n{pad}"),
-            )
+            (ctx.buf.line_start(line), format!("{stripped}\n{pad}"))
         };
         vim.edit_insert(ctx, insert_at, &text);
         // vim leaves the cursor on the FIRST line of the put text, at its
@@ -1397,12 +1427,9 @@ pub fn put_ex(
         // lands on the last pasted CHAR's start — line_end-1 is the last
         // BYTE, which sits inside a multibyte tail (中) and the stored mark
         // then violates the addressability invariant (fuzz round-117)
-        let mark_end = crate::buffer::prev_grapheme_offset(
-            ctx.buf,
-            ctx.buf.line_end(last_pasted),
-        )
-        .unwrap_or(cursor_at)
-        .max(cursor_at);
+        let mark_end = crate::buffer::prev_grapheme_offset(ctx.buf, ctx.buf.line_end(last_pasted))
+            .unwrap_or(cursor_at)
+            .max(cursor_at);
         vim.marks.set('[', cursor_at);
         vim.marks.set(']', mark_end);
         if leave_after {
@@ -1412,9 +1439,7 @@ pub fn put_ex(
             // buffer end, where the clamp hides the difference); gP
             // linewise: ditto (`:h gp` "just after the new text")
             let line = cursor_line + pasted_line_count;
-            vim.cursor.offset = ctx
-                .buf
-                .first_non_blank(line.min(ctx.buf.line_count() - 1));
+            vim.cursor.offset = ctx.buf.first_non_blank(line.min(ctx.buf.line_count() - 1));
         } else {
             vim.cursor.offset = ctx.buf.first_non_blank(cursor_line);
         }
@@ -1573,7 +1598,10 @@ pub(crate) fn insert_block_row_at_column(
     // "last char" landing offset_for_display_column gives — `X` + row at
     // col 1 must make "X<row>", not "<row>X"
     let (at, pad) = if col < width {
-        (crate::buffer::offset_for_display_column(ctx.buf, target, col), 0)
+        (
+            crate::buffer::offset_for_display_column(ctx.buf, target, col),
+            0,
+        )
     } else {
         (le, col - width)
     };

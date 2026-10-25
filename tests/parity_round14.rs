@@ -112,7 +112,7 @@ fn ap_on_last_paragraph_takes_leading_blank() {
 #[test]
 fn register_prefix_routes_x_into_named_register() {
     let f = edit("abc\n", 0, 0, &["\"", "a", "x"]);
-    let reg = f.vim.registers.get('a').expect("register a populated");
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().expect("register a populated");
     assert_eq!(reg.text, "a", "\"ax must delete into register a");
 }
 
@@ -120,7 +120,7 @@ fn register_prefix_routes_x_into_named_register() {
 #[test]
 fn register_prefix_routes_x_backwards_into_named_register() {
     let f = edit("xabc\n", 0, 2, &["\"", "a", "X"]);
-    let reg = f.vim.registers.get('a').expect("register a populated");
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().expect("register a populated");
     assert_eq!(reg.text, "a", "\"X must delete into register a");
 }
 
@@ -131,7 +131,7 @@ fn register_prefix_routes_substitute_into_named_register() {
     f.feed(["\"", "a", "s"]);
     f.type_text("Z");
     f.feed(["escape"]);
-    let reg = f.vim.registers.get('a').expect("register a populated");
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().expect("register a populated");
     assert_eq!(reg.text, "a", "\"as must delete into register a");
     assert_eq!(f.text(), "Zbc\n");
 }
@@ -286,7 +286,7 @@ fn bang_on_delete_yank_reports_e477() {
     // messages sampling)
     assert_eq!(f2.host.statuses.last().unwrap(), "E477: No ! allowed");
     assert_eq!(
-        f2.vim.registers.get('0').map(|r| r.text.as_str()),
+        f2.vim.registers.lock().unwrap().get('0').map(|r| r.text.clone()),
         None,
         "y! did not execute (no yank-register side effect)"
     );
@@ -296,7 +296,7 @@ fn bang_on_delete_yank_reports_e477() {
 #[test]
 fn packed_register_count_yank() {
     let f = edit("a\nb\nc\nd\ne\n", 0, 0, &[":", "2", "y", " ", "a", "3", "<CR>"]);
-    let reg = f.vim.registers.get('a').expect("register a");
+    let reg = f.vim.registers.lock().unwrap().get('a').cloned().expect("register a");
     assert_eq!(reg.text, "b\nc\nd\n", "a3 = register a + 3 lines");
 }
 

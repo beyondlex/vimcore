@@ -459,7 +459,7 @@ fn ex_yank_range() {
     }
     f.feed(["<Enter>"]);
     assert_eq!(f.text(), "a\nb\nc\n", ":y does not modify the buffer");
-    let reg = f.vim.registers.get('"').expect("unnamed set");
+    let reg = f.vim.registers.lock().unwrap().get('"').cloned().expect("unnamed set");
     assert_eq!(reg.text, "a\nb\n");
     assert!(reg.kind == vimcore::registers::RegisterKind::Linewise);
 
@@ -470,7 +470,7 @@ fn ex_yank_range() {
         f.feed([c.to_string().as_str()]);
     }
     f.feed(["<Enter>"]);
-    let reg = f.vim.registers.get('b').expect("named register");
+    let reg = f.vim.registers.lock().unwrap().get('b').cloned().expect("named register");
     assert_eq!(reg.text, "b\n");
 
     // a numeric argument is a line count (`:2y 2` yanks lines 2-3)
@@ -480,7 +480,7 @@ fn ex_yank_range() {
         f.feed([c.to_string().as_str()]);
     }
     f.feed(["<Enter>"]);
-    assert_eq!(f.vim.registers.get('"').unwrap().text, "b\nc\n");
+    assert_eq!(f.vim.registers.lock().unwrap().get('"').unwrap().text, "b\nc\n");
 }
 
 // ---- misc parity notes -------------------------------------------------------------

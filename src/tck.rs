@@ -737,7 +737,7 @@ fn readonly_probe(
     // yank still works: writes the register, and (with the `"+` prefix) the clipboard
     run(vim, host, &["y", "i", "w"]);
     let yanked = vim
-        .registers
+        .regs()
         .get('"')
         .map(|r| r.text.clone())
         .unwrap_or_default();
@@ -749,7 +749,7 @@ fn readonly_probe(
     host.clipboard = None;
     run(vim, host, &["\"", "+", "y", "i", "w"]);
     let clipped = vim
-        .registers
+        .regs()
         .get('+')
         .map(|r| r.text.clone())
         .unwrap_or_default();
