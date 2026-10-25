@@ -489,6 +489,9 @@ pub struct VimState {
     pub(crate) insert_did_ai: bool,
 
     pub options: Options,
+    /// Host-registered Ex commands, dispatched before the built-in table
+    /// (see [`crate::ex`] and [`VimState::register_ex`]).
+    pub ex_registry: crate::ex::ExRegistry,
     /// The register file. Shared-capable: multiple engine instances in one
     /// session (one panel each) can share one file through
     /// [`VimState::share_globals`] — vim semantics keep registers
@@ -677,6 +680,7 @@ impl VimState {
             insert_change_pos: None,
             insert_did_ai: false,
             options: Options::default(),
+            ex_registry: crate::ex::ExRegistry::default(),
             registers: Arc::new(Mutex::new(Registers::default())),
             marks: Marks::default(),
             search: SearchState::default(),

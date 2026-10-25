@@ -78,7 +78,9 @@ pub enum NormalCmd {
     CharInfo,
     /// `]p`/`[p`/`]P`/`[P`: linewise paste with the indent adjusted to the
     /// current line (`:h ]p`, audit M1)
-    PasteIndent { below: bool },
+    PasteIndent {
+        below: bool,
+    },
     /// `g8`: UTF-8 byte info
     ByteInfo,
 }
@@ -95,12 +97,14 @@ pub enum VisualCmd {
     SwapEndsKeepCol, // O
     PutReplace, // p replace selection (swap registers)
     PutReplaceKeep, // P replace selection (nv_put_opt keep_registers: the
-                    // replaced text goes to the blackhole, the paste source
-                    // survives — audit5 C-13/C-14)
+    // replaced text goes to the blackhole, the paste source
+    // survives — audit5 C-13/C-14)
     /// v/V's `I`/`A`: insert once at the selection's start row / append once
     /// at its end (audit5 C-11/C-12 — the per-row replication is block-mode
     /// only)
-    InsertAtSelection { append: bool },
+    InsertAtSelection {
+        append: bool,
+    },
     /// `g C-a`: SEQUENTIAL increment — each selected line's number grows by
     /// one more than the previous (audit K1)
     SequentialIncrement,
@@ -370,12 +374,36 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     // search in its own direction, `N` mirrors it (`?` + `n` goes up).
     b.motion_all(&["n"], Motion::SearchNext { forward: true });
     b.motion_all(&["N"], Motion::SearchNext { forward: false });
-    b.motion_all(&["*"], Motion::StarSearch { forward: true, substring: false });
-    b.motion_all(&["#"], Motion::StarSearch { forward: false, substring: false });
+    b.motion_all(
+        &["*"],
+        Motion::StarSearch {
+            forward: true,
+            substring: false,
+        },
+    );
+    b.motion_all(
+        &["#"],
+        Motion::StarSearch {
+            forward: false,
+            substring: false,
+        },
+    );
     // g* / g#: the word as a SUBSTRING pattern (`:h g*`, audit F2 — the
     // old keys degraded to whole-word `*`/`#` plus a stray bell)
-    b.motion_all(&["g", "*"], Motion::StarSearch { forward: true, substring: true });
-    b.motion_all(&["g", "#"], Motion::StarSearch { forward: false, substring: true });
+    b.motion_all(
+        &["g", "*"],
+        Motion::StarSearch {
+            forward: true,
+            substring: true,
+        },
+    );
+    b.motion_all(
+        &["g", "#"],
+        Motion::StarSearch {
+            forward: false,
+            substring: true,
+        },
+    );
     // gd / gD: declaration search (audit F1 — unbound, `g`+`d` re-armed
     // the delete operator through the trie-miss retry)
     b.motion_all(&["g", "d"], Motion::SearchDeclaration { whole_file: false });
@@ -680,14 +708,70 @@ fn build_rows() -> Vec<(Vec<Key>, Phase, CmdKind)> {
     b.normal(&["g", "v"], CmdKind::Normal(NormalCmd::RestoreVisual));
     // ]] / [[ / ][ / [] / ]m / [m / ]M / [M — section & method motions
     // (`:h ]]`, audit A3; the family was entirely unbound)
-    b.motion_all(&["]", "]"], Motion::Section { ch: '{', backward: false, method: false });
-    b.motion_all(&["[", "["], Motion::Section { ch: '{', backward: true, method: false });
-    b.motion_all(&["]", "["], Motion::Section { ch: '}', backward: false, method: false });
-    b.motion_all(&["[", "]"], Motion::Section { ch: '}', backward: true, method: false });
-    b.motion_all(&["]", "m"], Motion::Section { ch: '{', backward: false, method: true });
-    b.motion_all(&["[", "m"], Motion::Section { ch: '{', backward: true, method: true });
-    b.motion_all(&["]", "M"], Motion::Section { ch: '}', backward: false, method: true });
-    b.motion_all(&["[", "M"], Motion::Section { ch: '}', backward: true, method: true });
+    b.motion_all(
+        &["]", "]"],
+        Motion::Section {
+            ch: '{',
+            backward: false,
+            method: false,
+        },
+    );
+    b.motion_all(
+        &["[", "["],
+        Motion::Section {
+            ch: '{',
+            backward: true,
+            method: false,
+        },
+    );
+    b.motion_all(
+        &["]", "["],
+        Motion::Section {
+            ch: '}',
+            backward: false,
+            method: false,
+        },
+    );
+    b.motion_all(
+        &["[", "]"],
+        Motion::Section {
+            ch: '}',
+            backward: true,
+            method: false,
+        },
+    );
+    b.motion_all(
+        &["]", "m"],
+        Motion::Section {
+            ch: '{',
+            backward: false,
+            method: true,
+        },
+    );
+    b.motion_all(
+        &["[", "m"],
+        Motion::Section {
+            ch: '{',
+            backward: true,
+            method: true,
+        },
+    );
+    b.motion_all(
+        &["]", "M"],
+        Motion::Section {
+            ch: '}',
+            backward: false,
+            method: true,
+        },
+    );
+    b.motion_all(
+        &["[", "M"],
+        Motion::Section {
+            ch: '}',
+            backward: true,
+            method: true,
+        },
+    );
     // ga / g8: the char-code / byte-hex info messages (`:h ga`, audit J2/J3)
     b.normal(&["g", "a"], CmdKind::Normal(NormalCmd::CharInfo));
     b.normal(&["g", "8"], CmdKind::Normal(NormalCmd::ByteInfo));

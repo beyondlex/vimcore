@@ -33,6 +33,7 @@
 pub mod buffer;
 pub mod cmdline;
 pub mod config;
+pub mod ex;
 pub mod host;
 pub mod insert_mode;
 pub mod key;

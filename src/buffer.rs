@@ -90,7 +90,11 @@ pub trait VimBuffer {
         let (indent, _) = self.line_indent(line);
         let end = self.line_end(line);
         let mut at = (start + indent).min(end);
-        while at < end && self.char_at(at).is_some_and(|c| c == '\u{200D}' || char_display_width(c) == 0) {
+        while at < end
+            && self
+                .char_at(at)
+                .is_some_and(|c| c == '\u{200D}' || char_display_width(c) == 0)
+        {
             at += self.char_at(at).map_or(1, |c| c.len_utf8());
         }
         if at == end && end > start && self.char_at(end) == Some('\n') {

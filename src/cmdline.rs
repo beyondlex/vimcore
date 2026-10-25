@@ -2,6 +2,7 @@
 //! per-prompt history.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::buffer::clamp_cursor;
 use crate::key::{Key, KeyKind};
@@ -1443,6 +1444,33 @@ impl VimState {
             self.execute_ex(ctx, &head);
             self.execute_ex(ctx, line[bar + 1..].trim());
             return;
+        }
+        // Host-registered commands run BEFORE the built-in table — an
+        // explicit registration is the host claiming that spelling. The
+        // range was already parsed (and E16-checked) above; a `false`
+        // return fails the command the built-in way (bell + replay abort).
+        {
+            let hit = self.ex_registry.lookup(line).map(|(entry, taken, bang)| {
+                (
+                    entry.name.clone(),
+                    Rc::clone(&entry.handler),
+                    line[taken..].trim_start().to_string(),
+                    bang,
+                )
+            });
+            if let Some((name, handler, arg, bang)) = hit {
+                let invocation = crate::ex::ExInvocation {
+                    name,
+                    bang,
+                    arg,
+                    range,
+                    addr_count,
+                };
+                if !handler(self, ctx, &invocation) {
+                    self.fail_replay(ctx);
+                }
+                return;
+            }
         }
         match line {
             // vim's abbreviation rule accepts every unambiguous prefix of

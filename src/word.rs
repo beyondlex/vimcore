@@ -140,9 +140,7 @@ pub fn next_word_start(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
         // is_whitespace blanket — a bare \r is Punct and `w` must stop on
         // it, audit B8)
         while let Some(c) = buf.char_at(o) {
-            if c != '\n'
-                && (class_at(buf, o, big) == Some(Class::Blank) || is_cont(c))
-            {
+            if c != '\n' && (class_at(buf, o, big) == Some(Class::Blank) || is_cont(c)) {
                 o += c.len_utf8();
             } else {
                 break;
@@ -195,9 +193,7 @@ pub fn fwd_word_operator(
         while op_class(buf, o, big) == sclass {
             let (n2, code2) = op_inc(buf, o);
             o = n2;
-            if code2 == Inc::Eof
-                || (matches!(code2, Inc::Eol | Inc::Crossed) && last_iter)
-            {
+            if code2 == Inc::Eof || (matches!(code2, Inc::Eol | Inc::Crossed) && last_iter) {
                 return Some(o);
             }
         }
@@ -209,9 +205,7 @@ pub fn fwd_word_operator(
             }
             let (n2, code2) = op_inc(buf, o);
             o = n2;
-            if code2 == Inc::Eof
-                || (matches!(code2, Inc::Eol | Inc::Crossed) && last_iter)
-            {
+            if code2 == Inc::Eof || (matches!(code2, Inc::Eol | Inc::Crossed) && last_iter) {
                 return Some(o);
             }
         }
@@ -252,7 +246,14 @@ fn op_inc(buf: &dyn VimBuffer, offset: usize) -> (usize, Inc) {
             }
         }
         Some(_) => match buf.next_char_offset(offset) {
-            Some(n) => (n, if buf.at_line_end(n) { Inc::Eol } else { Inc::Within }),
+            Some(n) => (
+                n,
+                if buf.at_line_end(n) {
+                    Inc::Eol
+                } else {
+                    Inc::Within
+                },
+            ),
             None => (buf.len(), Inc::Eol),
         },
     }
@@ -566,12 +567,10 @@ pub fn next_word_end(buf: &dyn VimBuffer, offset: usize, big: bool) -> usize {
 fn pull_off_continuation(buf: &dyn VimBuffer, mut o: usize, floor: usize) -> usize {
     while o > floor {
         match buf.char_at(o) {
-            Some(c) if is_cont(c) => {
-                match buf.prev_char_offset(o) {
-                    Some(p) => o = p,
-                    None => break,
-                }
-            }
+            Some(c) if is_cont(c) => match buf.prev_char_offset(o) {
+                Some(p) => o = p,
+                None => break,
+            },
             _ => break,
         }
     }

@@ -66,7 +66,12 @@ pub fn resolve_alias(c: char, inner: bool) -> Option<TextObject> {
     }
 }
 
-pub fn range(buf: &dyn VimBuffer, offset: usize, obj: TextObject, count: usize) -> Option<ObjectRange> {
+pub fn range(
+    buf: &dyn VimBuffer,
+    offset: usize,
+    obj: TextObject,
+    count: usize,
+) -> Option<ObjectRange> {
     match obj {
         TextObject::Word { inner, big } => word_range(buf, offset, inner, big, count),
         TextObject::Sentence { inner } => sentence_range(buf, offset, inner, count),
@@ -180,11 +185,9 @@ fn sentence_range(
     // previous sentence from there.
     let mut range_start = start;
     let mut leading_ws = false;
-    let c_len = |buf: &dyn VimBuffer, o: usize| -> usize {
-        buf.char_at(o).map_or(1, |c| c.len_utf8())
-    };
-    let on_gap = offset >= term_end
-        && buf.char_at(offset).is_some_and(|c| c.is_whitespace());
+    let c_len =
+        |buf: &dyn VimBuffer, o: usize| -> usize { buf.char_at(o).map_or(1, |c| c.len_utf8()) };
+    let on_gap = offset >= term_end && buf.char_at(offset).is_some_and(|c| c.is_whitespace());
     if inner && on_gap && matches!(buf.char_at(offset), Some(' ' | '\t')) {
         // 9.1: `i s` with the cursor ON the spacer blanks between sentences
         // selects the whitespace RUN of that line (probes: "Aa. Bb." at the
@@ -259,7 +262,7 @@ fn sentence_range(
         for _ in 1..count {
             sent = word::next_sentence(buf, sent);
         }
-        
+
         find_term(sent, word::next_sentence(buf, sent)).min(buf.len())
     };
     let _ = term_end;
@@ -269,24 +272,36 @@ fn sentence_range(
         // is NO trailing whitespace, the LEADING run is taken instead
         // (`:h as`) — single-sentence shape only (the count shapes are not
         // pinned for the leading fallback).
-        let o = if leading_ws { count_end } else { outer_end(count_end) };
+        let o = if leading_ws {
+            count_end
+        } else {
+            outer_end(count_end)
+        };
         if o > count_end {
             return Some(ObjectRange::charwise(range_start, o));
         }
         if count > 1 {
-            return Some(ObjectRange::charwise(range_start, count_end.max(range_start)));
+            return Some(ObjectRange::charwise(
+                range_start,
+                count_end.max(range_start),
+            ));
         }
         // the leading fallback stays WITHIN the sentence's own line
         let mut lead = start;
         let line_start = buf.line_start(buf.offset_to_line(start));
         while lead > line_start {
-            let Some(prev) = buf.prev_char_offset(lead) else { break };
+            let Some(prev) = buf.prev_char_offset(lead) else {
+                break;
+            };
             match buf.char_at(prev) {
                 Some(c) if c.is_whitespace() => lead = prev,
                 _ => break,
             }
         }
-        return Some(ObjectRange::charwise(lead.min(range_start), term_end.max(lead.min(range_start))));
+        return Some(ObjectRange::charwise(
+            lead.min(range_start),
+            term_end.max(lead.min(range_start)),
+        ));
     }
     // inner: `is` excludes LEADING whitespace too (`:h is`)
     let mut trimmed = start;
@@ -594,7 +609,9 @@ fn block_range(
         // leaves " \n[\n]"; `di(` on the multi-line call leaves "x = (\n)")
         let start_line = buf.offset_to_line(start);
         let end_line = buf.offset_to_line(close_pos);
-        if end_line > start_line + 1 || (end_line == start_line + 1 && close_pos == buf.line_start(end_line)) {
+        if end_line > start_line + 1
+            || (end_line == start_line + 1 && close_pos == buf.line_start(end_line))
+        {
             let inner_start = buf.line_start(start_line + 1);
             let inner_end = buf.line_range(end_line - 1).end;
             if inner_start <= inner_end {
@@ -700,7 +717,10 @@ fn tag_range(buf: &dyn VimBuffer, offset: usize, inner: bool) -> Option<ObjectRa
     for (start, end, name, is_open) in tags {
         if is_open {
             stack.push((start, end, name));
-        } else if let Some(pos) = stack.iter().rposition(|(_, _, n)| n.eq_ignore_ascii_case(name)) {
+        } else if let Some(pos) = stack
+            .iter()
+            .rposition(|(_, _, n)| n.eq_ignore_ascii_case(name))
+        {
             let (open_start, open_end, _) = stack[pos];
             stack.truncate(pos);
             if open_start <= offset && offset < end {

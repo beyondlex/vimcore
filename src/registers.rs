@@ -216,7 +216,13 @@ impl Registers {
     /// the MERGED register — vim is deliberately asymmetric here (9.1
     /// oracle: `p` after `"Ayy` pastes both lines, after `"Add` only the
     /// just-deleted text — audit C8).
-    pub fn store_ext(&mut self, name: char, text: String, kind: RegisterKind, unnamed_new_piece: bool) {
+    pub fn store_ext(
+        &mut self,
+        name: char,
+        text: String,
+        kind: RegisterKind,
+        unnamed_new_piece: bool,
+    ) {
         self.write_gen += 1;
         let register = Register {
             text: text.clone(),
@@ -280,10 +286,7 @@ impl Registers {
                 } else {
                     old_lines.extend(new_lines.iter().cloned());
                 }
-                (
-                    join_register_lines(&old_lines, result_kind),
-                    result_kind,
-                )
+                (join_register_lines(&old_lines, result_kind), result_kind)
             }
             None => (text.clone(), kind),
         };

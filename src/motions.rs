@@ -365,7 +365,9 @@ impl Motion {
                         // cursor parked there would let `x` split the cluster.
                         // Blank check is is_whitespace (U+3000 trailing pad
                         // is blank to vim's g_ too)
-                        Some(c) if !c.is_whitespace() && crate::buffer::char_display_width(c) > 0 => {
+                        Some(c)
+                            if !c.is_whitespace() && crate::buffer::char_display_width(c) > 0 =>
+                        {
                             o = prev;
                             break;
                         }
