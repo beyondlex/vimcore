@@ -5372,7 +5372,19 @@ impl VimState {
                 let count = self.take_total_count();
                 let undo = cmd == NormalCmd::Undo;
                 for _ in 0..count {
-                    if !self.history_step(ctx, undo) {
+                    // Inside a replay the host is consulted only when it
+                    // declared MACRO_HOST_UNDO; otherwise the engine answers
+                    // with the plain "nothing to undo" bell (the host's undo
+                    // often lives in view state a replayed key never reaches,
+                    // and macros must behave the same across hosts).
+                    let stepped = if self.replaying
+                        && !ctx.host.capabilities().macro_host_undo
+                    {
+                        false
+                    } else {
+                        self.history_step(ctx, undo)
+                    };
+                    if !stepped {
                         self.note_bell(ctx);
                         break;
                     }

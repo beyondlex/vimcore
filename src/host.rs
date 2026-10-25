@@ -67,6 +67,20 @@ pub trait MotionHook {
     ) -> Option<MotionResult>;
 }
 
+/// Replay-safety declarations a host makes about its own side-effect
+/// surface. Every flag defaults to `false`; a host opts in by overriding
+/// [`VimHost::capabilities`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostCapabilities {
+    /// `u` / `<C-r>` inside a macro (`@`) or `.` replay may call
+    /// [`VimHost::undo`] / [`VimHost::redo`]. Without the flag the engine
+    /// answers the replayed key itself with the "nothing to undo" bell and
+    /// never calls the host: a host's undo usually answers from view state
+    /// a replayed key never reaches (a view-local undo stack), so calling
+    /// it anyway would make the same macro behave differently per host.
+    pub macro_host_undo: bool,
+}
+
 /// Side-effect hooks the host must (or may) implement.
 pub trait VimHost {
     /// Inclusive `(first_line, last_line)` of what is currently visible.
@@ -171,6 +185,12 @@ pub trait VimHost {
     /// errors that need a decision still go through `bell`.
     fn status_message(&mut self, message: &str) {
         let _ = message;
+    }
+
+    /// Declare replay-safety capabilities (all off by default). See
+    /// [`HostCapabilities`].
+    fn capabilities(&self) -> HostCapabilities {
+        HostCapabilities::default()
     }
 
     /// The buffer's name for status UI (v1; `%` register support comes with

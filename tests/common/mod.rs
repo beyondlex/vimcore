@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use vimcore::buffer::{VimBuffer, VimBufferMut};
-use vimcore::host::VimHost;
+use vimcore::host::{HostCapabilities, VimHost};
 use vimcore::key::Key;
 use vimcore::state::{Ctx, KeyResult, VimState};
 
@@ -225,6 +225,14 @@ impl VimHost for HostView {
         *self.text.borrow_mut() = text;
         self.open_group = None;
         Some(cursor)
+    }
+    // The harness undo answers from the same shared text the engine sees, so
+    // it is replay-safe by construction — declare it and keep the macro-with-
+    // undo tests on the "host gets asked" path.
+    fn capabilities(&self) -> HostCapabilities {
+        HostCapabilities {
+            macro_host_undo: true,
+        }
     }
 }
 
