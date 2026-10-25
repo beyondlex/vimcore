@@ -8,6 +8,26 @@ release.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version numbers match `Cargo.toml`.
 
+## [0.2.3] - 2026-10-26
+
+Undo groups now close with a deterministic engine signal instead of every
+host inferring closure on its own ("push when not in Insert/Replace after a
+key"). That inference let an edit-less `<Esc>` strand the host's snapshot
+until the next edit overwrote it — vim's `iZ<esc>u` then reporting
+"Already at oldest change".
+
+### Added
+
+- **`VimHost::end_undo_group(id)`** (default no-op): called by the engine
+  when a logical undo unit completes (insert session exit, operator done,
+  command done), symmetric with `begin_undo_group`. Only groups that
+  actually announced (a group whose first real edit happened) are closed —
+  an edit-less `i<Esc>` never announced, so no spurious signal. Hosts
+  compiled against older 0.2.x keep working: the default is a no-op and
+  the old inference stays theirs until they adopt the signal.
+- Internally `end_edit` now takes `&mut Ctx` to reach the host
+  (`pub(crate)` — not a public signature change).
+
 ## [0.2.2] - 2026-10-24
 
 Repository-wide Chinese-to-English migration. **No API change**: every public

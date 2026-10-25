@@ -826,7 +826,7 @@ pub fn apply(
             let gen = vim.edit_generation;
             vim.begin_edit();
             vim.edit_replace(ctx, start..end, &new_text);
-            vim.end_edit();
+            vim.end_edit(ctx);
             vim.cursor.offset = crate::buffer::clamp_cursor(ctx.buf, start);
             vim.cursor.desired_col = None;
             if vim.edit_generation != gen {

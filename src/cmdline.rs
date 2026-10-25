@@ -3147,7 +3147,7 @@ impl VimState {
         let gen = self.edit_generation;
         self.begin_edit();
         crate::ops::join_lines(self, ctx, joins + 1, bang);
-        self.end_edit();
+        self.end_edit(ctx);
         // a range ending at the buffer's last line has no seam to join —
         // a no-op must not feed the changelist / `.` mark (same no-op
         // discipline as the normal-mode operators). The cursor still
@@ -3252,7 +3252,7 @@ impl VimState {
         let end = ctx.buf.line_end(last);
         let new_text = lines.join("\n");
         self.edit_replace(ctx, start..end, &new_text);
-        self.end_edit();
+        self.end_edit(ctx);
         // vim does not move the cursor line for the align family (audit A9
         // — the engine dragged it to the range's first line); and it stays
         // on the SAME CHARACTER through the re-pad (fuzz round35: the raw
@@ -3289,7 +3289,7 @@ impl VimState {
         // reuse the normal-mode put machinery: it already handles
         // linewise/charwise/blockwise registers and cursor placement
         crate::ops::put(self, ctx, name, 1, below);
-        self.end_edit();
+        self.end_edit(ctx);
         self.bump_if_edited(ctx, gen);
         // `:put` parks the cursor on the LAST pasted line (`:h :put` —
         // audit G5), unlike plain `p` which keeps its first-line rule
@@ -3396,7 +3396,7 @@ impl VimState {
         let end = ctx.buf.line_end(last);
         let new_text = lines.join("\n");
         self.edit_replace(ctx, start..end, &new_text);
-        self.end_edit();
+        self.end_edit(ctx);
         // Cursor stays on the original character (`:h :retab`'s marks-adjust
         // semantics; fuzz round35 caught a raw offset landing inside a CJK
         // character)
@@ -3636,7 +3636,7 @@ impl VimState {
         let gen = self.edit_generation;
         self.begin_edit();
         self.edit_replace(ctx, start..end, &text);
-        self.end_edit();
+        self.end_edit(ctx);
         self.cursor.offset = crate::buffer::clamp_cursor(ctx.buf, start);
         self.cursor.desired_col = None;
         if self.edit_generation != gen {
@@ -3743,7 +3743,7 @@ impl VimState {
         }
         self.begin_edit();
         self.edit_replace(ctx, start..end, &new_text);
-        self.end_edit();
+        self.end_edit(ctx);
         // cursor BEFORE bump: the changelist / `.` mark record the sorted
         // range's first line, not the pre-command cursor
         self.cursor.offset = ctx.buf.first_non_blank(first);
@@ -4426,7 +4426,7 @@ impl VimState {
         }
         self.begin_edit();
         self.edit_replace(ctx, 0..ctx.buf.len(), &new_text);
-        self.end_edit();
+        self.end_edit(ctx);
         let target = if copy {
             dest0 + block_len
         } else if dest0 >= line1 {
@@ -4494,7 +4494,7 @@ impl VimState {
                 crate::ops::shift_line(self, ctx, line, right);
             }
         }
-        self.end_edit();
+        self.end_edit(ctx);
         self.cursor.offset = ctx.buf.first_non_blank(last);
         self.cursor.desired_col = None;
         self.bump(ctx);
@@ -4924,7 +4924,7 @@ impl VimState {
             let start = ctx.buf.line_start(first_line);
             let end = ctx.buf.line_end(last_line);
             self.edit_replace(ctx, start..end, &joined);
-            self.end_edit();
+            self.end_edit(ctx);
             self.cursor.offset = ctx.buf.first_non_blank(first_line);
             self.cursor.desired_col = None;
             ctx.host
@@ -5105,7 +5105,7 @@ impl VimState {
         self.begin_edit();
         let new_text = joined.join("\n");
         self.edit_replace(ctx, range_start..range_end, &new_text);
-        self.end_edit();
+        self.end_edit(ctx);
         // the substitute pattern enters the search state (vim: after
         // `:s/x/Y/`, `@/` is `x`, `n` finds the next one and hlsearch
         // highlights it — 9.1 probes; the engine kept the OLD pattern).

@@ -1555,7 +1555,14 @@ impl VimState {
     }
 
     /// Close any open undo group (end of a logical command or insert session).
-    pub(crate) fn end_edit(&mut self) {
+    pub(crate) fn end_edit(&mut self, ctx: &mut Ctx) {
+        // The deterministic close signal — only for groups that actually
+        // announced (an edit-less `i<Esc>` never did, so no spurious push).
+        if self.undo_group_announced {
+            if let Some(id) = self.open_undo {
+                ctx.host.end_undo_group(id);
+            }
+        }
         self.open_undo = None;
         self.undo_group_announced = false;
         self.undo_hint_offset = None;
@@ -1673,7 +1680,7 @@ impl VimState {
                                     start + fstart..start + fend,
                                     &formatted,
                                 );
-                                self.end_edit();
+                                self.end_edit(ctx);
                                 self.cursor.offset = clamp_cursor(
                                     ctx.buf,
                                     start + fstart + formatted.len() - 1,
@@ -1855,7 +1862,7 @@ impl VimState {
         // cursor on the last digit of the new number
         self.cursor.offset = (abs + new_text.len() - 1).max(abs);
         self.cursor.desired_col = None;
-        self.end_edit();
+        self.end_edit(ctx);
         true
     }
 
@@ -2802,7 +2809,7 @@ impl VimState {
         // `sanitize_stored_offsets` after a host undo.
         self.write_pending_visual_marks(ctx);
         self.republish_search(ctx);
-        self.end_edit();
+        self.end_edit(ctx);
         self.mode = Mode::Normal;
         self.insert_register_pending = false;
         self.insert_register_literal = None;
@@ -3076,7 +3083,7 @@ impl VimState {
         // same undo step and one `u` would revert two unrelated changes.
         // Inside a session the group stays open for the session's exit.
         if owns_group {
-            self.end_edit();
+            self.end_edit(ctx);
         }
     }
 
@@ -3264,7 +3271,7 @@ impl VimState {
                 );
                 self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &rows);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump(ctx);
                 self.reset_pending();
                 self.cursor.offset =
@@ -3280,7 +3287,7 @@ impl VimState {
                 self.store_block_rows(ctx, &block.rows, self.register);
                 self.begin_edit();
                 let adjusted = self.delete_block_rows(ctx, &block.rows);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump(ctx);
                 self.reset_pending();
                 self.cursor.offset = clamp_cursor(ctx.buf, adjusted.first().copied().unwrap_or(0));
@@ -3363,7 +3370,7 @@ impl VimState {
                     park_on_edge: false,
                 });
                 self.begin_insert(InsertKind::Insert);
-                self.end_edit();
+                self.end_edit(ctx);
             }
             Operator::Change => {
                 // block `c` stores the deleted block too (vim 9.1 probe:
@@ -3415,7 +3422,7 @@ impl VimState {
                     let mapped = crate::ops::case_mapped_text(op, &text);
                     self.edit_replace(ctx, range.clone(), &mapped);
                 }
-                self.end_edit();
+                self.end_edit(ctx);
                 self.cursor.offset =
                     clamp_cursor(ctx.buf, block.rows.first().map(|r| r.start).unwrap_or(0));
                 self.cursor.desired_col = None;
@@ -3431,7 +3438,7 @@ impl VimState {
                 for line in block.first_line..block.first_line + block.rows.len() {
                     crate::ops::shift_line(self, ctx, line, true);
                 }
-                self.end_edit();
+                self.end_edit(ctx);
                 // vim parks the cursor at the first line's column 1 (the
                 // indent just moved under it — 9.1 oracle f1)
                 self.cursor.offset = ctx.buf.line_start(block.first_line);
@@ -4071,12 +4078,12 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, false, register);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 // commit like the trie-routed `x`: without it the Del is not
                 // `.`-repeatable and its recorded key lingers in the pending
                 // recording, baking into the NEXT change's replay record
-                self.end_command();
+                self.end_command(ctx);
                 return Some(ProcessOutcome::Consumed);
             }
             _ => return None,
@@ -4095,7 +4102,7 @@ impl VimState {
         // without the commit, the recorded motion key survives into the NEXT
         // change's `.` record (`<Down>` then `x` then `.` replayed
         // [Down, x] — vim's redo buffer never contains plain motions)
-        self.end_command();
+        self.end_command(ctx);
         Some(ProcessOutcome::Consumed)
     }
 
@@ -4514,7 +4521,7 @@ impl VimState {
                         }
                     }
                 }
-                self.end_command();
+                self.end_command(ctx);
                 ProcessOutcome::Consumed
             }
             CmdKind::Object(object) => {
@@ -4597,7 +4604,7 @@ impl VimState {
                         indent_unit: String::new(),
                     });
                 }
-                self.end_command();
+                self.end_command(ctx);
                 ProcessOutcome::Consumed
             }
             CmdKind::EnterVisual(kind) => {
@@ -4618,17 +4625,17 @@ impl VimState {
                         }
                     }
                 }
-                self.end_command();
+                self.end_command(ctx);
                 ProcessOutcome::Consumed
             }
             CmdKind::Normal(cmd) => {
                 self.execute_normal_cmd(ctx, cmd);
-                self.end_command();
+                self.end_command(ctx);
                 ProcessOutcome::Consumed
             }
             CmdKind::Visual(cmd) => {
                 self.execute_visual_cmd(ctx, cmd);
-                self.end_command();
+                self.end_command(ctx);
                 ProcessOutcome::Consumed
             }
         }
@@ -4701,7 +4708,7 @@ impl VimState {
         // an operator that entered insert mode (visual `c`) keeps its group
         // open so deletion + typing undo as one step
         if self.insert_session.is_none() {
-            self.end_edit();
+            self.end_edit(ctx);
         }
         self.bump_if_edited(ctx, gen_before);
         self.reset_pending();
@@ -4737,7 +4744,7 @@ impl VimState {
         // an operator that entered insert mode (cw/ciw/cc) keeps its group
         // open so deletion + typing undo as one step
         if self.insert_session.is_none() {
-            self.end_edit();
+            self.end_edit(ctx);
         }
         // an indent with nothing to do (`<<` at col 0) is vim's bell —
         // audit L3
@@ -4882,7 +4889,7 @@ impl VimState {
     }
 
     /// End of a complete top-level command.
-    fn end_command(&mut self) {
+    fn end_command(&mut self, ctx: &mut Ctx) {
         if self.insert_session.is_none() {
             self.commit_change_record();
         }
@@ -4891,7 +4898,7 @@ impl VimState {
         self.register_pending = false;
         self.cmd_seq.clear();
         if self.insert_session.is_none() {
-            self.end_edit();
+            self.end_edit(ctx);
         }
     }
 
@@ -5042,7 +5049,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, false, register);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 // a full no-op (empty line) is vim's bell, not silence
                 if self.edit_generation == gen {
@@ -5057,7 +5064,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::delete_chars(self, ctx, count, true, register);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 // line start: nothing backward to delete — vim beeps
                 if self.edit_generation == gen {
@@ -5169,7 +5176,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 let done = ops::toggle_chars(self, ctx, count);
-                self.end_edit();
+                self.end_edit(ctx);
                 if done {
                     self.bump_if_edited(ctx, gen);
                 } else {
@@ -5185,7 +5192,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::put(self, ctx, register, count, true);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
             }
             // ]p / [p: linewise paste with the indent ADJUSTED to the
@@ -5265,7 +5272,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 self.edit_insert(ctx, insert_at, &text);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.cursor.offset =
                     ctx.buf.first_non_blank(ctx.buf.offset_to_line(cursor_at));
                 self.cursor.desired_col = None;
@@ -5307,7 +5314,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 crate::ops::put_ex(self, ctx, register, count, true, true);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
             }
             // gP: paste before, cursor just past the new text
@@ -5317,7 +5324,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 crate::ops::put_ex(self, ctx, register, count, false, true);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
             }
             // P: put before the cursor / above the current line
@@ -5327,7 +5334,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::put(self, ctx, register, count, false);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
             }
             // J: join with separator logic (space unless line ends in
@@ -5337,7 +5344,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 let performed = ops::join_lines(self, ctx, count, false);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 // at EOF there is no next line to join — vim beeps (a count
                 // running past the buffer end beeps after the partial joins)
@@ -5351,7 +5358,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 let performed = ops::join_lines(self, ctx, count, true);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 if performed < count.max(2) - 1 {
                     self.note_bell(ctx);
@@ -5398,7 +5405,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::apply(self, ctx, op, &span, self.register);
-                self.end_edit();
+                self.end_edit(ctx);
                 if self.edit_generation == gen {
                     // `<<` with no indent to remove (etc.) is vim's bell —
                     // audit L3
@@ -5854,7 +5861,7 @@ impl VimState {
         }
         self.cursor.offset = clamp_cursor(ctx.buf, cursor_to);
         self.cursor.desired_col = None;
-        self.end_edit();
+        self.end_edit(ctx);
         self.bump(ctx);
         self.finish_visual_op(ctx);
     }
@@ -6072,7 +6079,7 @@ impl VimState {
                         };
                     }
                 }
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump(ctx);
                 self.reset_pending();
                 self.cursor.desired_col = None;
@@ -6175,7 +6182,7 @@ impl VimState {
                         };
                     }
                 }
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump(ctx);
                 self.finish_visual_op(ctx);
             }
@@ -6259,7 +6266,7 @@ impl VimState {
                     self.cursor.offset = ctx.buf.line_start(line);
                     self.increment_number_at_cursor(ctx, delta);
                 }
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 self.reset_pending();
                 if matches!(self.mode, Mode::Visual { .. }) {
@@ -6282,7 +6289,7 @@ impl VimState {
                 self.begin_edit();
                 self.cursor.offset = span.start;
                 let performed = ops::join_lines(self, ctx, requested, literal);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump(ctx);
                 // a selection/count reaching past the buffer's last line
                 // leaves joins undone — vim beeps
@@ -6332,7 +6339,7 @@ impl VimState {
                     ops::apply(self, ctx, op, &line_span, self.register);
                 }
                 if self.insert_session.is_none() {
-                    self.end_edit();
+                    self.end_edit(ctx);
                 }
                 self.bump_if_edited(ctx, gen_before);
                 self.reset_pending();
@@ -6485,14 +6492,14 @@ impl VimState {
             self.begin_edit();
             let done =
                 ops::replace_chars_from_neighbor(self, ctx, key == Key::ctrl_char('e'), count);
-            self.end_edit();
+            self.end_edit(ctx);
             if done {
                 self.bump_if_edited(ctx, gen);
             } else {
                 self.note_bell(ctx);
             }
             self.char_arg = None;
-            self.end_command();
+            self.end_command(ctx);
             return ProcessOutcome::Consumed;
         }
         // <CR> carries a printable meaning ONLY for the replace commands:
@@ -6529,7 +6536,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 let done = ops::replace_chars(self, ctx, c, count);
-                self.end_edit();
+                self.end_edit(ctx);
                 if done {
                     self.bump_if_edited(ctx, gen);
                 } else {
@@ -6550,7 +6557,7 @@ impl VimState {
                 let gen = self.edit_generation;
                 self.begin_edit();
                 ops::visual_replace(self, ctx, c);
-                self.end_edit();
+                self.end_edit(ctx);
                 self.bump_if_edited(ctx, gen);
                 self.reset_pending();
                 if matches!(self.mode, Mode::Visual { .. }) {
@@ -6607,7 +6614,7 @@ impl VimState {
                         None => self.note_bell(ctx),
                     }
                     self.char_arg = None;
-                    self.end_command();
+                    self.end_command(ctx);
                     return ProcessOutcome::Consumed;
                 }
                 // the register is the SOURCE OF TRUTH for a-z once it was
@@ -6669,7 +6676,7 @@ impl VimState {
             }
         }
         self.char_arg = None;
-        self.end_command();
+        self.end_command(ctx);
         ProcessOutcome::Consumed
     }
 }

@@ -115,7 +115,9 @@ pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), Strin
     let mut o = 0;
     while o < len {
         let Some(c) = buf.char_at(o) else {
-            return Err(format!("char_at({o}) = None: must return Some at a character boundary"));
+            return Err(format!(
+                "char_at({o}) = None: must return Some at a character boundary"
+            ));
         };
         // Multibyte characters: mid offsets must answer the same as the
         // boundary — the engine's stored-offset fallback
@@ -168,7 +170,9 @@ pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), Strin
             ));
         }
         if buf.prev_char_offset(len + 42).is_some() {
-            return Err("prev_char_offset(len+42) must be None (out-of-range offset refused)".into());
+            return Err(
+                "prev_char_offset(len+42) must be None (out-of-range offset refused)".into(),
+            );
         }
         if buf.prev_char_offset(0).is_some() {
             return Err("prev_char_offset(0) must be None".into());
@@ -180,7 +184,10 @@ pub fn buffer_read_contract(buf: &(impl VimBuffer + ?Sized)) -> Result<(), Strin
             steps += 1;
             o = prev;
             if steps > chars {
-                return Err("prev_char_offset chain does not converge (steps exceed the character count)".into());
+                return Err(
+                    "prev_char_offset chain does not converge (steps exceed the character count)"
+                        .into(),
+                );
             }
         }
         if o != 0 || steps != chars {
@@ -270,6 +277,157 @@ pub fn engine_smoke_contract(
         vim.handle_key(&mut ctx, Key::escape());
     }
     assert_content(buf, "gammax\nlpha\nbeta\n")?;
+    Ok(())
+}
+
+/// Undo-group closure contract (the `end_undo_group` signal, since 0.2.3):
+/// every group the engine ANNOUNCES through `begin_undo_group` is closed
+/// deterministically by a matching `end_undo_group(id)` — a host must never
+/// have to infer closure from the mode ("push when not in Insert/Replace"),
+/// the inference that let an edit-less `<Esc>` strand a snapshot (vim's
+/// `iZ<esc>u` reporting "Already at oldest change").
+///
+/// Runs the engine against the contract's own recording host, on a fresh
+/// `VimState` per sequence. Items checked:
+///
+/// - `i` + text + `<Esc>`: exactly one begin, and after the `<Esc>` exactly
+///   one end with the SAME id — the closed insert session;
+/// - mid-session (`i` + text, no `<Esc>` yet): the begin has arrived, the
+///   end must NOT have (the group is still open);
+/// - an edit-less `i<Esc>`: no begin and no end at all — an unannounced
+///   group must not produce a spurious close signal;
+/// - a normal-mode command (`x`): one begin and one end within the same key;
+/// - two consecutive commands (`x` twice): two begins with DIFFERENT ids,
+///   each closed.
+pub fn undo_group_closure_contract(buf: &mut impl VimBufferMut) -> Result<(), String> {
+    if !buf.is_empty() {
+        return Err("undo_group_closure_contract requires an empty buffer".into());
+    }
+    buf.insert_text(0, "alpha\nbeta\n");
+    let paired = |host: &TckUndoHost| -> Result<(), String> {
+        if host.begins.len() != host.ends.len() {
+            return Err(format!(
+                "announced groups (begins {:?}) and close signals (ends {:?}) do not pair up",
+                host.begins, host.ends
+            ));
+        }
+        for (b, e) in host.begins.iter().zip(&host.ends) {
+            if b != e {
+                return Err(format!(
+                    "close signal id {e} does not match the announced group id {b} (begins {:?}, ends {:?})",
+                    host.begins, host.ends
+                ));
+            }
+        }
+        Ok(())
+    };
+    let reset = |buf: &mut dyn VimBufferMut| {
+        buf.delete_range(0..buf.len());
+        buf.insert_text(0, "alpha\nbeta\n");
+    };
+
+    // 1. i + Z + <Esc>: one announced group, closed by the esc.
+    {
+        let mut host = TckUndoHost::default();
+        let mut vim = VimState::new();
+        feed(&mut vim, buf, &mut host, "i");
+        type_text(&mut vim, buf, &mut host, "Z");
+        {
+            let mut ctx = Ctx {
+                buf,
+                host: &mut host,
+            };
+            vim.handle_key(&mut ctx, Key::escape());
+        }
+        if host.begins.len() != 1 || host.ends.len() != 1 {
+            return Err(format!(
+                "i Z <Esc>: expected exactly one begin/end pair, got begins {:?} ends {:?}",
+                host.begins, host.ends
+            ));
+        }
+        paired(&host)?;
+        reset(buf);
+    }
+
+    // 2. Mid-session: begin arrived, end must not have.
+    {
+        let mut host = TckUndoHost::default();
+        let mut vim = VimState::new();
+        feed(&mut vim, buf, &mut host, "i");
+        type_text(&mut vim, buf, &mut host, "Z");
+        if host.begins.len() != 1 {
+            return Err(format!(
+                "i Z (no esc yet): the insert session must have announced its group, got begins {:?}",
+                host.begins
+            ));
+        }
+        if !host.ends.is_empty() {
+            return Err(format!(
+                "i Z (no esc yet): a close signal before the session ended (ends {:?})",
+                host.ends
+            ));
+        }
+        reset(buf);
+    }
+
+    // 3. Edit-less i<Esc>: no begin, no end — an unannounced group must not
+    //    produce a spurious close signal.
+    {
+        let mut host = TckUndoHost::default();
+        let mut vim = VimState::new();
+        feed(&mut vim, buf, &mut host, "i");
+        {
+            let mut ctx = Ctx {
+                buf,
+                host: &mut host,
+            };
+            vim.handle_key(&mut ctx, Key::escape());
+        }
+        if !host.begins.is_empty() || !host.ends.is_empty() {
+            return Err(format!(
+                "edit-less i <Esc>: no group was announced, yet the host saw begins {:?} ends {:?}",
+                host.begins, host.ends
+            ));
+        }
+    }
+
+    // 4. One normal-mode command: begin + end within the same key.
+    {
+        let mut host = TckUndoHost::default();
+        let mut vim = VimState::new();
+        feed(&mut vim, buf, &mut host, "x");
+        if host.begins.len() != 1 || host.ends.len() != 1 {
+            return Err(format!(
+                "x: expected the command's group to open and close within the key, got begins {:?} ends {:?}",
+                host.begins, host.ends
+            ));
+        }
+        paired(&host)?;
+        reset(buf);
+    }
+
+    // 5. Two consecutive commands: distinct ids, each closed.
+    {
+        let mut host = TckUndoHost::default();
+        let mut vim = VimState::new();
+        feed(&mut vim, buf, &mut host, "xx");
+        if host.begins.len() != 2 || host.ends.len() != 2 {
+            return Err(format!(
+                "xx: expected two begin/end pairs, got begins {:?} ends {:?}",
+                host.begins, host.ends
+            ));
+        }
+        paired(&host)?;
+        if host.begins[0] == host.begins[1] {
+            return Err(format!(
+                "xx: consecutive commands must open DISTINCT groups, got {:?}",
+                host.begins
+            ));
+        }
+        reset(buf);
+    }
+
+    assert_content(buf, "alpha\nbeta\n")?;
     Ok(())
 }
 
@@ -590,7 +748,11 @@ fn readonly_probe(
     }
     host.clipboard = None;
     run(vim, host, &["\"", "+", "y", "i", "w"]);
-    let clipped = vim.registers.get('+').map(|r| r.text.clone()).unwrap_or_default();
+    let clipped = vim
+        .registers
+        .get('+')
+        .map(|r| r.text.clone())
+        .unwrap_or_default();
     if clipped != "beta" {
         return Err(format!(
             "\"+yiw in read-only mode yanked {clipped:?} (expected \"beta\")"
@@ -614,7 +776,9 @@ fn readonly_probe(
     }
     let after = run(vim, host, &[]);
     if after != before {
-        return Err(format!("viewing keystrokes modified the buffer ({before:?} → {after:?})"));
+        return Err(format!(
+            "viewing keystrokes modified the buffer ({before:?} → {after:?})"
+        ));
     }
     Ok(())
 }
@@ -636,6 +800,41 @@ impl VimHost for TckHost {
     }
     fn set_search_highlights(&mut self, _: &[Range<usize>], _: Option<Range<usize>>) {}
     fn begin_undo_group(&mut self, _: u64, _: usize) {}
+    fn undo(&mut self) -> Option<usize> {
+        None
+    }
+    fn redo(&mut self) -> Option<usize> {
+        None
+    }
+    fn changed(&mut self) {}
+}
+
+/// Recording host for [`undo_group_closure_contract`]: the undo-group
+/// protocol calls are logged for pairing, everything else is inert. The
+/// contract is about the SIGNAL pairing (begin/end symmetry, closure
+/// determinism), not undo data — `undo`/`redo` report an empty stack.
+#[derive(Default)]
+pub struct TckUndoHost {
+    pub begins: Vec<u64>,
+    pub ends: Vec<u64>,
+}
+
+impl VimHost for TckUndoHost {
+    fn viewport(&self) -> (usize, usize) {
+        (0, 24)
+    }
+    fn scroll_to_line(&mut self, _: usize) {}
+    fn clipboard_write(&mut self, _: &str) {}
+    fn clipboard_read(&self) -> Option<String> {
+        None
+    }
+    fn set_search_highlights(&mut self, _: &[Range<usize>], _: Option<Range<usize>>) {}
+    fn begin_undo_group(&mut self, id: u64, _cursor_offset: usize) {
+        self.begins.push(id);
+    }
+    fn end_undo_group(&mut self, id: u64) {
+        self.ends.push(id);
+    }
     fn undo(&mut self) -> Option<usize> {
         None
     }
@@ -828,6 +1027,13 @@ mod tests {
         let mut host = TckHost;
         engine_smoke_contract(&mut buf, &mut host).unwrap();
         assert_eq!(buf.0, "gammax\nlpha\nbeta\n");
+    }
+
+    #[test]
+    fn undo_group_closure_passes_reference_impl() {
+        let mut buf = TckStrBuf::default();
+        undo_group_closure_contract(&mut buf).unwrap();
+        assert_eq!(buf.0, "alpha\nbeta\n");
     }
 
     /// Minimal form of a read-only host: `impl VimBuffer` + a **zero-method**

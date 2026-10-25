@@ -116,6 +116,20 @@ pub trait VimHost {
     /// the edit funnels, never around its own undo/redo swaps.
     fn begin_undo_group(&mut self, id: u64, cursor_offset: usize);
 
+    /// A logical undo unit completed (insert session exit, operator done,
+    /// command done). Called by the engine right after `begin_undo_group`
+    /// was announced and the unit's last edit landed — symmetric with
+    /// [`VimHost::begin_undo_group`]. The host captures AFTER-text +
+    /// AFTER-cursor from its own storage (it already saved BEFORE-text +
+    /// BEFORE-cursor at `begin_undo_group`, keyed by `id`) and pushes ONE
+    /// undo entry.
+    ///
+    /// Removing this signal forced every host to infer closure (typically
+    /// "push when not in Insert/Replace after a key"), which let an
+    /// edit-less `<Esc>` strand the snapshot until the next edit overwrote
+    /// it (vim's `iZ<esc>u` reporting "Already at oldest change").
+    fn end_undo_group(&mut self, _id: u64) {}
+
     /// Undo the most recent group. Returns the cursor offset to restore,
     /// or `None` if there is nothing to undo.
     fn undo(&mut self) -> Option<usize>;
@@ -308,6 +322,7 @@ impl VimHost for RoHost<'_> {
         self.inner.set_search_highlights(matches, current)
     }
     fn begin_undo_group(&mut self, _id: u64, _cursor_offset: usize) {}
+    fn end_undo_group(&mut self, _id: u64) {}
     fn undo(&mut self) -> Option<usize> {
         None
     }
