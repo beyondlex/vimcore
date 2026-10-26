@@ -1111,6 +1111,79 @@ impl VimState {
         }
 
         self.pending_keys.push_back(key.clone());
+        self.run_pipeline(ctx)
+    }
+
+    /// True when the engine is HOLDING keystrokes that wait for a user
+    /// mapping to complete (vim's ambiguous-prefix state: `<Leader>` pressed,
+    /// insert-mode `j` of `jk`). The host's timeout contract: when a feed
+    /// returns `Consumed` and this is true, start a `'timeoutlen'` timer;
+    /// when it fires, call [`VimState::pending_timeout`]. The timer is the
+    /// HOST's business — the engine is a pure synchronous state machine and
+    /// never measures time itself.
+    ///
+    /// A mapping RHS that opened a prompt keeps its queued continuation, so
+    /// the probe reports false while the prompt is open (the prompt owns the
+    /// queue; a timeout settle must not steal its text).
+    pub fn has_pending_prefix(&self) -> bool {
+        !self.pending_keys.is_empty() && !matches!(self.mode, Mode::CommandLine { .. })
+    }
+
+    /// The keys currently held by [`VimState::has_pending_prefix`], in
+    /// arrival order — the status-line's chord-waiting hint (`<Space>…`).
+    /// Empty when nothing is pending.
+    pub fn pending_prefix_keys(&self) -> Vec<Key> {
+        self.pending_keys.iter().cloned().collect()
+    }
+
+    /// vim's `'timeoutlen'` flush: settle the held keys as if the timeout
+    /// had expired — each executes AS TYPED (no further mapping resolution),
+    /// while everything else behaves like a real keystroke: a key with its
+    /// own meaning runs it (insert-mode `j` is declined back to the host for
+    /// text placement; a digit arms the count), a live builtin prefix (`g`
+    /// of `gg`) stays armed, and a key that is nothing at all hits the
+    /// existing unknown-key path (bell). The held keys are recorded exactly
+    /// once, at settle time — they were never recorded while waiting (the
+    /// wait happens before the pipeline's record site), so macros and `.`
+    /// learn the keys the user actually typed.
+    ///
+    /// No-op when nothing is pending or a prompt is open. Returns `Unknown`
+    /// when a settled key was declined (insert-mode printables: the host
+    /// places the parked text, same contract as `handle_key`).
+    pub fn pending_timeout(&mut self, ctx: &mut Ctx) -> KeyResult {
+        if !self.has_pending_prefix() {
+            return KeyResult::Consumed;
+        }
+        // vim: after the timeout the pending characters are no longer
+        // candidates for a mapping. `no_remap_left` is the engine's existing
+        // "these keys skip the mapping table" budget (`:noremap` expansions
+        // use it); sizing it to the held segment covers exactly the settle.
+        self.no_remap_left = self.pending_keys.len();
+        self.run_pipeline(ctx)
+    }
+
+    /// Discard the held keys WITHOUT replaying them (vim discards pending
+    /// input when the focus leaves a window). The host's cancel path —
+    /// session end, pane switch, blur; a `'timeoutlen'` timer that should
+    /// never fire. Contrast [`VimState::pending_timeout`], which executes
+    /// the held keys as typed.
+    pub fn drop_pending_prefix(&mut self) {
+        self.pending_keys.clear();
+        // the dropped segment can only be user-typed keys (an expansion
+        // resolves within one `handle_key`), but a stale budget would
+        // silently bypass mapping resolution for LATER keystrokes — same
+        // cleanup the runaway guard does
+        self.no_remap_left = 0;
+        self.expansion_keys_left = 0;
+        self.expanding_mapping = false;
+    }
+
+    /// The pending-keys walk shared by [`VimState::handle_key`] and
+    /// [`VimState::pending_timeout`]: resolve the queue front through the
+    /// mapping table, drain what resolves, and leave whatever is still
+    /// waiting for the next keystroke. Returns `Unknown` when any processed
+    /// key was declined (the same contract as `handle_key`).
+    fn run_pipeline(&mut self, ctx: &mut Ctx) -> KeyResult {
         let mut guard = 0usize;
         let mut any_unknown = false;
 
