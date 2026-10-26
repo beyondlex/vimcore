@@ -8,6 +8,38 @@ release.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version numbers match `Cargo.toml`.
 
+## [0.5.0] - 2026-10-26
+
+### Added
+
+- **`VimState::pending_timeout(&mut Ctx)`** — vim's `'timeoutlen'` flush for
+  held mapping prefixes (`<Leader>` waiting for its next key, insert-mode
+  `j` of `jk`). The held keys execute AS TYPED: no further mapping
+  resolution (the existing `no_remap_left` budget covers exactly the held
+  segment), a digit arms the count, a builtin prefix (`g` of `gg`) stays
+  armed, and a declined insert-mode printable comes back `Unknown` with the
+  char parked for the host to place. The engine never measures time itself —
+  the timer is the host's.
+- **`VimState::has_pending_prefix()` / `pending_prefix_keys()`** — the
+  timer-arming probe and the held keys for a status-line chord hint. False
+  while a prompt is open (a mapping RHS entering the prompt keeps its
+  queued continuation, and a settle must not steal prompt text).
+- **`VimState::drop_pending_prefix()`** — discard the held keys without
+  replaying (vim discarding pending input when the focus leaves a window);
+  the host's cancel path for session end / pane switch.
+- **`VimHostRo::dispatch_host_action_hinted`** (default: no-op) — the
+  `:action` bridge now exists on the read-only half, and `RoHost` forwards
+  it. An action-style mapping chord completes the same way on a viewer
+  instead of dying there.
+
+### Behavior
+
+- Held keys are recorded exactly once, AT SETTLE TIME: the wait happens
+  before the pipeline's record site, so macros and `.` learn the keys the
+  user actually typed — no double capture, no missing capture.
+- After a timeout the held prefix can no longer complete its mapping (vim:
+  the builtin path is restored — `g` stays armed and `s` runs as a builtin).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added
