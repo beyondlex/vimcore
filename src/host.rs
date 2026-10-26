@@ -308,6 +308,18 @@ pub trait VimHostRo {
         self.request_close();
     }
 
+    /// Bridge for `:map <Leader>x :action SomeAction<CR>` — dispatch a HOST
+    /// application action by id (IdeaVim's `:action` bridge). Present on the
+    /// READ-ONLY half too: a mapping chord completes the same way on a
+    /// read-only pane, and dropping it there would make action-style
+    /// mappings dead keys on every viewer. `strict` is true for
+    /// host-specific config layers (a miss is worth reporting via
+    /// `status_message`) and false for shared user layers (mappings aimed at
+    /// other apps are expected to miss: ignore quietly).
+    fn dispatch_host_action_hinted(&mut self, id: &str, strict: bool) {
+        let _ = (id, strict);
+    }
+
     /// Opt-in [`MotionHook`] (folds, diff chunks). Default `None`.
     fn motion_hook(&mut self) -> Option<&mut dyn MotionHook> {
         None
@@ -374,6 +386,9 @@ impl VimHost for RoHost<'_> {
     fn request_close_forced(&mut self, forced: bool) {
         self.inner.request_close_forced(forced)
     }
+    fn dispatch_host_action_hinted(&mut self, id: &str, strict: bool) {
+        self.inner.dispatch_host_action_hinted(id, strict)
+    }
     fn status_message(&mut self, message: &str) {
         self.inner.status_message(message)
     }
@@ -388,9 +403,6 @@ impl VimHost for RoHost<'_> {
     }
     fn last_buffer(&mut self) -> bool {
         false
-    }
-    fn dispatch_host_action_hinted(&mut self, id: &str, strict: bool) {
-        let _ = (id, strict);
     }
     fn motion_hook(&mut self) -> Option<&mut dyn MotionHook> {
         self.inner.motion_hook()
