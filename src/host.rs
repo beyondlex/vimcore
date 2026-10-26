@@ -142,7 +142,19 @@ pub trait VimHost {
     /// "push when not in Insert/Replace after a key"), which let an
     /// edit-less `<Esc>` strand the snapshot until the next edit overwrote
     /// it (vim's `iZ<esc>u` reporting "Already at oldest change").
-    fn end_undo_group(&mut self, _id: u64) {}
+    ///
+    /// `cursor_offset` is the engine cursor AFTER the unit's last edit —
+    /// symmetric with [`VimHost::begin_undo_group`]'s pre-edit cursor. A
+    /// host that pushes its undo entry HERE (instead of at its own flush)
+    /// can build the complete entry: begin gave the before-text and the
+    /// before-cursor, close gives the after-cursor, and its storage holds
+    /// the after-text. Pushing at closure is what keeps a macro replay's
+    /// history intact: a replayed key stream runs several commands inside
+    /// ONE `handle_key` call, each closing its group — a host that waits
+    /// for its flush loses every unit but the last (the staged slot is
+    /// overwritten by the next group), and a replayed `u` lands on the
+    /// wrong entry.
+    fn end_undo_group(&mut self, _id: u64, _cursor_offset: usize) {}
 
     /// Undo the most recent group. Returns the cursor offset to restore,
     /// or `None` if there is nothing to undo.
@@ -342,7 +354,7 @@ impl VimHost for RoHost<'_> {
         self.inner.set_search_highlights(matches, current)
     }
     fn begin_undo_group(&mut self, _id: u64, _cursor_offset: usize) {}
-    fn end_undo_group(&mut self, _id: u64) {}
+    fn end_undo_group(&mut self, _id: u64, _cursor_offset: usize) {}
     fn undo(&mut self) -> Option<usize> {
         None
     }

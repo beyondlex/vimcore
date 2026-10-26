@@ -1641,7 +1641,7 @@ impl VimState {
         // announced (an edit-less `i<Esc>` never did, so no spurious push).
         if self.undo_group_announced {
             if let Some(id) = self.open_undo {
-                ctx.host.end_undo_group(id);
+                ctx.host.end_undo_group(id, self.cursor.offset);
             }
         }
         self.open_undo = None;

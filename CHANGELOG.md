@@ -8,6 +8,25 @@ release.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version numbers match `Cargo.toml`.
 
+## [0.4.0] - 2026-10-26
+
+### Changed (breaking)
+
+- **`VimHost::end_undo_group(id)` now takes the post-edit cursor:
+  `end_undo_group(id, cursor_offset)`** — symmetric with
+  `begin_undo_group(id, cursor_offset)`'s pre-edit cursor. A host that
+  pushes its undo entry at closure (recommended — see below) can build the
+  complete entry from what it already holds: begin gave before-text +
+  before-cursor, close gives after-cursor, storage holds after-text.
+
+### Why push at closure
+
+A macro replay runs several commands inside ONE `handle_key` call, each
+closing its group. A host that waits for its own flush loses every unit
+but the last (the next `begin_undo_group` overwrites the staged
+snapshot), and a replayed `u` lands on the wrong entry. Pushing in the
+`end_undo_group` hook keeps the replay's history intact.
+
 ## [0.3.0] - 2026-10-26
 
 The M1 engine prerequisites: shared session globals for multi-panel hosts,

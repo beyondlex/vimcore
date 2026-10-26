@@ -832,7 +832,8 @@ impl VimHost for TckUndoHost {
     fn begin_undo_group(&mut self, id: u64, _cursor_offset: usize) {
         self.begins.push(id);
     }
-    fn end_undo_group(&mut self, id: u64) {
+    fn end_undo_group(&mut self, id: u64, cursor_offset: usize) {
+        let _ = cursor_offset;
         self.ends.push(id);
     }
     fn undo(&mut self) -> Option<usize> {
