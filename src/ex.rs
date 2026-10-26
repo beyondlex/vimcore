@@ -220,4 +220,14 @@ impl VimState {
     pub fn ex_completions(&self, line: &str) -> Vec<String> {
         self.ex_registry.completions(line)
     }
+
+    /// Execute one Ex line OUTSIDE the `:` prompt — the host-UI bridge the
+    /// registry exists for: a host with its own command line (richer
+    /// completion, window integration) parses nothing itself; the line goes
+    /// through the same dispatch the prompt uses (registered host commands
+    /// first, then the built-in table). Ranges, `!`, `|` splitting and the
+    /// error messages are the engine's.
+    pub fn exec_ex(&mut self, ctx: &mut Ctx, line: &str) {
+        self.execute_ex(ctx, line);
+    }
 }

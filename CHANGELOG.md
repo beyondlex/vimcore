@@ -8,6 +8,16 @@ release.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version numbers match `Cargo.toml`.
 
+## [0.4.1] - 2026-10-26
+
+### Added
+
+- **`VimState::exec_ex(&mut Ctx, line)`**: execute one Ex line outside the
+  `:` prompt — the host-UI bridge the registry exists for. A host with its
+  own command line parses nothing itself; the line takes the same dispatch
+  (registered host commands first, then built-ins), with ranges, `!` and
+  `|` handled by the engine.
+
 ## [0.4.0] - 2026-10-26
 
 ### Changed (breaking)
